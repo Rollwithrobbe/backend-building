@@ -61,7 +61,7 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
   // that actually resolves for it (the raw numeric id form returns a "does not exist" error).
   const mediaRes = await fetch(
     `https://graph.instagram.com/me/media` +
-    `?fields=id,caption,timestamp,permalink,media_type,media_product_type` +
+    `?fields=id,caption,timestamp,permalink,media_type,media_product_type,thumbnail_url,media_url` +
     `&limit=50&access_token=${encodeURIComponent(token)}`
   );
   const mediaData = await mediaRes.json();
@@ -112,6 +112,9 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
           // later (e.g. a warm-up brief ending), only newly-discovered videos pick up the new
           // rate; this one keeps what applied when it was found. Editable per-video afterward.
           pay_amount: brand.base_pay,
+          // reels don't always return thumbnail_url reliably — media_url is the fallback,
+          // itself a working still image for that case
+          thumbnail_url: media.thumbnail_url || media.media_url || null,
         }),
       });
       results.push({ id: media.id, action: 'discovered', views: viewCount, status: alreadyHit ? 'hit' : 'tracking' });

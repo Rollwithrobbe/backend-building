@@ -76,7 +76,7 @@ async function scoutBrandAccount(brand, CLIENT_KEY, CLIENT_SECRET, SUPABASE_URL,
     const body = { max_count: 20 };
     if (cursor) body.cursor = cursor;
     const listRes = await fetch(
-      'https://open.tiktokapis.com/v2/video/list/?fields=id,title,view_count,create_time,share_url',
+      'https://open.tiktokapis.com/v2/video/list/?fields=id,title,view_count,create_time,share_url,cover_image_url',
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -130,6 +130,7 @@ async function scoutBrandAccount(brand, CLIENT_KEY, CLIENT_SECRET, SUPABASE_URL,
           status: alreadyHit ? 'hit' : 'tracking',
           earned: alreadyHit,
           pay_amount: brand.base_pay,
+          thumbnail_url: video.cover_image_url || null,
         }),
       });
       results.push({ id: video.id, action: 'discovered', views: viewCount, status: alreadyHit ? 'hit' : 'tracking' });

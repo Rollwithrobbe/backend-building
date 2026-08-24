@@ -117,6 +117,7 @@ async function scoutBrandChannel(brand, YT_KEY, SUPABASE_URL, sbHeaders) {
           // later (e.g. a warm-up brief ending), only newly-discovered videos pick up the new
           // rate; this one keeps what applied when it was found. Editable per-video afterward.
           pay_amount: brand.base_pay,
+          thumbnail_url: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.default?.url || null,
         }),
       });
       results.push({ id: v.id, action: 'discovered', views: viewCount, status: alreadyHit ? 'hit' : 'tracking' });
