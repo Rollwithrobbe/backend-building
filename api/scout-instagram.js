@@ -77,9 +77,10 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
 
   const results = [];
   for (const media of reels) {
-    const viewCount = await fetchViews(media.id, token);
+    const debug = [];
+    const viewCount = await fetchViews(media.id, token, debug);
     if (viewCount === null) {
-      results.push({ id: media.id, action: 'skipped', reason: 'could not read view count' });
+      results.push({ id: media.id, action: 'skipped', reason: 'could not read view count', debug: debug[0] });
       continue;
     }
 
@@ -138,8 +139,9 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
 // Instagram has renamed/consolidated its view-count metric a few times across API
 // versions ("views" is the current unified one; older versions used "plays" or
 // "video_views"). Try each in order and use whichever the account/API version accepts.
-async function fetchViews(mediaId, token) {
+async function fetchViews(mediaId, token, debug) {
   const metricsToTry = ['views', 'plays', 'video_views'];
+  const errors = [];
   for (const metric of metricsToTry) {
     const res = await fetch(
       `https://graph.instagram.com/${mediaId}/insights?metric=${metric}&access_token=${encodeURIComponent(token)}`
@@ -147,6 +149,8 @@ async function fetchViews(mediaId, token) {
     const data = await res.json();
     const value = data?.data?.[0]?.values?.[0]?.value;
     if (typeof value === 'number') return value;
+    if (data.error) errors.push(`${metric}: ${data.error.message}`);
   }
+  if (debug) debug.push(errors.join(' | '));
   return null;
 }
