@@ -1151,6 +1151,18 @@ function previousRangeBounds(range){
   const prevStart = new Date(prevEnd.getTime() - span);
   return { start: prevStart, end: prevEnd };
 }
+// Tracked Content (Supabase) attributes an earned date from the platform's own posted_at,
+// same role earnedDate() plays for the manual system. brandName filters to one brand's rows
+// when given (used by the by-brand breakdown), or sums across everything when omitted.
+function trackedContentEarnedBetween(start, end, brandName){
+  if(!TRACKED_CONTENT_DATA) return 0;
+  return TRACKED_CONTENT_DATA.filter(r => {
+    if(r.status!=='hit' || !r.posted_at) return false;
+    if(brandName && r.brands?.name !== brandName) return false;
+    const d = new Date(r.posted_at);
+    return d>=start && d<=end;
+  }).reduce((s,r)=> s + Number(r.brands?.base_pay||0), 0);
+}
 function sumEarnedBetween(start, end){
   let sum = 0;
   DATA.content.forEach(c => {
@@ -1160,6 +1172,7 @@ function sumEarnedBetween(start, end){
     if(d>=start && d<=end) sum += contentEarnings(c).total;
   });
   sum += cpmBonusInRange(start, end); // CPM bonuses count as earned the moment they're paid
+  sum += trackedContentEarnedBetween(start, end); // automated pipeline earnings
   return sum;
 }
 function sumReceivedBetween(start, end){
@@ -1192,6 +1205,18 @@ function buildSeries(range){
         byBrand[brand.name] = (byBrand[brand.name]||0) + cpm;
       }
     });
+    // automated Tracked Content earnings, grouped by whichever brand's channel it came from
+    if(TRACKED_CONTENT_DATA){
+      TRACKED_CONTENT_DATA.forEach(r => {
+        if(r.status!=='hit' || !r.posted_at) return;
+        const d = new Date(r.posted_at);
+        if(d<b.start || d>b.end) return;
+        const amt = Number(r.brands?.base_pay||0);
+        total += amt;
+        const key = r.brands?.name || 'Unassigned (automated)';
+        byBrand[key] = (byBrand[key]||0) + amt;
+      });
+    }
     const breakdown = Object.entries(byBrand).sort((a,b)=>b[1]-a[1]).map(([name,sum])=>({name,sum}));
     return { label: b.label, value: total, breakdown };
   });
@@ -1289,8 +1314,8 @@ function renderChart(series){
   return renderLineChartSvg(series);
 }
 function renderBrandBreakdown(bounds){
-  if(DATA.brands.length===0) return emptyState('No brands yet','Add a brand to see the breakdown.');
-  const rows = DATA.brands.map(b => {
+  // Manual brands first, same as always...
+  let rows = DATA.brands.map(b => {
     let sum = 0;
     DATA.content.filter(c=>c.brandId===b.id).forEach(c => {
       if(!isEarning(c)) return;
@@ -1300,7 +1325,26 @@ function renderBrandBreakdown(bounds){
     });
     sum += cpmBonusInRange(bounds.start, bounds.end, b.id); // CPM bonuses count as earned the moment they're paid
     return { brand:b, sum };
-  }).filter(r=>r.sum>0).sort((a,b)=>b.sum-a.sum);
+  });
+  // ...then fold in automated Tracked Content earnings by brand name. Supabase brands (PureFi,
+  // etc.) are a separate table from DATA.brands, so a name match adds onto an existing row;
+  // no match creates a synthetic row (fallback color, since Supabase brands don't have one)
+  // so brands that only exist in the automated system still show up here.
+  const FALLBACK_COLORS = ['#9a7ec2','#5aa89e','#c1834f','#5b8ab0','#6f8f6a'];
+  let fallbackIdx = 0;
+  if(TRACKED_CONTENT_DATA){
+    TRACKED_CONTENT_DATA.forEach(r => {
+      if(r.status!=='hit' || !r.posted_at) return;
+      const d = new Date(r.posted_at);
+      if(d<bounds.start || d>bounds.end) return;
+      const amt = Number(r.brands?.base_pay||0);
+      const name = r.brands?.name || 'Unassigned (automated)';
+      const existing = rows.find(row => row.brand.name === name);
+      if(existing){ existing.sum += amt; }
+      else{ rows.push({ brand: { name, color: FALLBACK_COLORS[fallbackIdx++ % FALLBACK_COLORS.length] }, sum: amt }); }
+    });
+  }
+  rows = rows.filter(r=>r.sum>0).sort((a,b)=>b.sum-a.sum);
   if(rows.length===0) return `<div class="table-wrap"><div class="empty" style="padding:24px 10px;">Nothing earned in this period yet.</div></div>`;
   const max = Math.max(...rows.map(r=>r.sum), 1);
   return `<div class="card">${rows.map(r => `
