@@ -46,9 +46,11 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'could not resolve channel uploads playlist', chData });
     }
 
-    // 2. Pull the most recent uploads (15 is plenty for a channel posting daily)
+    // 2. Pull recent uploads. 50 is YouTube's max per request without pagination — covers the
+    // whole channel for now; once it consistently has more than 50 videos this needs proper
+    // pagination via nextPageToken, but that's a quick follow-up, not needed yet.
     const plRes = await fetch(
-      `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${uploadsPlaylistId}&maxResults=15&key=${YT_KEY}`
+      `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${uploadsPlaylistId}&maxResults=50&key=${YT_KEY}`
     );
     const plData = await plRes.json();
     const videoIds = (plData.items || []).map((i) => i.snippet?.resourceId?.videoId).filter(Boolean);
