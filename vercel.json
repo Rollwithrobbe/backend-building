@@ -1,5 +1,6 @@
 {
   "crons": [
-    { "path": "/api/scout-youtube", "schedule": "0 6 * * *" }
+    { "path": "/api/scout-youtube", "schedule": "0 6 * * *" },
+    { "path": "/api/scout-instagram", "schedule": "30 6 * * *" }
   ]
 }
