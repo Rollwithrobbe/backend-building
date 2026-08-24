@@ -233,6 +233,14 @@
   .platform-block .ph{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; gap:8px; flex-wrap:wrap; }
   .platform-block .ph label{ display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; color:var(--text); margin:0; }
   .platform-block .pf{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+  /* the URL and Views inputs here were bare <input> tags with no class and no wrapping .field —
+     fell through to unstyled browser-default white boxes, clashing hard with the dark theme */
+  .platform-block .pf input{
+    width:100%; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm);
+    color:var(--text); padding:6px 8px; font-family:inherit; font-size:12.5px;
+  }
+  .platform-block .pf input:hover{ border-color:var(--border-soft); }
+  .platform-block .pf input:focus{ border-color:var(--accent-dim); outline:none; box-shadow:0 0 0 2px var(--accent-dim); }
   .checkbox{ width:15px; height:15px; accent-color:var(--accent); }
 
   /* ---- date picker popover ---- */
