@@ -395,6 +395,13 @@
 
 const STORAGE_KEY = 'rwr-ops-v4';
 const AI_SETTINGS_KEY = 'rwr-ai-settings-v1'; // separate from STORAGE_KEY on purpose — never touched by Export/Import
+// Once true, the manual pipeline (Brands/Content/Tasks/Payments) is read from and written to
+// Supabase instead of window.storage/localStorage — same tables the automated scouting jobs
+// already use, so the whole dashboard is one cloud-backed system instead of two separate ones.
+// Local storage keeps getting written too (as a redundant cache/backup), it just stops being
+// the primary source once this flips on. See migrateToCloud() for the one-time switch-over.
+const CLOUD_MODE_KEY = 'rwr-cloud-mode-v1';
+let CLOUD_MODE = (typeof localStorage !== 'undefined' && localStorage.getItem(CLOUD_MODE_KEY) === '1');
 const AI_MODELS = [
   { id:'claude-sonnet-5', label:'Claude Sonnet 5 (recommended)' },
   { id:'claude-opus-4-8', label:'Claude Opus 4.8 (more capable, slower/pricier)' },
@@ -576,6 +583,17 @@ function statusInlineStyle(status){
 const TASK_TIMER_SECONDS = 600; // 10 minutes
 
 function uid(p){ return p + Math.random().toString(36).slice(2,9); }
+// Real UUID (matches Supabase's brands.id column type) — used for brand ids specifically so a
+// brand created in the dashboard can be synced straight to the same table the automated
+// scouting jobs write to. Falls back to a manual v4 implementation on the rare browser without
+// crypto.randomUUID.
+function newUuid(){
+  if(typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random()*16|0, v = c==='x' ? r : (r&0x3|0x8);
+    return v.toString(16);
+  });
+}
 function todayISO(){
   // use LOCAL date components, not toISOString() (which is UTC) — otherwise anyone ahead of UTC
   // (e.g. Bali, UTC+8) sees "today" flip over hours late, and daily tasks stay stuck on "done"
@@ -627,6 +645,12 @@ async function loadData(){
   if(!DATA.content) DATA.content = [];
   if(!DATA.payments) DATA.payments = [];
   if(!DATA.tasks) DATA.tasks = [];
+  if(CLOUD_MODE){
+    // once migrated, Supabase is the source of truth — overwrite whatever the local cache had
+    // with the live cloud copy, so the dashboard shows the same data on every device
+    try{ await loadFromSupabase(); }
+    catch(e){ console.warn('Cloud load failed, showing the last local cache instead:', e); }
+  }
   // migrate any content saved by an earlier build that dropped inactive platform slots
   DATA.content.forEach(c => {
     c.platforms = normalizePlatforms(c.platforms);
@@ -708,6 +732,7 @@ async function attemptSave(retryCount){
     updateStoragePill();
     showToast('Saved');
     writeBackupFile(); // mirror to the local backup file too, if one's connected — fire-and-forget
+    if(CLOUD_MODE) syncToSupabase(); // mirror brands/content/tasks/payments to Supabase too — fire-and-forget
   }catch(e){
     // expected + handled — retried automatically, so this isn't a real error, just noisy if logged as one
     console.warn('Save attempt failed, retrying:', e);
@@ -732,7 +757,141 @@ function updateStoragePill(){
   if(SAVE_STATE === 'error'){
     pill.innerHTML = '<span class="led" style="background:var(--fx-red);"></span>Save issue — retrying…';
   } else {
-    pill.innerHTML = '<span class="led"></span>Stored in Claude';
+    pill.innerHTML = `<span class="led"></span>${CLOUD_MODE ? '☁ Synced to cloud' : (HAS_ARTIFACT_STORAGE ? 'Stored in Claude' : 'Stored in this browser')}`;
+  }
+}
+
+/* ---------------- cloud sync (Supabase) ----------------
+   Mirrors DATA.brands/content/tasks/payments to the same Supabase project the automated
+   scouting jobs use, once CLOUD_MODE is on (see migrateToCloud()). Brands are upserted with
+   only the manual-pipeline-owned columns (name/status/color/notes/brief) so the automated-
+   tracking columns on that same row (base_pay, youtube_channel_handle, etc.) are never
+   touched by this. Content/tasks/payments are fully owned by the manual pipeline, so they're
+   synced with upsert-then-prune (anything deleted locally gets deleted in Supabase too).
+------------------------------------------------------------------------------------------- */
+function isUuid(s){ return typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s); }
+function brandToSupabaseRow(b){
+  return { id: b.id, name: b.name, status: b.status || 'active', color: b.color || null, notes: b.notes || '', brief: b.brief || null };
+}
+function contentToSupabaseRow(c){
+  return {
+    id: c.id, brand_id: c.brandId || null, title: c.title || '', base_pay: Number(c.basePay)||0, cpm_bonus: Number(c.cpmBonus)||0,
+    created_at: c.createdAt || new Date().toISOString(), view_requirement: c.viewRequirement || null,
+    view_requirement_met: !!c.viewRequirementMet, view_requirement_window_days: c.viewRequirementWindowDays || null,
+    scheduled_date: c.scheduledDate || null, platforms: c.platforms || [],
+  };
+}
+function taskToSupabaseRow(t){
+  return {
+    id: t.id, title: t.title || '', brand_id: t.brandId || null, priority: t.priority || 'medium',
+    daily: !!t.daily, requires_timer: !!t.requiresTimer, timer_minutes: t.timerMinutes || 10,
+    completed: !!t.completed, daily_done: t.dailyDone || {},
+    created_at: t.createdAt ? (t.createdAt.length===10 ? t.createdAt+'T00:00:00.000Z' : t.createdAt) : new Date().toISOString(),
+  };
+}
+function paymentToSupabaseRow(p){
+  return { id: p.id, brand_id: p.brandId || null, amount: Number(p.amount)||0, cpm_bonus: Number(p.cpmBonus)||0, date: p.date || null, note: p.note || '', created_at: p.createdAt || new Date().toISOString() };
+}
+async function upsertRows(table, rows, onConflict){
+  if(rows.length === 0) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/${table}?on_conflict=${onConflict}`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates,return=minimal',
+    },
+    body: JSON.stringify(rows),
+  });
+}
+async function pruneDeletedRows(table, currentIds){
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?select=id`, {
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+  });
+  const existing = await res.json();
+  const toDelete = (Array.isArray(existing) ? existing : []).map(r=>r.id).filter(id => !currentIds.has(id));
+  if(toDelete.length === 0) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=in.(${toDelete.map(id=>`"${id}"`).join(',')})`, {
+    method: 'DELETE',
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' },
+  });
+}
+let SYNC_IN_FLIGHT = false;
+async function syncToSupabase(){
+  if(SYNC_IN_FLIGHT) return; // a save that lands mid-sync gets its own call right after this one finishes, via the normal debounce
+  SYNC_IN_FLIGHT = true;
+  try{
+    await upsertRows('brands', DATA.brands.map(brandToSupabaseRow), 'id');
+    await upsertRows('manual_content', DATA.content.map(contentToSupabaseRow), 'id');
+    await upsertRows('manual_tasks', DATA.tasks.map(taskToSupabaseRow), 'id');
+    await upsertRows('manual_payments', DATA.payments.map(paymentToSupabaseRow), 'id');
+    await pruneDeletedRows('manual_content', new Set(DATA.content.map(c=>c.id)));
+    await pruneDeletedRows('manual_tasks', new Set(DATA.tasks.map(t=>t.id)));
+    await pruneDeletedRows('manual_payments', new Set(DATA.payments.map(p=>p.id)));
+    // brands are deliberately never pruned here — a brand removed from the manual list may still
+    // have real automated-tracking history (tracked_videos) tied to it in Supabase; deleting the
+    // row would orphan or destroy that. Removing a brand locally just leaves its backend row behind, harmlessly.
+  }catch(e){
+    console.warn('Cloud sync failed (will retry on next save):', e);
+  }
+  SYNC_IN_FLIGHT = false;
+}
+async function loadFromSupabase(){
+  const [brandsRes, contentRes, tasksRes, paymentsRes] = await Promise.all([
+    fetch(`${SUPABASE_URL}/rest/v1/brands?select=id,name,status,color,notes,brief`, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }),
+    fetch(`${SUPABASE_URL}/rest/v1/manual_content?select=*`, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }),
+    fetch(`${SUPABASE_URL}/rest/v1/manual_tasks?select=*`, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }),
+    fetch(`${SUPABASE_URL}/rest/v1/manual_payments?select=*`, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }),
+  ]);
+  const [brandsRows, contentRows, tasksRows, paymentsRows] = await Promise.all([brandsRes.json(), contentRes.json(), tasksRes.json(), paymentsRes.json()]);
+  // a brand's own id IS its Supabase id once in cloud mode — supabaseBrandId is set equal to it
+  // so the "Connected accounts" section (renderBrandConnections) treats it as already linked
+  DATA.brands = (brandsRows||[]).map(b => ({ id: b.id, name: b.name, status: b.status || 'active', color: b.color || SWATCHES[0], notes: b.notes || '', brief: b.brief || null, supabaseBrandId: b.id }));
+  DATA.content = (contentRows||[]).map(c => ({
+    id: c.id, brandId: c.brand_id, title: c.title, basePay: Number(c.base_pay)||0, cpmBonus: Number(c.cpm_bonus)||0,
+    createdAt: c.created_at, viewRequirement: c.view_requirement, viewRequirementMet: !!c.view_requirement_met,
+    viewRequirementWindowDays: c.view_requirement_window_days, scheduledDate: c.scheduled_date, platforms: c.platforms || [],
+  }));
+  DATA.tasks = (tasksRows||[]).map(t => ({
+    id: t.id, title: t.title, brandId: t.brand_id, priority: t.priority, daily: !!t.daily, requiresTimer: !!t.requires_timer,
+    timerMinutes: t.timer_minutes, completed: !!t.completed, dailyDone: t.daily_done || {}, createdAt: t.created_at,
+  }));
+  DATA.payments = (paymentsRows||[]).map(p => ({
+    id: p.id, brandId: p.brand_id, amount: Number(p.amount)||0, cpmBonus: Number(p.cpm_bonus)||0, date: p.date, note: p.note || '', createdAt: p.created_at,
+  }));
+}
+// One-time switch-over: since real data up to now only lives in this browser's local storage,
+// this uploads everything to Supabase once and flips CLOUD_MODE on. Any brand id that predates
+// this feature (the short uid() format, not a real UUID) gets a fresh UUID here, with every
+// content/task/payment that referenced it remapped along the way — Supabase's brands.id column
+// needs a real UUID. Nothing about this runs automatically; it only fires when the button below is clicked.
+async function migrateToCloud(){
+  if(CLOUD_MODE) return;
+  const btn = document.getElementById('btnMigrateCloud');
+  if(btn){ btn.disabled = true; btn.textContent = 'Moving to cloud…'; }
+  try{
+    const idMap = {};
+    DATA.brands.forEach(b => {
+      if(!isUuid(b.id)){
+        const newId = newUuid();
+        idMap[b.id] = newId;
+        b.id = newId;
+      }
+    });
+    if(Object.keys(idMap).length){
+      DATA.content.forEach(c => { if(c.brandId && idMap[c.brandId]) c.brandId = idMap[c.brandId]; });
+      DATA.tasks.forEach(t => { if(t.brandId && idMap[t.brandId]) t.brandId = idMap[t.brandId]; });
+      DATA.payments.forEach(p => { if(p.brandId && idMap[p.brandId]) p.brandId = idMap[p.brandId]; });
+    }
+    DATA.brands.forEach(b => { b.supabaseBrandId = b.id; });
+    await syncToSupabase();
+    CLOUD_MODE = true;
+    localStorage.setItem(CLOUD_MODE_KEY, '1');
+    saveData();
+    showToast('Moved to the cloud ☁');
+    render();
+  }catch(e){
+    alert('Could not move to the cloud — ' + e.message + '. Your data is untouched — try again.');
+    if(btn){ btn.disabled = false; btn.textContent = '☁ Move my data to the cloud'; }
   }
 }
 
@@ -1434,8 +1593,9 @@ function renderSidebar(){
     <button class="btn btn-primary ai-toggle-btn" id="aiToggleBtn">✦ Ask AI</button>
     <div class="sidebar-foot">
       <div>V4 — manual tracking build</div>
-      <div class="storage-pill"><span class="led"></span>${HAS_ARTIFACT_STORAGE ? 'Stored in Claude' : 'Stored in this browser'}</div>
+      <div class="storage-pill"><span class="led"></span>${CLOUD_MODE ? '☁ Synced to cloud' : (HAS_ARTIFACT_STORAGE ? 'Stored in Claude' : 'Stored in this browser')}</div>
       <div class="data-actions">
+        ${!CLOUD_MODE ? `<button class="btn btn-primary btn-sm full" id="btnMigrateCloud" type="button">☁ Move my data to the cloud</button>` : ''}
         <button class="btn btn-ghost btn-sm" id="btnExport" type="button">Export</button>
         <button class="btn btn-ghost btn-sm" id="btnImport" type="button">Import</button>
         <button class="btn btn-ghost btn-sm" id="btnDemo" type="button">Demo data</button>
@@ -2687,6 +2847,10 @@ let MODAL_STATE = { type:null, id:null, draft:null };
 // Supabase brands table (used by the automated scouting jobs) rather than in DATA.brands
 // (the manual-pipeline localStorage record). See loadBrandConnections().
 let MODAL_BRAND_CONN = null;
+// The full list of existing Supabase brand rows (id, name) — loaded whenever the brand modal
+// opens for a not-yet-linked brand, so it can offer "link to an existing one" (e.g. PureFi,
+// Amboras, Test Brand 2 that already have tracked videos) instead of always creating a new row.
+let MODAL_ALL_BACKEND_BRANDS = null;
 let MODAL_ENTER = false; // true only for the single render() call that opens a modal — a fresh CSS
 // animation plays whenever a node is first created, and root.innerHTML is rebuilt on every render(),
 // so without this flag the modal would replay its pop-in every time e.g. the date picker opens inside it.
@@ -2696,7 +2860,9 @@ function openModal(type, id=null){
   MODAL_STATE.id = id;
   if(type==='brand'){
     const existing = id ? brandById(id) : null;
-    MODAL_STATE.draft = existing ? {...existing} : { id:uid('br_'), name:'', status:'active', color: SWATCHES[DATA.brands.length % SWATCHES.length], notes:'' };
+    // real UUIDs (not the usual short uid() prefix) so a brand created here can be upserted
+    // straight into Supabase's brands.id column — same id space the automated-tracking rows use
+    MODAL_STATE.draft = existing ? {...existing} : { id: newUuid(), name:'', status:'active', color: SWATCHES[DATA.brands.length % SWATCHES.length], notes:'' };
     MODAL_BRAND_CONN = null;
     if(existing && existing.supabaseBrandId) loadBrandConnections(existing.supabaseBrandId);
   } else if(type==='content'){
@@ -3430,6 +3596,10 @@ function bindGlobalHandlers(){
 
   // AI drawer
   // data management
+  const btnMigrateCloud = document.getElementById('btnMigrateCloud');
+  if(btnMigrateCloud) btnMigrateCloud.addEventListener('click', () => {
+    askConfirm('Move your Brands, Content, Tasks, and Payments to the cloud? This uploads everything currently here to Supabase — the same place your tracked-content data already lives — and switches this dashboard to read from there from now on, so it stays in sync across every device. Your local copy stays as a backup either way.', migrateToCloud);
+  });
   const btnExport = document.getElementById('btnExport');
   if(btnExport) btnExport.addEventListener('click', exportData);
   const importFile = document.getElementById('importFile');
