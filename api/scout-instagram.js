@@ -57,7 +57,7 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
 
   // 1. Pull recent media, only keeping Reels (that's what carries a view-count/base-pay target)
   const mediaRes = await fetch(
-    `https://graph.facebook.com/v20.0/${igId}/media` +
+    `https://graph.instagram.com/v20.0/${igId}/media` +
     `?fields=id,caption,timestamp,permalink,media_type,media_product_type` +
     `&limit=50&access_token=${encodeURIComponent(token)}`
   );
@@ -139,7 +139,7 @@ async function fetchViews(mediaId, token) {
   const metricsToTry = ['views', 'plays', 'video_views'];
   for (const metric of metricsToTry) {
     const res = await fetch(
-      `https://graph.facebook.com/v20.0/${mediaId}/insights?metric=${metric}&access_token=${encodeURIComponent(token)}`
+      `https://graph.instagram.com/v20.0/${mediaId}/insights?metric=${metric}&access_token=${encodeURIComponent(token)}`
     );
     const data = await res.json();
     const value = data?.data?.[0]?.values?.[0]?.value;
