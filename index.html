@@ -1515,6 +1515,23 @@ async function loadTrackedContent(){
   render();
 }
 
+// Pulls the connection status (YouTube handle, Instagram/TikTok username + whether a token is
+// stored) for one brand's Supabase record, so the brand edit modal can show "Connected as
+// @x" / a Connect button per platform instead of requiring a trip to Supabase by hand.
+async function loadBrandConnections(supabaseBrandId){
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/brands?id=eq.${encodeURIComponent(supabaseBrandId)}&select=*`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    const rows = await res.json();
+    MODAL_BRAND_CONN = rows[0] || { error: 'not found' };
+  }catch(e){
+    MODAL_BRAND_CONN = { error: e.message || 'Failed to load' };
+  }
+  if(MODAL_STATE.type==='brand') render();
+}
+
 function renderTrackedContent(){
   const head = `
     <div class="page-head">
@@ -2665,6 +2682,11 @@ function renderConfirm(){
 
 /* ---------------- modals ---------------- */
 let MODAL_STATE = { type:null, id:null, draft:null };
+// Connected-account info (YouTube handle, Instagram/TikTok connection status) for whichever
+// brand's edit modal is currently open — null until loaded, since it lives in the separate
+// Supabase brands table (used by the automated scouting jobs) rather than in DATA.brands
+// (the manual-pipeline localStorage record). See loadBrandConnections().
+let MODAL_BRAND_CONN = null;
 let MODAL_ENTER = false; // true only for the single render() call that opens a modal — a fresh CSS
 // animation plays whenever a node is first created, and root.innerHTML is rebuilt on every render(),
 // so without this flag the modal would replay its pop-in every time e.g. the date picker opens inside it.
@@ -2675,6 +2697,8 @@ function openModal(type, id=null){
   if(type==='brand'){
     const existing = id ? brandById(id) : null;
     MODAL_STATE.draft = existing ? {...existing} : { id:uid('br_'), name:'', status:'active', color: SWATCHES[DATA.brands.length % SWATCHES.length], notes:'' };
+    MODAL_BRAND_CONN = null;
+    if(existing && existing.supabaseBrandId) loadBrandConnections(existing.supabaseBrandId);
   } else if(type==='content'){
     const existing = id ? DATA.content.find(c=>c.id===id) : null;
     MODAL_STATE.draft = existing ? { ...JSON.parse(JSON.stringify(existing)), platforms: normalizePlatforms(existing.platforms) } : {
@@ -2717,6 +2741,55 @@ function renderModalBody(){
   if(MODAL_STATE.type==='task') return renderTaskModal();
   if(MODAL_STATE.type==='trackedVideo') return renderTrackedVideoModal();
   return '';
+}
+
+// Bridges DATA.brands (this manual pipeline's own localStorage record) to that brand's row in
+// the separate Supabase `brands` table (which the scouting jobs read from). Connecting an
+// account always happens from inside a specific brand's own modal — so the account is tied to
+// the right brand from the moment it's connected, no separate "unassigned accounts" step needed.
+function renderBrandConnections(d){
+  if(!MODAL_STATE.id){
+    return `<div class="hint">Save this brand first, then reopen it to connect YouTube/Instagram/TikTok accounts.</div>`;
+  }
+  if(!d.supabaseBrandId){
+    return `
+      <div class="hint" style="margin-bottom:8px;">Not set up for automated tracking yet. This creates a backend record using this brief's base pay, view requirement, and window as the starting rate — edit it anytime from here.</div>
+      <button class="btn btn-primary btn-sm" id="provisionBackendBrand" type="button">Enable automated tracking</button>
+    `;
+  }
+  if(MODAL_BRAND_CONN === null){
+    return `<div class="hint">Loading connection status…</div>`;
+  }
+  if(MODAL_BRAND_CONN.error){
+    return `<div class="hint" style="color:var(--danger);">Couldn't load — ${escapeHtml(MODAL_BRAND_CONN.error)}</div>`;
+  }
+  const c = MODAL_BRAND_CONN;
+  const base = 'https://backend-building.vercel.app';
+  return `
+    <div class="field">
+      <label>YouTube channel handle</label>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="f-ytHandle" value="${escapeHtml(c.youtube_channel_handle || '')}" placeholder="e.g. @channelname" style="flex:1;" />
+        <button class="btn btn-ghost btn-sm" id="saveYtHandle" type="button">Save</button>
+      </div>
+      ${c.youtube_channel_handle ? `<div class="hint" style="margin-top:4px;">✓ Tracking this channel's Shorts.</div>` : ''}
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Instagram</label>
+        ${c.instagram_business_account_id
+          ? `<div class="hint">✓ Connected as @${escapeHtml(c.instagram_username || '')} <a href="#" data-disconnect-platform="instagram" style="color:var(--danger); margin-left:6px;">Disconnect</a></div>`
+          : `<a class="btn btn-ghost btn-sm" href="${base}/api/auth/instagram/start?brand=${encodeURIComponent(d.supabaseBrandId)}" target="_blank" rel="noopener">Connect Instagram</a>`}
+      </div>
+      <div class="field">
+        <label>TikTok</label>
+        ${c.tiktok_open_id
+          ? `<div class="hint">✓ Connected as @${escapeHtml(c.tiktok_username || '')} <a href="#" data-disconnect-platform="tiktok" style="color:var(--danger); margin-left:6px;">Disconnect</a></div>`
+          : `<a class="btn btn-ghost btn-sm" href="${base}/api/auth/tiktok/start?brand=${encodeURIComponent(d.supabaseBrandId)}" target="_blank" rel="noopener">Connect TikTok</a>`}
+      </div>
+    </div>
+    <div class="hint">Connecting opens in a new tab — once it says Success, come back and reopen this brand to see it reflected here.</div>
+  `;
 }
 
 function renderBrandModal(){
@@ -2807,6 +2880,9 @@ function renderBrandModal(){
       <div class="hint" id="briefQuotaHint">${brief ? `Today's quota with this cadence: ${briefDayQuota(brief, new Date().getDay())} video${briefDayQuota(brief,new Date().getDay())===1?'':'s'}.` : ''}</div>
       <div class="hint">Pressing "+1 Made" on the quota widget creates a video (idea status) for this brand automatically — no manual entry needed for regular deliverables.</div>
     </div>
+
+    <div class="section-title" style="margin-top:18px;">Connected accounts (automated view tracking)</div>
+    ${renderBrandConnections(d)}
 
     <div class="modal-actions">
       <div>${MODAL_STATE.id ? `<button class="btn btn-danger btn-sm" id="deleteBrand" type="button">Delete brand</button>` : ''}</div>
@@ -3181,6 +3257,72 @@ function bindGlobalHandlers(){
       saveData(); closeModal();
     });
   });
+
+  const provisionBackendBrand = document.getElementById('provisionBackendBrand');
+  if(provisionBackendBrand) provisionBackendBrand.addEventListener('click', async () => {
+    const d = MODAL_STATE.draft;
+    provisionBackendBrand.disabled = true; provisionBackendBrand.textContent = 'Setting up…';
+    try{
+      const brief = d.brief;
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/brands`, {
+        method: 'POST',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+        body: JSON.stringify({
+          name: d.name,
+          base_pay: brief ? Number(brief.basePay)||0 : 0,
+          view_requirement: brief && brief.viewRequirement ? Number(brief.viewRequirement) : 0,
+          eligibility_window_days: brief && brief.viewRequirementWindowDays ? Number(brief.viewRequirementWindowDays) : 30,
+        }),
+      });
+      if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+      const [row] = await res.json();
+      d.supabaseBrandId = row.id;
+      const idx = DATA.brands.findIndex(b=>b.id===d.id);
+      if(idx>=0){ DATA.brands[idx].supabaseBrandId = row.id; saveData(); }
+      MODAL_BRAND_CONN = row;
+      render();
+    }catch(e){
+      alert('Could not set up automated tracking — ' + e.message);
+      provisionBackendBrand.disabled = false; provisionBackendBrand.textContent = 'Enable automated tracking';
+    }
+  });
+
+  const saveYtHandle = document.getElementById('saveYtHandle');
+  if(saveYtHandle) saveYtHandle.addEventListener('click', async () => {
+    const d = MODAL_STATE.draft;
+    const handle = document.getElementById('f-ytHandle').value.trim();
+    saveYtHandle.disabled = true; saveYtHandle.textContent = 'Saving…';
+    try{
+      await fetch(`${SUPABASE_URL}/rest/v1/brands?id=eq.${encodeURIComponent(d.supabaseBrandId)}`, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ youtube_channel_handle: handle || null }),
+      });
+      if(MODAL_BRAND_CONN) MODAL_BRAND_CONN.youtube_channel_handle = handle || null;
+      render();
+    }catch(e){
+      alert('Could not save — ' + e.message);
+      saveYtHandle.disabled = false; saveYtHandle.textContent = 'Save';
+    }
+  });
+
+  document.querySelectorAll('[data-disconnect-platform]').forEach(el => el.addEventListener('click', (e) => {
+    e.preventDefault();
+    const platform = el.dataset.disconnectPlatform;
+    const d = MODAL_STATE.draft;
+    askConfirm(`Disconnect ${platform === 'instagram' ? 'Instagram' : 'TikTok'} from this brand? The scouting job stops updating its videos (already-tracked ones are untouched).`, async () => {
+      const patch = platform === 'instagram'
+        ? { instagram_business_account_id: null, instagram_username: null, instagram_access_token: null, instagram_token_expires_at: null }
+        : { tiktok_open_id: null, tiktok_username: null, tiktok_access_token: null, tiktok_refresh_token: null, tiktok_token_expires_at: null, tiktok_refresh_expires_at: null };
+      await fetch(`${SUPABASE_URL}/rest/v1/brands?id=eq.${encodeURIComponent(d.supabaseBrandId)}`, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify(patch),
+      });
+      if(MODAL_BRAND_CONN) Object.assign(MODAL_BRAND_CONN, patch);
+      render();
+    });
+  }));
 
   const saveContent = document.getElementById('saveContent');
   if(saveContent) saveContent.addEventListener('click', () => {
