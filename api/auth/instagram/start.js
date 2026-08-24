@@ -24,7 +24,7 @@ export default function handler(req, res) {
   }
 
   const redirectUri = 'https://backend-building.vercel.app/api/auth/instagram/callback';
-  const scope = ['instagram_business_basic', 'instagram_business_manage_comments', 'instagram_business_manage_messages'].join(',');
+  const scope = ['instagram_business_basic', 'instagram_business_manage_comments', 'instagram_business_manage_messages', 'instagram_business_manage_insights'].join(',');
 
   const authUrl =
     `https://www.instagram.com/oauth/authorize` +
