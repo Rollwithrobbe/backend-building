@@ -108,12 +108,18 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
           eligible_until: eligibleUntil,
           status: alreadyHit ? 'hit' : 'tracking',
           earned: alreadyHit,
+          // snapshot the brand's current rate at discovery time — if the brand's deal changes
+          // later (e.g. a warm-up brief ending), only newly-discovered videos pick up the new
+          // rate; this one keeps what applied when it was found. Editable per-video afterward.
+          pay_amount: brand.base_pay,
         }),
       });
       results.push({ id: media.id, action: 'discovered', views: viewCount, status: alreadyHit ? 'hit' : 'tracking' });
     } else {
       const row = existing[0];
-      if (row.status === 'tracking') {
+      if (row.excluded) {
+        results.push({ id: media.id, action: 'skipped', status: 'excluded' });
+      } else if (row.status === 'tracking') {
         let status = 'tracking';
         let earned = false;
         if (viewCount >= brand.view_requirement) {

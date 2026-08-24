@@ -929,14 +929,22 @@ function brandTotals(brandId){
   const totalEarned = contentEarned + receivedCpm;
   return { count: items.length, contentEarned, totalEarned, pending, received, receivedBase, receivedCpm, outstanding: totalEarned - received };
 }
+// A tracked video's payout is whatever was snapshotted onto it when the scouting job first
+// discovered it (r.pay_amount = that brand's base_pay at the time) — not a live join to the
+// brand's current rate. That's deliberate: if a brand's deal changes later (e.g. a warm-up
+// brief ending and a new rate starting), older videos keep the rate that applied when they
+// were found, and only newly-discovered videos pick up the new one. It can also be edited by
+// hand per-video (see the Edit button in the Tracked Content table) for one-off exceptions —
+// a differently-priced video, or one that shouldn't count/be tracked at all (r.excluded).
+function tcAmount(r){ return Number(r.pay_amount ?? r.brands?.base_pay ?? 0); }
 function trackedContentTotals(){
   // automated-pipeline earnings (Supabase, fed by the scouting job) — folded into the main
   // dashboard totals below. Returns zeros until the first load resolves (see loadTrackedContent),
   // so the dashboard just shows the manual-only numbers for a moment on first paint, then updates.
   if(!TRACKED_CONTENT_DATA) return { earned: 0, pending: 0 };
-  const rows = TRACKED_CONTENT_DATA;
-  const earned = rows.filter(r=>r.status==='hit').reduce((s,r)=> s + Number(r.brands?.base_pay||0), 0);
-  const pending = rows.filter(r=>r.status==='tracking').reduce((s,r)=> s + Number(r.brands?.base_pay||0), 0);
+  const rows = TRACKED_CONTENT_DATA.filter(r=>!r.excluded);
+  const earned = rows.filter(r=>r.status==='hit').reduce((s,r)=> s + tcAmount(r), 0);
+  const pending = rows.filter(r=>r.status==='tracking').reduce((s,r)=> s + tcAmount(r), 0);
   return { earned, pending };
 }
 function allTotals(){
@@ -1165,11 +1173,11 @@ function previousRangeBounds(range){
 function trackedContentEarnedBetween(start, end, brandName){
   if(!TRACKED_CONTENT_DATA) return 0;
   return TRACKED_CONTENT_DATA.filter(r => {
-    if(r.status!=='hit' || !r.posted_at) return false;
+    if(r.excluded || r.status!=='hit' || !r.posted_at) return false;
     if(brandName && r.brands?.name !== brandName) return false;
     const d = new Date(r.posted_at);
     return d>=start && d<=end;
-  }).reduce((s,r)=> s + Number(r.brands?.base_pay||0), 0);
+  }).reduce((s,r)=> s + tcAmount(r), 0);
 }
 function sumEarnedBetween(start, end){
   let sum = 0;
@@ -1216,10 +1224,10 @@ function buildSeries(range){
     // automated Tracked Content earnings, grouped by whichever brand's channel it came from
     if(TRACKED_CONTENT_DATA){
       TRACKED_CONTENT_DATA.forEach(r => {
-        if(r.status!=='hit' || !r.posted_at) return;
+        if(r.excluded || r.status!=='hit' || !r.posted_at) return;
         const d = new Date(r.posted_at);
         if(d<b.start || d>b.end) return;
-        const amt = Number(r.brands?.base_pay||0);
+        const amt = tcAmount(r);
         total += amt;
         const key = r.brands?.name || 'Unassigned (automated)';
         byBrand[key] = (byBrand[key]||0) + amt;
@@ -1342,10 +1350,10 @@ function renderBrandBreakdown(bounds){
   let fallbackIdx = 0;
   if(TRACKED_CONTENT_DATA){
     TRACKED_CONTENT_DATA.forEach(r => {
-      if(r.status!=='hit' || !r.posted_at) return;
+      if(r.excluded || r.status!=='hit' || !r.posted_at) return;
       const d = new Date(r.posted_at);
       if(d<bounds.start || d>bounds.end) return;
-      const amt = Number(r.brands?.base_pay||0);
+      const amt = tcAmount(r);
       const name = r.brands?.name || 'Unassigned (automated)';
       const existing = rows.find(row => row.brand.name === name);
       if(existing){ existing.sum += amt; }
@@ -1522,17 +1530,19 @@ function renderTrackedContent(){
   }
 
   const rows = TRACKED_CONTENT_DATA;
-  const hit = rows.filter(r=>r.status==='hit');
-  const tracking = rows.filter(r=>r.status==='tracking');
-  const expired = rows.filter(r=>r.status==='expired');
-  const totalEarned = hit.reduce((s,r)=> s + Number(r.brands?.base_pay||0), 0);
-  const totalPending = tracking.reduce((s,r)=> s + Number(r.brands?.base_pay||0), 0);
+  const counted = rows.filter(r=>!r.excluded);
+  const hit = counted.filter(r=>r.status==='hit');
+  const tracking = counted.filter(r=>r.status==='tracking');
+  const expired = counted.filter(r=>r.status==='expired');
+  const excludedCount = rows.length - counted.length;
+  const totalEarned = hit.reduce((s,r)=> s + tcAmount(r), 0);
+  const totalPending = tracking.reduce((s,r)=> s + tcAmount(r), 0);
 
   return head + `
     <div class="grid grid-cards" style="margin-bottom:20px;">
       <div class="card"><div class="label">Earned — automatic</div><div class="big mono fx-green">${money(totalEarned)}</div><div class="foot">${hit.length} video${hit.length===1?'':'s'} hit its requirement</div></div>
       <div class="card"><div class="label">Pending</div><div class="big mono" style="color:var(--text-dim)">${money(totalPending)}</div><div class="foot">${tracking.length} still tracking</div></div>
-      <div class="card"><div class="label">Expired</div><div class="big mono ${expired.length>0?'fx-red':''}">${expired.length}</div><div class="foot">Window passed unmet</div></div>
+      <div class="card"><div class="label">Expired</div><div class="big mono ${expired.length>0?'fx-red':''}">${expired.length}</div><div class="foot">Window passed unmet${excludedCount ? ` · ${excludedCount} excluded` : ''}</div></div>
     </div>
     ${rows.length===0 ? emptyState('Nothing tracked yet','Connect a brand\'s channel and wait for the next scouting run.') : `
     <div class="table-wrap" style="overflow-x:auto;"><table>
@@ -1540,15 +1550,16 @@ function renderTrackedContent(){
       <tbody>
         ${rows.map(r => {
           const req = r.brands ? Number(r.brands.view_requirement) : null;
-          return `<tr>
+          const amt = tcAmount(r);
+          return `<tr ${r.excluded?'style="opacity:.5;"':''}>
             <td>${r.brands ? escapeHtml(r.brands.name) : '<span style="color:var(--text-faint)">—</span>'}</td>
             <td><span class="tag tag-${r.platform}">${(r.platform||'').toUpperCase()}</span></td>
             <td>${escapeHtml(r.title || 'Untitled')}</td>
             <td class="mono">${(r.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}</td>
-            <td>${r.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : r.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
-            <td class="mono">${r.status==='hit' ? money(r.brands?.base_pay||0) : `<span style="color:var(--text-faint)">${money(r.brands?.base_pay||0)} pending</span>`}</td>
+            <td>${r.excluded ? '<span class="tag tag-neutral">Excluded</span>' : r.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : r.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
+            <td class="mono">${r.status==='hit' && !r.excluded ? money(amt) : `<span style="color:var(--text-faint)">${money(amt)}${r.excluded?'':' pending'}</span>`}</td>
             <td class="mono">${r.discovered_at ? fmtDate(r.discovered_at.slice(0,10)) : '—'}</td>
-            <td>${r.url ? `<a href="${r.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">View</a>` : ''}</td>
+            <td style="white-space:nowrap;">${r.url ? `<a href="${r.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">View</a>` : ''}<button class="btn btn-ghost btn-sm" data-edit-tracked-video="${r.id}" type="button">Edit</button></td>
           </tr>`;
         }).join('')}
       </tbody>
@@ -2680,6 +2691,9 @@ function openModal(type, id=null){
       id:uid('tk_'), title:'', brandId:'', priority:'medium', daily:false, requiresTimer:false, timerMinutes:10,
       completed:false, dailyDone:{}, createdAt: todayISO()
     };
+  } else if(type==='trackedVideo'){
+    const existing = TRACKED_CONTENT_DATA ? TRACKED_CONTENT_DATA.find(r=>r.id===id) : null;
+    MODAL_STATE.draft = existing ? { ...existing } : null;
   }
   MODAL_ENTER = true;
   render();
@@ -2701,6 +2715,7 @@ function renderModalBody(){
   if(MODAL_STATE.type==='content') return renderContentModal();
   if(MODAL_STATE.type==='payment') return renderPaymentModal();
   if(MODAL_STATE.type==='task') return renderTaskModal();
+  if(MODAL_STATE.type==='trackedVideo') return renderTrackedVideoModal();
   return '';
 }
 
@@ -2909,6 +2924,32 @@ function renderTaskModal(){
   </div>`;
 }
 
+function renderTrackedVideoModal(){
+  const d = MODAL_STATE.draft;
+  if(!d) return '';
+  const defaultPay = Number(d.brands?.base_pay || 0);
+  return `<div class="modal ${MODAL_ENTER?'modal-enter':''}">
+    <h3>Edit tracked video</h3>
+    <div class="hint" style="margin-bottom:12px;">${escapeHtml(d.title || 'Untitled')} — ${escapeHtml(d.brands?.name || 'Unassigned')} · ${(d.platform||'').toUpperCase()}</div>
+    <div class="field-row">
+      <div class="field"><label>Payout ($)</label><input type="number" id="f-tvpay" value="${d.pay_amount ?? defaultPay}" step="0.01" /></div>
+      <div class="field"><label>Status</label>
+        <select id="f-tvstatus">
+          <option value="tracking" ${d.status==='tracking'?'selected':''}>Tracking</option>
+          <option value="hit" ${d.status==='hit'?'selected':''}>Hit (paid)</option>
+          <option value="expired" ${d.status==='expired'?'selected':''}>Expired</option>
+        </select>
+      </div>
+    </div>
+    <div class="hint" style="margin:-6px 0 12px;">Defaults to the brand's current rate (${money(defaultPay)}) at the moment it was discovered — override here for a one-off (e.g. a warm-up video paid differently). Set status to "Hit" directly for a video that doesn't need view tracking at all.</div>
+    <div class="field"><label><input type="checkbox" class="checkbox" id="f-tvexcluded" ${d.excluded?'checked':''}/> Exclude from tracking &amp; earnings — the scouting job stops updating it and it's dropped from every total</label></div>
+    <div class="modal-actions">
+      <div></div>
+      <div class="right"><button class="btn btn-ghost" id="cancelModal" type="button">Cancel</button><button class="btn btn-primary" id="saveTrackedVideo" type="button">Save</button></div>
+    </div>
+  </div>`;
+}
+
 /* ---------------- handlers ---------------- */
 function bindGlobalHandlers(){
   document.querySelectorAll('[data-nav]').forEach(el => el.addEventListener('click', () => {
@@ -2924,6 +2965,7 @@ function bindGlobalHandlers(){
   document.querySelectorAll('[data-open-brand], [data-edit-brand]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); openModal('brand', el.dataset.openBrand || el.dataset.editBrand); }));
   document.querySelectorAll('[data-del-payment]').forEach(el => el.addEventListener('click', () => { DATA.payments = DATA.payments.filter(p=>p.id!==el.dataset.delPayment); saveData(); render(); }));
   document.querySelectorAll('[data-edit-task]').forEach(el => el.addEventListener('click', () => openModal('task', el.dataset.editTask)));
+  document.querySelectorAll('[data-edit-tracked-video]').forEach(el => el.addEventListener('click', () => openModal('trackedVideo', el.dataset.editTrackedVideo)));
 
   // dashboard range + chart type
   document.querySelectorAll('[data-range]').forEach(el => el.addEventListener('click', () => { DASH_RANGE = el.dataset.range; render(); }));
@@ -3217,6 +3259,31 @@ function bindGlobalHandlers(){
       DATA.tasks = DATA.tasks.filter(t=>t.id!==MODAL_STATE.draft.id);
       saveData(); closeModal();
     });
+  });
+
+  const saveTrackedVideo = document.getElementById('saveTrackedVideo');
+  if(saveTrackedVideo) saveTrackedVideo.addEventListener('click', async () => {
+    const d = MODAL_STATE.draft;
+    const id = d.id;
+    const payAmount = Number(document.getElementById('f-tvpay').value) || 0;
+    const status = document.getElementById('f-tvstatus').value;
+    const excluded = document.getElementById('f-tvexcluded').checked;
+    const earned = status === 'hit';
+    saveTrackedVideo.disabled = true; saveTrackedVideo.textContent = 'Saving…';
+    try{
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ pay_amount: payAmount, status, excluded, earned })
+      });
+      if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+      const row = TRACKED_CONTENT_DATA && TRACKED_CONTENT_DATA.find(r=>r.id===id);
+      if(row){ row.pay_amount = payAmount; row.status = status; row.excluded = excluded; row.earned = earned; }
+      closeModal();
+    }catch(e){
+      alert('Could not save — ' + e.message);
+      saveTrackedVideo.disabled = false; saveTrackedVideo.textContent = 'Save';
+    }
   });
 
   // AI drawer
