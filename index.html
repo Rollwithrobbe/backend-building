@@ -1096,14 +1096,52 @@ function brandTotals(brandId){
 // hand per-video (see the Edit button in the Tracked Content table) for one-off exceptions —
 // a differently-priced video, or one that shouldn't count/be tracked at all (r.excluded).
 function tcAmount(r){ return Number(r.pay_amount ?? r.brands?.base_pay ?? 0); }
+// Rows sharing a group_id are the same piece of content crossposted to multiple platforms
+// (set manually — see the Merge picker in the Tracked Content tab) and must be paid ONCE, not
+// once per platform. This is the single place that turns raw tracked_videos rows into "deliverable"
+// units — every dollar total in the app reads from here instead of the raw rows directly, so the
+// pay-once-whichever-platform-hits-first rule can't get out of sync between different totals.
+function getDeliverables(){
+  if(!TRACKED_CONTENT_DATA) return [];
+  const byGroup = {};
+  const standalone = [];
+  TRACKED_CONTENT_DATA.forEach(r => {
+    if(r.group_id){ (byGroup[r.group_id] = byGroup[r.group_id] || []).push(r); }
+    else standalone.push(r);
+  });
+  const deliverables = standalone.map(r => ({
+    key: r.id, rows: [r], grouped: false,
+    brand: r.brands, brandName: r.brands?.name || 'Unassigned (automated)',
+    excluded: !!r.excluded, status: r.status,
+    payAmount: tcAmount(r), earnedAt: r.status==='hit' ? r.posted_at : null,
+    title: r.title, thumbnail: r.thumbnail_url,
+  }));
+  Object.entries(byGroup).forEach(([gid, rows]) => {
+    const active = rows.filter(r=>!r.excluded);
+    const allExcluded = active.length === 0;
+    const consider = allExcluded ? rows : active;
+    const hitRow = consider.find(r=>r.status==='hit');
+    const anyTracking = consider.some(r=>r.status==='tracking');
+    const status = hitRow ? 'hit' : anyTracking ? 'tracking' : 'expired';
+    const rep = hitRow || consider[0];
+    deliverables.push({
+      key: gid, rows, grouped: true,
+      brand: rep.brands, brandName: rep.brands?.name || 'Unassigned (automated)',
+      excluded: allExcluded, status,
+      payAmount: tcAmount(rep), earnedAt: hitRow ? hitRow.posted_at : null,
+      title: rep.title, thumbnail: rep.thumbnail_url,
+    });
+  });
+  return deliverables;
+}
 function trackedContentTotals(){
   // automated-pipeline earnings (Supabase, fed by the scouting job) — folded into the main
   // dashboard totals below. Returns zeros until the first load resolves (see loadTrackedContent),
   // so the dashboard just shows the manual-only numbers for a moment on first paint, then updates.
   if(!TRACKED_CONTENT_DATA) return { earned: 0, pending: 0 };
-  const rows = TRACKED_CONTENT_DATA.filter(r=>!r.excluded);
-  const earned = rows.filter(r=>r.status==='hit').reduce((s,r)=> s + tcAmount(r), 0);
-  const pending = rows.filter(r=>r.status==='tracking').reduce((s,r)=> s + tcAmount(r), 0);
+  const items = getDeliverables().filter(d=>!d.excluded);
+  const earned = items.filter(d=>d.status==='hit').reduce((s,d)=> s + d.payAmount, 0);
+  const pending = items.filter(d=>d.status==='tracking').reduce((s,d)=> s + d.payAmount, 0);
   return { earned, pending };
 }
 function allTotals(){
@@ -1331,12 +1369,12 @@ function previousRangeBounds(range){
 // when given (used by the by-brand breakdown), or sums across everything when omitted.
 function trackedContentEarnedBetween(start, end, brandName){
   if(!TRACKED_CONTENT_DATA) return 0;
-  return TRACKED_CONTENT_DATA.filter(r => {
-    if(r.excluded || r.status!=='hit' || !r.posted_at) return false;
-    if(brandName && r.brands?.name !== brandName) return false;
-    const d = new Date(r.posted_at);
-    return d>=start && d<=end;
-  }).reduce((s,r)=> s + tcAmount(r), 0);
+  return getDeliverables().filter(d => {
+    if(d.excluded || d.status!=='hit' || !d.earnedAt) return false;
+    if(brandName && d.brandName !== brandName) return false;
+    const dt = new Date(d.earnedAt);
+    return dt>=start && dt<=end;
+  }).reduce((s,d)=> s + d.payAmount, 0);
 }
 function sumEarnedBetween(start, end){
   let sum = 0;
@@ -1381,15 +1419,14 @@ function buildSeries(range){
       }
     });
     // automated Tracked Content earnings, grouped by whichever brand's channel it came from
+    // (each crossposted deliverable counts once — see getDeliverables())
     if(TRACKED_CONTENT_DATA){
-      TRACKED_CONTENT_DATA.forEach(r => {
-        if(r.excluded || r.status!=='hit' || !r.posted_at) return;
-        const d = new Date(r.posted_at);
+      getDeliverables().forEach(dv => {
+        if(dv.excluded || dv.status!=='hit' || !dv.earnedAt) return;
+        const d = new Date(dv.earnedAt);
         if(d<b.start || d>b.end) return;
-        const amt = tcAmount(r);
-        total += amt;
-        const key = r.brands?.name || 'Unassigned (automated)';
-        byBrand[key] = (byBrand[key]||0) + amt;
+        total += dv.payAmount;
+        byBrand[dv.brandName] = (byBrand[dv.brandName]||0) + dv.payAmount;
       });
     }
     const breakdown = Object.entries(byBrand).sort((a,b)=>b[1]-a[1]).map(([name,sum])=>({name,sum}));
@@ -1508,12 +1545,12 @@ function renderBrandBreakdown(bounds){
   const FALLBACK_COLORS = ['#9a7ec2','#5aa89e','#c1834f','#5b8ab0','#6f8f6a'];
   let fallbackIdx = 0;
   if(TRACKED_CONTENT_DATA){
-    TRACKED_CONTENT_DATA.forEach(r => {
-      if(r.excluded || r.status!=='hit' || !r.posted_at) return;
-      const d = new Date(r.posted_at);
+    getDeliverables().forEach(dv => {
+      if(dv.excluded || dv.status!=='hit' || !dv.earnedAt) return;
+      const d = new Date(dv.earnedAt);
       if(d<bounds.start || d>bounds.end) return;
-      const amt = tcAmount(r);
-      const name = r.brands?.name || 'Unassigned (automated)';
+      const amt = dv.payAmount;
+      const name = dv.brandName;
       const existing = rows.find(row => row.brand.name === name);
       if(existing){ existing.sum += amt; }
       else{ rows.push({ brand: { name, color: FALLBACK_COLORS[fallbackIdx++ % FALLBACK_COLORS.length] }, sum: amt }); }
@@ -1637,6 +1674,9 @@ const SUPABASE_KEY = 'sb_publishable_qg31XalWLzEM0XPagE63Pw_sebeunEc';
 let TRACKED_CONTENT_DATA = null;
 let TRACKED_CONTENT_LOADING = false;
 let TRACKED_CONTENT_ERROR = null;
+// Row ids (individual tracked_videos, not deliverables) currently checked for merging into one
+// crossposted deliverable — see the Merge button in renderTrackedContent() and renderMergeReviewModal().
+let MERGE_SELECTED = new Set();
 
 // Publish hand-off: once ANY platform on a manual Content item goes 'published', that item's
 // job in the manual pipeline is done — the real video now gets discovered and tracked
@@ -1692,11 +1732,26 @@ async function loadBrandConnections(supabaseBrandId){
   if(MODAL_STATE.type==='brand') render();
 }
 
+// One platform's pill inside a merged deliverable's row — its own view count/requirement,
+// linking straight to that platform's actual video so a merge decision (or a later double-check)
+// can be visually confirmed rather than trusted blind.
+function platformPill(row){
+  const req = row.brands ? Number(row.brands.view_requirement) : null;
+  const label = `${(row.platform||'').toUpperCase()} ${(row.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`;
+  const style = 'margin:2px 4px 2px 0; display:inline-block; text-decoration:none;';
+  return row.url
+    ? `<a href="${row.url}" target="_blank" rel="noopener" class="tag tag-${row.platform}" style="${style}" title="${escapeHtml(row.title||'')}">${label}</a>`
+    : `<span class="tag tag-${row.platform}" style="${style}">${label}</span>`;
+}
+
 function renderTrackedContent(){
   const head = `
     <div class="page-head">
-      <div><h2>Tracked Content</h2><div class="sub">Discovered and tracked automatically from each brand's connected account — nothing here is entered by hand.</div></div>
-      <div class="head-actions"><button class="btn btn-ghost" id="refreshTrackedContent" type="button" ${TRACKED_CONTENT_LOADING?'disabled':''}>${TRACKED_CONTENT_LOADING?'Refreshing…':'↻ Refresh'}</button></div>
+      <div><h2>Tracked Content</h2><div class="sub">Discovered and tracked automatically from each brand's connected account — nothing here is entered by hand. Select 2+ from the same brand to merge a crossposted video into one deliverable.</div></div>
+      <div class="head-actions">
+        ${MERGE_SELECTED.size>=2 ? `<button class="btn btn-primary" id="openMergeReview" type="button">Merge ${MERGE_SELECTED.size} selected</button>` : ''}
+        <button class="btn btn-ghost" id="refreshTrackedContent" type="button" ${TRACKED_CONTENT_LOADING?'disabled':''}>${TRACKED_CONTENT_LOADING?'Refreshing…':'↻ Refresh'}</button>
+      </div>
     </div>`;
 
   if(TRACKED_CONTENT_ERROR){
@@ -1706,37 +1761,43 @@ function renderTrackedContent(){
     return head + `<div class="table-wrap"><div class="empty">Loading…</div></div>`;
   }
 
-  const rows = TRACKED_CONTENT_DATA;
-  const counted = rows.filter(r=>!r.excluded);
-  const hit = counted.filter(r=>r.status==='hit');
-  const tracking = counted.filter(r=>r.status==='tracking');
-  const expired = counted.filter(r=>r.status==='expired');
-  const excludedCount = rows.length - counted.length;
-  const totalEarned = hit.reduce((s,r)=> s + tcAmount(r), 0);
-  const totalPending = tracking.reduce((s,r)=> s + tcAmount(r), 0);
+  const deliverables = getDeliverables();
+  const counted = deliverables.filter(d=>!d.excluded);
+  const hit = counted.filter(d=>d.status==='hit');
+  const tracking = counted.filter(d=>d.status==='tracking');
+  const expired = counted.filter(d=>d.status==='expired');
+  const excludedCount = deliverables.length - counted.length;
+  const totalEarned = hit.reduce((s,d)=> s + d.payAmount, 0);
+  const totalPending = tracking.reduce((s,d)=> s + d.payAmount, 0);
 
   return head + `
     <div class="grid grid-cards" style="margin-bottom:20px;">
-      <div class="card"><div class="label">Earned — automatic</div><div class="big mono fx-green">${money(totalEarned)}</div><div class="foot">${hit.length} video${hit.length===1?'':'s'} hit its requirement</div></div>
+      <div class="card"><div class="label">Earned — automatic</div><div class="big mono fx-green">${money(totalEarned)}</div><div class="foot">${hit.length} deliverable${hit.length===1?'':'s'} hit its requirement</div></div>
       <div class="card"><div class="label">Pending</div><div class="big mono" style="color:var(--text-dim)">${money(totalPending)}</div><div class="foot">${tracking.length} still tracking</div></div>
       <div class="card"><div class="label">Expired</div><div class="big mono ${expired.length>0?'fx-red':''}">${expired.length}</div><div class="foot">Window passed unmet${excludedCount ? ` · ${excludedCount} excluded` : ''}</div></div>
     </div>
-    ${rows.length===0 ? emptyState('Nothing tracked yet','Connect a brand\'s channel and wait for the next scouting run.') : `
+    ${deliverables.length===0 ? emptyState('Nothing tracked yet','Connect a brand\'s channel and wait for the next scouting run.') : `
     <div class="table-wrap" style="overflow-x:auto;"><table>
-      <thead><tr><th>Brand</th><th>Platform</th><th>Title</th><th>Views</th><th>Status</th><th>Payout</th><th>Discovered</th><th></th></tr></thead>
+      <thead><tr><th></th><th></th><th>Brand</th><th>Platform(s)</th><th>Title</th><th>Views</th><th>Status</th><th>Payout</th><th>Discovered</th><th></th></tr></thead>
       <tbody>
-        ${rows.map(r => {
-          const req = r.brands ? Number(r.brands.view_requirement) : null;
-          const amt = tcAmount(r);
-          return `<tr ${r.excluded?'style="opacity:.5;"':''}>
-            <td>${r.brands ? escapeHtml(r.brands.name) : '<span style="color:var(--text-faint)">—</span>'}</td>
-            <td><span class="tag tag-${r.platform}">${(r.platform||'').toUpperCase()}</span></td>
-            <td>${escapeHtml(r.title || 'Untitled')}</td>
-            <td class="mono">${(r.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}</td>
-            <td>${r.excluded ? '<span class="tag tag-neutral">Excluded</span>' : r.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : r.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
-            <td class="mono">${r.status==='hit' && !r.excluded ? money(amt) : `<span style="color:var(--text-faint)">${money(amt)}${r.excluded?'':' pending'}</span>`}</td>
-            <td class="mono">${r.discovered_at ? fmtDate(r.discovered_at.slice(0,10)) : '—'}</td>
-            <td style="white-space:nowrap;">${r.url ? `<a href="${r.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">View</a>` : ''}<button class="btn btn-ghost btn-sm" data-edit-tracked-video="${r.id}" type="button">Edit</button></td>
+        ${deliverables.map(dv => {
+          const rep = dv.rows[0];
+          const req = dv.brand ? Number(dv.brand.view_requirement) : null;
+          return `<tr ${dv.excluded?'style="opacity:.5;"':''}>
+            <td>${!dv.grouped ? `<input type="checkbox" class="checkbox" data-merge-check="${rep.id}" ${MERGE_SELECTED.has(rep.id)?'checked':''} />` : ''}</td>
+            <td>${dv.thumbnail ? `<img src="${dv.thumbnail}" alt="" style="width:40px; height:40px; object-fit:cover; border-radius:6px; display:block;" />` : `<div style="width:40px; height:40px; border-radius:6px; background:var(--surface);"></div>`}</td>
+            <td>${dv.brand ? escapeHtml(dv.brand.name) : '<span style="color:var(--text-faint)">—</span>'}</td>
+            <td>${dv.grouped ? dv.rows.map(platformPill).join('') : `<span class="tag tag-${rep.platform}">${(rep.platform||'').toUpperCase()}</span>`}</td>
+            <td>${escapeHtml(dv.title || 'Untitled')}${dv.grouped ? ` <span class="hint">(${dv.rows.length} platforms merged)</span>` : ''}</td>
+            <td class="mono">${dv.grouped ? '<span style="color:var(--text-faint)">see platforms</span>' : `${(rep.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`}</td>
+            <td>${dv.excluded ? '<span class="tag tag-neutral">Excluded</span>' : dv.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : dv.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
+            <td class="mono">${dv.status==='hit' && !dv.excluded ? money(dv.payAmount) : `<span style="color:var(--text-faint)">${money(dv.payAmount)}${dv.excluded?'':' pending'}</span>`}</td>
+            <td class="mono">${rep.discovered_at ? fmtDate(rep.discovered_at.slice(0,10)) : '—'}</td>
+            <td style="white-space:nowrap;">
+              ${!dv.grouped && rep.url ? `<a href="${rep.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">View</a>` : ''}
+              <button class="btn btn-ghost btn-sm" data-edit-tracked-video="${rep.id}" type="button">Edit</button>
+              ${dv.grouped ? `<button class="btn btn-ghost btn-sm" data-ungroup="${dv.key}" type="button">Ungroup</button>` : ''}
+            </td>
           </tr>`;
         }).join('')}
       </tbody>
@@ -2884,6 +2945,8 @@ function openModal(type, id=null){
   } else if(type==='trackedVideo'){
     const existing = TRACKED_CONTENT_DATA ? TRACKED_CONTENT_DATA.find(r=>r.id===id) : null;
     MODAL_STATE.draft = existing ? { ...existing } : null;
+  } else if(type==='mergeReview'){
+    MODAL_STATE.draft = { rowIds: Array.from(MERGE_SELECTED) };
   }
   MODAL_ENTER = true;
   render();
@@ -2906,6 +2969,7 @@ function renderModalBody(){
   if(MODAL_STATE.type==='payment') return renderPaymentModal();
   if(MODAL_STATE.type==='task') return renderTaskModal();
   if(MODAL_STATE.type==='trackedVideo') return renderTrackedVideoModal();
+  if(MODAL_STATE.type==='mergeReview') return renderMergeReviewModal();
   return '';
 }
 
@@ -3192,6 +3256,32 @@ function renderTrackedVideoModal(){
   </div>`;
 }
 
+function renderMergeReviewModal(){
+  const d = MODAL_STATE.draft;
+  if(!d || !TRACKED_CONTENT_DATA) return '';
+  const rows = TRACKED_CONTENT_DATA.filter(r => d.rowIds.includes(r.id));
+  const brandNames = [...new Set(rows.map(r=>r.brands?.name || 'Unassigned'))];
+  const mismatch = brandNames.length > 1;
+  return `<div class="modal ${MODAL_ENTER?'modal-enter':''}" style="max-width:560px;">
+    <h3>Merge into one deliverable</h3>
+    <div class="hint" style="margin-bottom:12px;">Confirm these are the same piece of content, crossposted to different platforms. Once merged, they pay out once — whichever platform crosses the view requirement first.</div>
+    ${mismatch ? `<div class="hint" style="color:var(--danger); margin-bottom:12px;">⚠ These are from different brands (${brandNames.map(escapeHtml).join(', ')}) — merging across brands isn't supported. Cancel and select videos from the same brand only.</div>` : ''}
+    ${rows.map(r => `
+      <div style="display:flex; gap:10px; align-items:center; padding:8px 0; border-bottom:1px solid var(--border-soft);">
+        ${r.thumbnail_url ? `<img src="${r.thumbnail_url}" alt="" style="width:48px; height:48px; object-fit:cover; border-radius:6px; flex-shrink:0;" />` : `<div style="width:48px; height:48px; border-radius:6px; background:var(--surface); flex-shrink:0;"></div>`}
+        <div style="flex:1; min-width:0;">
+          <div style="display:flex; align-items:center; gap:6px;"><span class="tag tag-${r.platform}">${(r.platform||'').toUpperCase()}</span><span style="font-size:12.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(r.title || 'Untitled')}</span></div>
+          <div class="hint" style="margin-top:2px;">${(r.view_count||0).toLocaleString()} views · Posted ${r.posted_at ? fmtDate(r.posted_at.slice(0,10)) : '—'} · ${escapeHtml(r.brands?.name || 'Unassigned')}</div>
+        </div>
+        ${r.url ? `<a href="${r.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm" style="flex-shrink:0;">Open</a>` : ''}
+      </div>`).join('')}
+    <div class="modal-actions" style="margin-top:14px;">
+      <div></div>
+      <div class="right"><button class="btn btn-ghost" id="cancelModal" type="button">Cancel</button><button class="btn btn-primary" id="confirmMerge" type="button" ${mismatch?'disabled':''}>Confirm merge</button></div>
+    </div>
+  </div>`;
+}
+
 /* ---------------- handlers ---------------- */
 function bindGlobalHandlers(){
   document.querySelectorAll('[data-nav]').forEach(el => el.addEventListener('click', () => {
@@ -3208,6 +3298,26 @@ function bindGlobalHandlers(){
   document.querySelectorAll('[data-del-payment]').forEach(el => el.addEventListener('click', () => { DATA.payments = DATA.payments.filter(p=>p.id!==el.dataset.delPayment); saveData(); render(); }));
   document.querySelectorAll('[data-edit-task]').forEach(el => el.addEventListener('click', () => openModal('task', el.dataset.editTask)));
   document.querySelectorAll('[data-edit-tracked-video]').forEach(el => el.addEventListener('click', () => openModal('trackedVideo', el.dataset.editTrackedVideo)));
+  document.querySelectorAll('[data-merge-check]').forEach(el => el.addEventListener('change', () => {
+    const id = el.dataset.mergeCheck;
+    if(el.checked) MERGE_SELECTED.add(id); else MERGE_SELECTED.delete(id);
+    render();
+  }));
+  const openMergeReview = document.getElementById('openMergeReview');
+  if(openMergeReview) openMergeReview.addEventListener('click', () => openModal('mergeReview'));
+  document.querySelectorAll('[data-ungroup]').forEach(el => el.addEventListener('click', () => {
+    const groupId = el.dataset.ungroup;
+    askConfirm('Ungroup this deliverable? Each platform goes back to being tracked and paid separately.', async () => {
+      const rowIds = TRACKED_CONTENT_DATA.filter(r=>r.group_id===groupId).map(r=>r.id);
+      await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=in.(${rowIds.map(id=>`"${id}"`).join(',')})`, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ group_id: null }),
+      });
+      TRACKED_CONTENT_DATA.forEach(r => { if(r.group_id===groupId) r.group_id = null; });
+      render();
+    });
+  }));
 
   // dashboard range + chart type
   document.querySelectorAll('[data-range]').forEach(el => el.addEventListener('click', () => { DASH_RANGE = el.dataset.range; render(); }));
@@ -3591,6 +3701,27 @@ function bindGlobalHandlers(){
     }catch(e){
       alert('Could not save — ' + e.message);
       saveTrackedVideo.disabled = false; saveTrackedVideo.textContent = 'Save';
+    }
+  });
+
+  const confirmMerge = document.getElementById('confirmMerge');
+  if(confirmMerge) confirmMerge.addEventListener('click', async () => {
+    const rowIds = MODAL_STATE.draft.rowIds;
+    const groupId = newUuid();
+    confirmMerge.disabled = true; confirmMerge.textContent = 'Merging…';
+    try{
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=in.(${rowIds.map(id=>`"${id}"`).join(',')})`, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ group_id: groupId }),
+      });
+      if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+      TRACKED_CONTENT_DATA.forEach(r => { if(rowIds.includes(r.id)) r.group_id = groupId; });
+      MERGE_SELECTED.clear();
+      closeModal();
+    }catch(e){
+      alert('Could not merge — ' + e.message);
+      confirmMerge.disabled = false; confirmMerge.textContent = 'Confirm merge';
     }
   });
 
