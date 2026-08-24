@@ -22,7 +22,7 @@ export default function handler(req, res) {
   }
 
   const redirectUri = 'https://backend-building.vercel.app/api/auth/tiktok/callback';
-  const scope = ['user.info.basic', 'video.list'].join(',');
+  const scope = ['user.info.profile', 'video.list'].join(',');
 
   const authUrl =
     `https://www.tiktok.com/v2/auth/authorize/` +
