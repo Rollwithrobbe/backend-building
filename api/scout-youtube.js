@@ -82,6 +82,10 @@ export default async function handler(req, res) {
         const eligibleUntil = defaultBrand
           ? new Date(Date.now() + defaultBrand.eligibility_window_days * 86400000).toISOString()
           : null;
+        // check the threshold immediately on discovery too — a video can already have enough
+        // views the very first time it's seen (e.g. discovered a few days after posting), and
+        // that shouldn't have to wait for a second run to be caught.
+        const alreadyHit = !!(defaultBrand && viewCount >= defaultBrand.view_requirement);
         await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos`, {
           method: 'POST',
           headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
@@ -95,10 +99,11 @@ export default async function handler(req, res) {
             view_count: viewCount,
             last_checked_at: new Date().toISOString(),
             eligible_until: eligibleUntil,
-            status: 'tracking',
+            status: alreadyHit ? 'hit' : 'tracking',
+            earned: alreadyHit,
           }),
         });
-        results.push({ id: v.id, action: 'discovered', views: viewCount });
+        results.push({ id: v.id, action: 'discovered', views: viewCount, status: alreadyHit ? 'hit' : 'tracking' });
       } else {
         const row = existing[0];
         if (row.status === 'tracking') {
