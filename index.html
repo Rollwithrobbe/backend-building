@@ -658,6 +658,7 @@ async function loadData(){
   await loadAISettings();
   await restoreAutoBackupHandle();
   render();
+  loadTrackedContent(); // fire-and-forget — dashboard totals update on their own once this resolves
 }
 async function loadAISettings(){
   try{
@@ -920,9 +921,22 @@ function brandTotals(brandId){
   const totalEarned = contentEarned + receivedCpm;
   return { count: items.length, contentEarned, totalEarned, pending, received, receivedBase, receivedCpm, outstanding: totalEarned - received };
 }
+function trackedContentTotals(){
+  // automated-pipeline earnings (Supabase, fed by the scouting job) — folded into the main
+  // dashboard totals below. Returns zeros until the first load resolves (see loadTrackedContent),
+  // so the dashboard just shows the manual-only numbers for a moment on first paint, then updates.
+  if(!TRACKED_CONTENT_DATA) return { earned: 0, pending: 0 };
+  const rows = TRACKED_CONTENT_DATA;
+  const earned = rows.filter(r=>r.status==='hit').reduce((s,r)=> s + Number(r.brands?.base_pay||0), 0);
+  const pending = rows.filter(r=>r.status==='tracking').reduce((s,r)=> s + Number(r.brands?.base_pay||0), 0);
+  return { earned, pending };
+}
 function allTotals(){
   let totalEarned=0, received=0, pending=0;
   DATA.brands.forEach(b => { const t = brandTotals(b.id); totalEarned += t.totalEarned; received += t.received; pending += t.pending; });
+  const tc = trackedContentTotals();
+  totalEarned += tc.earned;
+  pending += tc.pending;
   return { totalEarned, received, pending, outstanding: totalEarned - received, contentCount: DATA.content.length, brandCount: DATA.brands.length };
 }
 function brandById(id){ return DATA.brands.find(b=>b.id===id); }
@@ -1403,6 +1417,23 @@ const SUPABASE_KEY = 'sb_publishable_qg31XalWLzEM0XPagE63Pw_sebeunEc';
 let TRACKED_CONTENT_DATA = null;
 let TRACKED_CONTENT_LOADING = false;
 let TRACKED_CONTENT_ERROR = null;
+
+// Publish hand-off: once ANY platform on a manual Content item goes 'published', that item's
+// job in the manual pipeline is done — the real video now gets discovered and tracked
+// automatically by the scouting job on its own, independent of anything in this dashboard.
+// So instead of moving it to the (still-manual) Published tab, it's removed outright. Called
+// from every place a platform's status can become 'published'. Returns true if it removed the
+// item, so callers know not to also try to re-render a since-deleted row.
+function handOffIfPublished(contentId){
+  const c = DATA.content.find(x => x.id === contentId);
+  if(!c) return false;
+  const nowPublished = (c.platforms||[]).some(p => p.active && p.status === 'published');
+  if(!nowPublished) return false;
+  DATA.content = DATA.content.filter(x => x.id !== contentId);
+  saveData();
+  showToast('Published — now tracked automatically, off the manual list');
+  return true;
+}
 
 async function loadTrackedContent(){
   if(TRACKED_CONTENT_LOADING) return;
@@ -2886,7 +2917,8 @@ function bindGlobalHandlers(){
     const c = DATA.content.find(x=>x.id===el.dataset.editTitle); if(c){ c.title = el.value; saveData(); render(); }
   }));
   document.querySelectorAll('[data-edit-status-all]').forEach(el => el.addEventListener('change', () => {
-    const c = DATA.content.find(x=>x.id===el.dataset.editStatusAll);
+    const cid = el.dataset.editStatusAll;
+    const c = DATA.content.find(x=>x.id===cid);
     if(c){
       c.platforms.forEach(p => {
         if(p.active){
@@ -2896,7 +2928,9 @@ function bindGlobalHandlers(){
           if(el.value==='published' && !p.postDate) p.postDate = todayISO();
         }
       });
-      saveData(); render();
+      saveData();
+      handOffIfPublished(cid);
+      render();
     }
   }));
   document.querySelectorAll('[data-edit-status]').forEach(el => el.addEventListener('change', () => {
@@ -2905,7 +2939,9 @@ function bindGlobalHandlers(){
     if(p){
       p.status = el.value;
       if(el.value==='published' && !p.postDate) p.postDate = todayISO();
-      saveData(); render();
+      saveData();
+      handOffIfPublished(cid);
+      render();
     }
   }));
   document.querySelectorAll('[data-edit-views]').forEach(el => el.addEventListener('change', () => {
@@ -2928,7 +2964,9 @@ function bindGlobalHandlers(){
       if(p.status !== 'published') p.status = 'published';
       if(!p.postDate) p.postDate = todayISO();
     }
-    saveData(); render();
+    saveData();
+    handOffIfPublished(cid);
+    render();
   }));
   document.querySelectorAll('[data-make-brief]').forEach(el => el.addEventListener('click', () => makeBriefVideo(el.dataset.makeBrief)));
   document.querySelectorAll('[data-undo-brief]').forEach(el => el.addEventListener('click', () => undoBriefVideo(el.dataset.undoBrief)));
@@ -3074,7 +3112,9 @@ function bindGlobalHandlers(){
     const isNew = idx < 0;
     if(idx>=0) DATA.content[idx]=d; else DATA.content.push(d);
     if(isNew) bumpBriefProgressForContentCreation(d.brandId); // a real video was just logged — count it toward today's quota
-    saveData(); closeModal();
+    saveData();
+    handOffIfPublished(d.id);
+    closeModal();
   });
   const viewReqBtn = document.getElementById('f-viewreqmet');
   if(viewReqBtn) viewReqBtn.addEventListener('click', () => { MODAL_STATE.draft.viewRequirementMet = !MODAL_STATE.draft.viewRequirementMet; render(); document.getElementById('overlay').classList.add('open'); });
