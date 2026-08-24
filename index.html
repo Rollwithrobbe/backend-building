@@ -1341,6 +1341,7 @@ function render(){
 function renderSidebar(){
   const nav = [
     {id:'dashboard', label:'Dashboard'},
+    {id:'trackedContent', label:'Tracked Content'},
     {id:'content', label:'Content'},
     {id:'published', label:'Published'},
     {id:'tasks', label:'Tasks'},
@@ -1380,12 +1381,96 @@ function renderSidebar(){
 
 function renderView(){
   if(VIEW==='dashboard') return renderDashboard();
+  if(VIEW==='trackedContent') return renderTrackedContent();
   if(VIEW==='content') return renderContent();
   if(VIEW==='published') return renderPublished();
   if(VIEW==='tasks') return renderTasks();
   if(VIEW==='brands') return renderBrands();
   if(VIEW==='payments') return renderPayments();
   return '';
+}
+
+/* ---------------- tracked content (automated backend — separate from the manual system above) ----------------
+   Reads live from Supabase instead of DATA/localStorage. Fed entirely by the scouting job
+   (api/scout-youtube.js, run on a schedule) — nothing here is editable by hand. This is
+   intentionally a read-only window into the automated pipeline while it's being proven out;
+   the manual Content/Published/Tasks tabs above are completely unaffected by any of this.
+   The Supabase publishable key below is safe to expose client-side by design (that's what
+   "publishable" means) — it's not a secret, unlike the YouTube API key which stays
+   server-side only inside the scouting function. */
+const SUPABASE_URL = 'https://scuvvtbuisvrscltwujt.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_qg31XalWLzEM0XPagE63Pw_sebeunEc';
+let TRACKED_CONTENT_DATA = null;
+let TRACKED_CONTENT_LOADING = false;
+let TRACKED_CONTENT_ERROR = null;
+
+async function loadTrackedContent(){
+  if(TRACKED_CONTENT_LOADING) return;
+  TRACKED_CONTENT_LOADING = true;
+  TRACKED_CONTENT_ERROR = null;
+  render();
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/tracked_videos?select=*,brands(name,base_pay,view_requirement,eligibility_window_days)&order=discovered_at.desc`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+    TRACKED_CONTENT_DATA = await res.json();
+  }catch(e){
+    TRACKED_CONTENT_ERROR = e.message || 'Failed to load tracked content';
+    console.error('loadTrackedContent failed', e);
+  }
+  TRACKED_CONTENT_LOADING = false;
+  render();
+}
+
+function renderTrackedContent(){
+  const head = `
+    <div class="page-head">
+      <div><h2>Tracked Content</h2><div class="sub">Discovered and tracked automatically from each brand's connected account — nothing here is entered by hand.</div></div>
+      <div class="head-actions"><button class="btn btn-ghost" id="refreshTrackedContent" type="button" ${TRACKED_CONTENT_LOADING?'disabled':''}>${TRACKED_CONTENT_LOADING?'Refreshing…':'↻ Refresh'}</button></div>
+    </div>`;
+
+  if(TRACKED_CONTENT_ERROR){
+    return head + `<div class="table-wrap"><div class="empty"><b>Couldn't load tracked content</b>${escapeHtml(TRACKED_CONTENT_ERROR)}</div></div>`;
+  }
+  if(!TRACKED_CONTENT_DATA){
+    return head + `<div class="table-wrap"><div class="empty">Loading…</div></div>`;
+  }
+
+  const rows = TRACKED_CONTENT_DATA;
+  const hit = rows.filter(r=>r.status==='hit');
+  const tracking = rows.filter(r=>r.status==='tracking');
+  const expired = rows.filter(r=>r.status==='expired');
+  const totalEarned = hit.reduce((s,r)=> s + Number(r.brands?.base_pay||0), 0);
+  const totalPending = tracking.reduce((s,r)=> s + Number(r.brands?.base_pay||0), 0);
+
+  return head + `
+    <div class="grid grid-cards" style="margin-bottom:20px;">
+      <div class="card"><div class="label">Earned — automatic</div><div class="big mono fx-green">${money(totalEarned)}</div><div class="foot">${hit.length} video${hit.length===1?'':'s'} hit its requirement</div></div>
+      <div class="card"><div class="label">Pending</div><div class="big mono" style="color:var(--text-dim)">${money(totalPending)}</div><div class="foot">${tracking.length} still tracking</div></div>
+      <div class="card"><div class="label">Expired</div><div class="big mono ${expired.length>0?'fx-red':''}">${expired.length}</div><div class="foot">Window passed unmet</div></div>
+    </div>
+    ${rows.length===0 ? emptyState('Nothing tracked yet','Connect a brand\'s channel and wait for the next scouting run.') : `
+    <div class="table-wrap" style="overflow-x:auto;"><table>
+      <thead><tr><th>Brand</th><th>Platform</th><th>Title</th><th>Views</th><th>Status</th><th>Payout</th><th>Discovered</th><th></th></tr></thead>
+      <tbody>
+        ${rows.map(r => {
+          const req = r.brands ? Number(r.brands.view_requirement) : null;
+          return `<tr>
+            <td>${r.brands ? escapeHtml(r.brands.name) : '<span style="color:var(--text-faint)">—</span>'}</td>
+            <td><span class="tag tag-${r.platform}">${(r.platform||'').toUpperCase()}</span></td>
+            <td>${escapeHtml(r.title || 'Untitled')}</td>
+            <td class="mono">${(r.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}</td>
+            <td>${r.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : r.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
+            <td class="mono">${r.status==='hit' ? money(r.brands?.base_pay||0) : `<span style="color:var(--text-faint)">${money(r.brands?.base_pay||0)} pending</span>`}</td>
+            <td class="mono">${r.discovered_at ? fmtDate(r.discovered_at.slice(0,10)) : '—'}</td>
+            <td>${r.url ? `<a href="${r.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">View</a>` : ''}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table></div>`}
+  `;
 }
 
 /* ---------------- dashboard ---------------- */
@@ -2743,7 +2828,13 @@ function renderTaskModal(){
 
 /* ---------------- handlers ---------------- */
 function bindGlobalHandlers(){
-  document.querySelectorAll('[data-nav]').forEach(el => el.addEventListener('click', () => { VIEW = el.dataset.nav; ACTIVE_BRAND_FILTER=null; render(); }));
+  document.querySelectorAll('[data-nav]').forEach(el => el.addEventListener('click', () => {
+    VIEW = el.dataset.nav; ACTIVE_BRAND_FILTER=null;
+    if(VIEW==='trackedContent' && TRACKED_CONTENT_DATA===null && !TRACKED_CONTENT_LOADING){ loadTrackedContent(); return; }
+    render();
+  }));
+  const refreshTrackedContent = document.getElementById('refreshTrackedContent');
+  if(refreshTrackedContent) refreshTrackedContent.addEventListener('click', () => { TRACKED_CONTENT_DATA = null; loadTrackedContent(); });
   document.querySelectorAll('[data-open-modal]').forEach(el => el.addEventListener('click', () => openModal(el.dataset.openModal)));
   document.querySelectorAll('[data-goto-brand]').forEach(el => el.addEventListener('click', () => { VIEW='content'; ACTIVE_BRAND_FILTER = el.dataset.gotoBrand; render(); }));
   document.querySelectorAll('[data-open-content]').forEach(el => el.addEventListener('click', () => openModal('content', el.dataset.openContent)));
