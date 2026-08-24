@@ -67,7 +67,7 @@ export default async function handler(req, res) {
 
     // 3. Grab the username for a friendly confirmation message
     const meRes = await fetch(
-      `https://graph.instagram.com/${igUserId}?fields=username&access_token=${encodeURIComponent(longLivedToken)}`
+      `https://graph.instagram.com/me?fields=username&access_token=${encodeURIComponent(longLivedToken)}`
     );
     const meData = await meRes.json();
     const username = meData.username || '(unknown)';

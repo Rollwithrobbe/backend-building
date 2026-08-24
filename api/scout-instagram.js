@@ -56,8 +56,11 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
   }
 
   // 1. Pull recent media, only keeping Reels (that's what carries a view-count/base-pay target)
+  // "me" is used instead of the numeric account id — with an Instagram Login user token,
+  // the token is already scoped to exactly one account, and "me" is the endpoint form
+  // that actually resolves for it (the raw numeric id form returns a "does not exist" error).
   const mediaRes = await fetch(
-    `https://graph.instagram.com/${igId}/media` +
+    `https://graph.instagram.com/me/media` +
     `?fields=id,caption,timestamp,permalink,media_type,media_product_type` +
     `&limit=50&access_token=${encodeURIComponent(token)}`
   );
