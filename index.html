@@ -1837,14 +1837,18 @@ function renderCompareView(brandName, searchQ){
 }
 
 function renderTitleCell(dv){
-  const LIMIT = 60;
+  // Character-count truncation still let a "short" caption wrap across 2-3 lines in a narrow
+  // column, so rows stayed tall even when "truncated". A hard 2-line clamp caps the visible
+  // height predictably regardless of how the text happens to wrap, with a compact toggle
+  // directly underneath instead of pushing a 3rd line.
+  const THRESHOLD = 90; // rough length past which 2 lines is likely to not be enough to show it all
   const full = dv.title || 'Untitled';
   const suffix = dv.grouped ? ` <span class="hint">(${dv.rows.length} platforms merged)</span>` : '';
-  if(full.length <= LIMIT) return `${escapeHtml(full)}${suffix}`;
+  if(full.length <= THRESHOLD) return `${escapeHtml(full)}${suffix}`;
   const expanded = TC_EXPANDED.has(dv.key);
-  const shown = expanded ? escapeHtml(full) : escapeHtml(full.slice(0, LIMIT)) + '…';
-  const toggleLabel = expanded ? 'Show less' : 'Show more';
-  return `${shown} <button type="button" data-toggle-title="${dv.key}" style="background:none; border:none; padding:0; color:var(--accent); font-size:inherit; cursor:pointer; text-decoration:underline;">${toggleLabel}</button>${suffix}`;
+  const toggleBtn = `<button type="button" data-toggle-title="${dv.key}" style="background:none; border:none; padding:0; color:var(--accent); font-size:11px; cursor:pointer; text-decoration:underline; display:block; margin-top:2px;">${expanded?'Show less':'Show more'}</button>`;
+  if(expanded) return `${escapeHtml(full)}${suffix}${toggleBtn}`;
+  return `<div style="display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; line-height:1.3;">${escapeHtml(full)}</div>${suffix}${toggleBtn}`;
 }
 
 function renderTrackedContent(){
