@@ -1736,6 +1736,20 @@ async function loadBrandConnections(supabaseBrandId){
   }
   if(MODAL_STATE.type==='brand') render();
 }
+// Every existing Supabase brand — loaded when the brand modal opens for a not-yet-linked brand,
+// so it can offer "link to an existing one" (e.g. PureFi, Amboras, Test Brand 2, which already
+// have real tracked_videos history) instead of only ever creating a fresh, disconnected row.
+async function loadAllBackendBrands(){
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/brands?select=id,name&order=name`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+    });
+    MODAL_ALL_BACKEND_BRANDS = await res.json();
+  }catch(e){
+    MODAL_ALL_BACKEND_BRANDS = [];
+  }
+  if(MODAL_STATE.type==='brand') render();
+}
 
 // One platform's pill inside a merged deliverable's row — its own view count/requirement,
 // linking straight to that platform's actual video so a merge decision (or a later double-check)
@@ -3051,7 +3065,9 @@ function openModal(type, id=null){
     // straight into Supabase's brands.id column — same id space the automated-tracking rows use
     MODAL_STATE.draft = existing ? {...existing} : { id: newUuid(), name:'', status:'active', color: SWATCHES[DATA.brands.length % SWATCHES.length], notes:'' };
     MODAL_BRAND_CONN = null;
+    MODAL_ALL_BACKEND_BRANDS = null;
     if(existing && existing.supabaseBrandId) loadBrandConnections(existing.supabaseBrandId);
+    else if(existing) loadAllBackendBrands();
   } else if(type==='content'){
     const existing = id ? DATA.content.find(c=>c.id===id) : null;
     MODAL_STATE.draft = existing ? { ...JSON.parse(JSON.stringify(existing)), platforms: normalizePlatforms(existing.platforms) } : {
@@ -3108,8 +3124,23 @@ function renderBrandConnections(d){
     return `<div class="hint">Save this brand first, then reopen it to connect YouTube/Instagram/TikTok accounts.</div>`;
   }
   if(!d.supabaseBrandId){
+    const existingOptions = (MODAL_ALL_BACKEND_BRANDS || []).filter(b => b.name !== d.name || true); // show all — a name match doesn't guarantee it's the right one to link
     return `
-      <div class="hint" style="margin-bottom:8px;">Not set up for automated tracking yet. This creates a backend record using this brief's base pay, view requirement, and window as the starting rate — edit it anytime from here.</div>
+      <div class="hint" style="margin-bottom:8px;">Not set up for automated tracking yet.</div>
+      ${existingOptions.length > 0 ? `
+      <div class="field-row" style="align-items:flex-end;">
+        <div class="field"><label>Already tracking this brand under a different name?</label>
+          <select id="f-linkExistingBrand">
+            <option value="">Choose an existing backend brand…</option>
+            ${existingOptions.map(b=>`<option value="${b.id}">${escapeHtml(b.name)}</option>`).join('')}
+          </select>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="linkExistingBrand" type="button">Link</button>
+      </div>
+      <div class="hint" style="margin:4px 0 12px;">Links to that brand's existing tracked videos and connections instead of starting fresh — use this if it already exists in the backend (e.g. from before this brand had a manual profile here).</div>
+      <div class="hint" style="margin-bottom:6px;">— or —</div>
+      ` : (MODAL_ALL_BACKEND_BRANDS === null ? `<div class="hint" style="margin-bottom:8px;">Checking for an existing backend record…</div>` : '')}
+      <div class="hint" style="margin-bottom:8px;">Create a new one — uses this brief's base pay, view requirement, and window as the starting rate, editable anytime from here.</div>
       <button class="btn btn-primary btn-sm" id="provisionBackendBrand" type="button">Enable automated tracking</button>
     `;
   }
@@ -3673,6 +3704,21 @@ function bindGlobalHandlers(){
     }
     const idx = DATA.brands.findIndex(b=>b.id===d.id);
     if(idx>=0) DATA.brands[idx]=d; else DATA.brands.push(d);
+    // keep the linked backend brand's automated-tracking rate in sync with this brief — so
+    // editing the rate here is the one place that changes it. Only ever affects *future*
+    // discoveries (each tracked video snapshots its own rate the moment it's found — see
+    // getDeliverables()/pay_amount), so this never silently changes what's already been earned.
+    if(d.supabaseBrandId && d.brief){
+      fetch(`${SUPABASE_URL}/rest/v1/brands?id=eq.${encodeURIComponent(d.supabaseBrandId)}`, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({
+          base_pay: Number(d.brief.basePay)||0,
+          view_requirement: d.brief.viewRequirement ? Number(d.brief.viewRequirement) : 0,
+          eligibility_window_days: d.brief.viewRequirementWindowDays ? Number(d.brief.viewRequirementWindowDays) : 30,
+        }),
+      }).catch(e => console.warn('Could not sync brief rate to backend brand:', e));
+    }
     saveData(); closeModal();
   });
   const deleteBrand = document.getElementById('deleteBrand');
@@ -3710,6 +3756,20 @@ function bindGlobalHandlers(){
       alert('Could not set up automated tracking — ' + e.message);
       provisionBackendBrand.disabled = false; provisionBackendBrand.textContent = 'Enable automated tracking';
     }
+  });
+
+  const linkExistingBrand = document.getElementById('linkExistingBrand');
+  if(linkExistingBrand) linkExistingBrand.addEventListener('click', () => {
+    const select = document.getElementById('f-linkExistingBrand');
+    const backendId = select.value;
+    if(!backendId) return;
+    const d = MODAL_STATE.draft;
+    d.supabaseBrandId = backendId;
+    const idx = DATA.brands.findIndex(b=>b.id===d.id);
+    if(idx>=0){ DATA.brands[idx].supabaseBrandId = backendId; saveData(); }
+    MODAL_BRAND_CONN = null;
+    loadBrandConnections(backendId);
+    render();
   });
 
   const saveYtHandle = document.getElementById('saveYtHandle');
