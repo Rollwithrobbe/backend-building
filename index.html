@@ -1609,6 +1609,7 @@ function render(){
       ${TIMER_DONE_POPUP ? renderTimerDonePopup() : ''}
     `;
     bindGlobalHandlers();
+    if(VIEW==='trackedContent' && TC_VIEW_MODE==='table') clampTrackedTitles();
   }catch(err){
     // if any part of the render throws, the DOM update above never happens and the UI silently
     // shows stale data with no indication anything went wrong — surface it instead so it's debuggable
@@ -1837,18 +1838,29 @@ function renderCompareView(brandName, searchQ){
 }
 
 function renderTitleCell(dv){
-  // Character-count truncation still let a "short" caption wrap across 2-3 lines in a narrow
-  // column, so rows stayed tall even when "truncated". A hard 2-line clamp caps the visible
-  // height predictably regardless of how the text happens to wrap, with a compact toggle
-  // directly underneath instead of pushing a 3rd line.
-  const THRESHOLD = 90; // rough length past which 2 lines is likely to not be enough to show it all
+  // A character-count threshold isn't reliable here — emoji/hashtag-heavy captions pack onto
+  // lines poorly and can still wrap to 3 lines well under any safe length cutoff. So every
+  // title unconditionally gets a hard 2-line clamp (guarantees the row height regardless of
+  // content), and a post-render pass (see clampTrackedTitles()) measures which ones actually
+  // got cut off and only then reveals a "Show more" toggle for that specific row — never a
+  // dead button that expands nothing.
   const full = dv.title || 'Untitled';
   const suffix = dv.grouped ? ` <span class="hint">(${dv.rows.length} platforms merged)</span>` : '';
-  if(full.length <= THRESHOLD) return `${escapeHtml(full)}${suffix}`;
   const expanded = TC_EXPANDED.has(dv.key);
-  const toggleBtn = `<button type="button" data-toggle-title="${dv.key}" style="background:none; border:none; padding:0; color:var(--accent); font-size:11px; cursor:pointer; text-decoration:underline; display:block; margin-top:2px;">${expanded?'Show less':'Show more'}</button>`;
-  if(expanded) return `${escapeHtml(full)}${suffix}${toggleBtn}`;
-  return `<div style="display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; line-height:1.3;">${escapeHtml(full)}</div>${suffix}${toggleBtn}`;
+  const toggleBtn = `<button type="button" data-toggle-title="${dv.key}" style="display:none; background:none; border:none; padding:0; color:var(--accent); font-size:11px; cursor:pointer; text-decoration:underline; margin-top:2px;">${expanded?'Show less':'Show more'}</button>`;
+  if(expanded) return `${escapeHtml(full)}${suffix}<div>${toggleBtn}</div>`;
+  return `<div class="tc-title-clamp" data-clamp-key="${dv.key}" style="display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; line-height:1.3;">${escapeHtml(full)}</div>${suffix}<div>${toggleBtn}</div>`;
+}
+// After the Tracked Content table paints, measure which clamped titles actually got cut off
+// (scrollHeight > clientHeight) and only then reveal that row's "Show more" toggle — a title
+// that fits in 2 lines never shows a button that would expand to reveal nothing new.
+function clampTrackedTitles(){
+  document.querySelectorAll('.tc-title-clamp').forEach(el => {
+    if(el.scrollHeight > el.clientHeight + 1){
+      const btn = el.parentElement.querySelector(`[data-toggle-title="${el.dataset.clampKey}"]`);
+      if(btn) btn.style.display = 'inline-block';
+    }
+  });
 }
 
 function renderTrackedContent(){
