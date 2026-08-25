@@ -3156,6 +3156,15 @@ function renderBrandConnections(d){
   const c = MODAL_BRAND_CONN;
   const base = 'https://backend-building.vercel.app';
   return `
+    <div class="field-row">
+      <div class="field"><label>Base pay per video ($)</label><input type="number" id="f-rateBasePay" value="${c.base_pay ?? 0}" step="0.01" /></div>
+      <div class="field"><label>Minimum view requirement</label><input type="number" id="f-rateViewReq" value="${c.view_requirement || ''}" placeholder="0 = no minimum" min="0" /></div>
+      <div class="field"><label>Window (days)</label><input type="number" id="f-rateWindow" value="${c.eligibility_window_days || ''}" placeholder="e.g. 30" min="0" /></div>
+    </div>
+    <div style="margin-bottom:12px;">
+      <button class="btn btn-ghost btn-sm" id="saveTrackingRate" type="button">Save rate</button>
+      <span class="hint">Base pay only applies to newly-discovered videos from now on (already-tracked ones keep the rate they were found under). The view requirement is different — it's re-checked live against every still-tracking video on each scouting run, so lowering it (e.g. to 0 for "no minimum") can flip already-posted, still-pending videos straight to Hit on the next run.</span>
+    </div>
     <div class="field">
       <label>YouTube channel handle</label>
       <div style="display:flex; gap:8px;">
@@ -3726,9 +3735,24 @@ function bindGlobalHandlers(){
   });
   const deleteBrand = document.getElementById('deleteBrand');
   if(deleteBrand) deleteBrand.addEventListener('click', () => {
-    askConfirm('Delete this brand? Its content and payments stay logged but unlinked.', () => {
-      DATA.brands = DATA.brands.filter(b=>b.id!==MODAL_STATE.draft.id);
+    const d = MODAL_STATE.draft;
+    askConfirm('Delete this brand? Its content and payments stay logged but unlinked.', async () => {
+      DATA.brands = DATA.brands.filter(b=>b.id!==d.id);
       saveData(); closeModal();
+      // Also remove the linked backend record, if any — safe to attempt unconditionally: the
+      // database itself refuses the delete (foreign key) if real tracked_videos history is tied
+      // to it, so this can never silently destroy real automated-tracking data. Without this,
+      // deleting a brand only removed it locally — in cloud mode, the next load re-fetches every
+      // Supabase brand unconditionally, so the "deleted" brand would just reappear.
+      if(d.supabaseBrandId && CLOUD_MODE){
+        try{
+          const res = await fetch(`${SUPABASE_URL}/rest/v1/brands?id=eq.${encodeURIComponent(d.supabaseBrandId)}`, {
+            method: 'DELETE',
+            headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' },
+          });
+          if(!res.ok) showToast('Kept in the backend — it has real tracked video history');
+        }catch(e){ console.warn('Could not remove backend brand record:', e); }
+      }
     });
   });
 
@@ -3773,6 +3797,28 @@ function bindGlobalHandlers(){
     MODAL_BRAND_CONN = null;
     loadBrandConnections(backendId);
     render();
+  });
+
+  const saveTrackingRate = document.getElementById('saveTrackingRate');
+  if(saveTrackingRate) saveTrackingRate.addEventListener('click', async () => {
+    const d = MODAL_STATE.draft;
+    const basePay = Number(document.getElementById('f-rateBasePay').value) || 0;
+    const viewReq = Number(document.getElementById('f-rateViewReq').value) || 0;
+    const windowDays = Number(document.getElementById('f-rateWindow').value) || 0;
+    saveTrackingRate.disabled = true; saveTrackingRate.textContent = 'Saving…';
+    try{
+      await fetch(`${SUPABASE_URL}/rest/v1/brands?id=eq.${encodeURIComponent(d.supabaseBrandId)}`, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ base_pay: basePay, view_requirement: viewReq, eligibility_window_days: windowDays }),
+      });
+      if(MODAL_BRAND_CONN){ MODAL_BRAND_CONN.base_pay = basePay; MODAL_BRAND_CONN.view_requirement = viewReq; MODAL_BRAND_CONN.eligibility_window_days = windowDays; }
+      showToast('Rate saved');
+      render();
+    }catch(e){
+      alert('Could not save — ' + e.message);
+      saveTrackingRate.disabled = false; saveTrackingRate.textContent = 'Save rate';
+    }
   });
 
   const saveYtHandle = document.getElementById('saveYtHandle');
