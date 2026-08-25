@@ -142,7 +142,34 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
       }
     }
   }
-  return { checked: results.length, results };
+
+  // Anything Supabase still has as 'tracking' for this brand+platform that didn't show up in
+  // this fetch has vanished from Instagram (deleted, or archived — archived posts drop out of
+  // the standard media list) before ever hitting its requirement — flag it distinctly instead
+  // of freezing it silently forever pretending it might still resolve. Self-heals: if it
+  // reappears in a later fetch (e.g. unarchived), the normal update path above finds the
+  // existing row and overwrites this status.
+  const seenIds = new Set(reels.map((m) => m.id));
+  const missingCount = await flagMissingVideos(brand, 'instagram', seenIds, SUPABASE_URL, sbHeaders);
+
+  return { checked: results.length, results, flaggedMissing: missingCount };
+}
+
+async function flagMissingVideos(brand, platform, seenIds, SUPABASE_URL, sbHeaders) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/tracked_videos?platform=eq.${platform}&brand_id=eq.${brand.id}&status=eq.tracking&select=id,external_video_id`,
+    { headers: sbHeaders }
+  );
+  const stillTracking = await res.json();
+  const nowMissing = (Array.isArray(stillTracking) ? stillTracking : []).filter((row) => !seenIds.has(row.external_video_id));
+  for (const row of nowMissing) {
+    await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
+      method: 'PATCH',
+      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ status: 'missing', last_checked_at: new Date().toISOString() }),
+    });
+  }
+  return nowMissing.length;
 }
 
 // Instagram has renamed/consolidated its view-count metric a few times across API

@@ -1133,7 +1133,8 @@ function getDeliverables(){
     const consider = allExcluded ? rows : active;
     const hitRow = consider.find(r=>r.status==='hit');
     const anyTracking = consider.some(r=>r.status==='tracking');
-    const status = hitRow ? 'hit' : anyTracking ? 'tracking' : 'expired';
+    const anyMissing = consider.some(r=>r.status==='missing');
+    const status = hitRow ? 'hit' : anyTracking ? 'tracking' : anyMissing ? 'missing' : 'expired';
     const rep = hitRow || consider[0];
     // earliest of the group's post times — when this piece of content first went out, before
     // it was crossposted elsewhere (matches clusterForCompare's anchor convention)
@@ -1887,6 +1888,7 @@ function renderTrackedContent(){
         <option value="hit" ${TC_FILTER.status==='hit'?'selected':''}>Hit</option>
         <option value="tracking" ${TC_FILTER.status==='tracking'?'selected':''}>Tracking</option>
         <option value="expired" ${TC_FILTER.status==='expired'?'selected':''}>Expired</option>
+        <option value="missing" ${TC_FILTER.status==='missing'?'selected':''}>Missing</option>
         <option value="excluded" ${TC_FILTER.status==='excluded'?'selected':''}>Excluded</option>
       </select>` : ''}
       <input type="text" id="tcSearch" placeholder="Search title…" value="${escapeHtml(TC_FILTER.q)}" />
@@ -1901,6 +1903,7 @@ function renderTrackedContent(){
   const hit = counted.filter(d=>d.status==='hit');
   const tracking = counted.filter(d=>d.status==='tracking');
   const expired = counted.filter(d=>d.status==='expired');
+  const missing = counted.filter(d=>d.status==='missing');
   const excludedCount = deliverables.length - counted.length;
   const totalEarned = hit.reduce((s,d)=> s + d.payAmount, 0);
   const totalPending = tracking.reduce((s,d)=> s + d.payAmount, 0);
@@ -1909,7 +1912,7 @@ function renderTrackedContent(){
     <div class="grid grid-cards" style="margin:16px 0 20px;">
       <div class="card"><div class="label">Earned — automatic</div><div class="big mono fx-green">${money(totalEarned)}</div><div class="foot">${hit.length} deliverable${hit.length===1?'':'s'} hit its requirement</div></div>
       <div class="card"><div class="label">Pending</div><div class="big mono" style="color:var(--text-dim)">${money(totalPending)}</div><div class="foot">${tracking.length} still tracking</div></div>
-      <div class="card"><div class="label">Expired</div><div class="big mono ${expired.length>0?'fx-red':''}">${expired.length}</div><div class="foot">Window passed unmet${excludedCount ? ` · ${excludedCount} excluded` : ''}</div></div>
+      <div class="card"><div class="label">Expired</div><div class="big mono ${expired.length>0?'fx-red':''}">${expired.length}</div><div class="foot">Window passed unmet${missing.length ? ` · ${missing.length} missing` : ''}${excludedCount ? ` · ${excludedCount} excluded` : ''}</div></div>
     </div>
     ${deliverables.length===0 ? emptyState(allDeliverables.length===0 ? 'Nothing tracked yet' : 'No matches', allDeliverables.length===0 ? 'Connect a brand\'s channel and wait for the next scouting run.' : 'Try clearing a filter.') : `
     <div class="table-wrap" style="overflow-x:auto;"><table>
@@ -1925,7 +1928,7 @@ function renderTrackedContent(){
             <td>${dv.grouped ? dv.rows.map(platformPill).join('') : `<span class="tag tag-${rep.platform}">${(rep.platform||'').toUpperCase()}</span>`}</td>
             <td style="max-width:260px;">${renderTitleCell(dv)}</td>
             <td class="mono">${dv.grouped ? '<span style="color:var(--text-faint)">see platforms</span>' : `${(rep.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`}</td>
-            <td>${dv.excluded ? '<span class="tag tag-neutral">Excluded</span>' : dv.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : dv.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
+            <td>${dv.excluded ? '<span class="tag tag-neutral">Excluded</span>' : dv.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : dv.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : dv.status==='missing' ? '<span class="tag tag-danger" title="No longer showing up on the platform — deleted, archived, or made private before it hit its requirement">Missing</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
             <td class="mono">${dv.status==='hit' && !dv.excluded ? money(dv.payAmount) : `<span style="color:var(--text-faint)">${money(dv.payAmount)}${dv.excluded?'':' pending'}</span>`}</td>
             <td class="mono">${dv.postedAt ? fmtDate(dv.postedAt.slice(0,10)) : '—'}</td>
             <td style="white-space:nowrap;">
