@@ -128,7 +128,13 @@ async function scoutBrandChannel(brand, YT_KEY, SUPABASE_URL, sbHeaders) {
       } else if (row.status === 'tracking') {
         let status = 'tracking';
         let earned = false;
-        if (viewCount >= brand.view_requirement) {
+        // per-video override (set from the "Edit tracked video" modal) wins over the brand's
+        // live requirement — lets one video be pinned to its own threshold (a different deal,
+        // or the brand's requirement changed after this was posted) without that video getting
+        // dragged along every time the brand-level setting changes, which is the default/normal
+        // behavior for every other row.
+        const requirement = row.view_requirement_override != null ? row.view_requirement_override : brand.view_requirement;
+        if (viewCount >= requirement) {
           status = 'hit';
           earned = true;
         } else if (row.eligible_until && new Date() > new Date(row.eligible_until)) {

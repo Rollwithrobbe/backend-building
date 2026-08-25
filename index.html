@@ -920,11 +920,21 @@ async function loadFromSupabase(){
     id: p.id, brandId: p.brand_id, amount: Number(p.amount)||0, cpmBonus: Number(p.cpm_bonus)||0, date: p.date, note: p.note || '', createdAt: p.created_at,
   }));
 }
-// One-time switch-over: since real data up to now only lives in this browser's local storage,
-// this uploads everything to Supabase once and flips CLOUD_MODE on. Any brand id that predates
-// this feature (the short uid() format, not a real UUID) gets a fresh UUID here, with every
-// content/task/payment that referenced it remapped along the way — Supabase's brands.id column
-// needs a real UUID. Nothing about this runs automatically; it only fires when the button below is clicked.
+// One-time switch-over: uploads whatever's in this browser's local storage to Supabase and
+// flips CLOUD_MODE on. Any brand id that predates this feature (the short uid() format, not a
+// real UUID) gets a fresh UUID here, with every content/task/payment that referenced it
+// remapped along the way — Supabase's brands.id column needs a real UUID. Nothing about this
+// runs automatically; it only fires when the button below is clicked.
+//
+// Deliberately upserts directly instead of calling the normal syncToSupabase() — that function
+// also prunes (deletes) any cloud content/task/payment row whose id isn't in the local set,
+// which is exactly right once a device is already fully cloud-synced, but wrong here: this is
+// very often run on a *second* device (or a browser that lost its local storage) whose local
+// DATA is empty or partial while Supabase already holds the real data from an earlier
+// migration. Pruning against an empty/partial local set would read that as "everything else
+// was deleted" and wipe it from the cloud. So migration only ever adds (upsert, never delete),
+// then immediately pulls the merged cloud state back down — the safe order is push-then-pull,
+// never push-with-prune.
 async function migrateToCloud(){
   if(CLOUD_MODE) return;
   const btn = document.getElementById('btnMigrateCloud');
@@ -944,9 +954,13 @@ async function migrateToCloud(){
       DATA.payments.forEach(p => { if(p.brandId && idMap[p.brandId]) p.brandId = idMap[p.brandId]; });
     }
     DATA.brands.forEach(b => { b.supabaseBrandId = b.id; });
-    await syncToSupabase();
+    await upsertRows('brands', DATA.brands.map(brandToSupabaseRow), 'id');
+    await upsertRows('manual_content', DATA.content.map(contentToSupabaseRow), 'id');
+    await upsertRows('manual_tasks', DATA.tasks.map(taskToSupabaseRow), 'id');
+    await upsertRows('manual_payments', DATA.payments.map(paymentToSupabaseRow), 'id');
     CLOUD_MODE = true;
     localStorage.setItem(CLOUD_MODE_KEY, '1');
+    await loadFromSupabase(); // pull the merged truth back down so cloud-only rows (e.g. brands added from another device) show up here too, not just what this device happened to push
     saveData();
     showToast('Moved to the cloud ☁');
     render();
@@ -1857,7 +1871,7 @@ async function loadAllBackendBrands(){
 // linking straight to that platform's actual video so a merge decision (or a later double-check)
 // can be visually confirmed rather than trusted blind.
 function platformPill(row){
-  const req = row.brands ? Number(row.brands.view_requirement) : null;
+  const req = row.view_requirement_override != null ? Number(row.view_requirement_override) : (row.brands ? Number(row.brands.view_requirement) : null);
   const label = `${(row.platform||'').toUpperCase()} ${(row.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`;
   const style = 'margin:2px 4px 2px 0; display:inline-block; text-decoration:none;';
   return row.url
@@ -1919,7 +1933,7 @@ function renderCompareView(brandName, searchQ){
         ${platforms.map(p => {
           const r = c.byPlatform[p];
           if(!r) return `<td><span style="color:var(--text-faint)">—</span></td>`;
-          const req = r.brands ? Number(r.brands.view_requirement) : null;
+          const req = r.view_requirement_override != null ? Number(r.view_requirement_override) : (r.brands ? Number(r.brands.view_requirement) : null);
           return `<td>
             <div style="display:flex; gap:8px; align-items:center;">
               ${r.thumbnail_url ? `<img src="${r.thumbnail_url}" alt="" style="width:32px; height:32px; object-fit:cover; border-radius:5px; flex-shrink:0;" />` : `<div style="width:32px; height:32px; border-radius:5px; background:var(--surface); flex-shrink:0;"></div>`}
@@ -2044,7 +2058,7 @@ function renderTrackedContent(){
       <tbody>
         ${deliverables.map(dv => {
           const rep = dv.rows[0];
-          const req = dv.brand ? Number(dv.brand.view_requirement) : null;
+          const req = rep.view_requirement_override != null ? Number(rep.view_requirement_override) : (dv.brand ? Number(dv.brand.view_requirement) : null);
           return `<tr ${dv.excluded?'style="opacity:.5;"':''}>
             <td>${!dv.grouped ? `<input type="checkbox" class="checkbox" data-merge-check="${rep.id}" ${MERGE_SELECTED.has(rep.id)?'checked':''} />` : ''}</td>
             <td>${dv.thumbnail ? `<img src="${dv.thumbnail}" alt="" style="width:40px; height:40px; object-fit:cover; border-radius:6px; display:block;" />` : `<div style="width:40px; height:40px; border-radius:6px; background:var(--surface);"></div>`}</td>
@@ -3514,9 +3528,11 @@ function renderTrackedVideoModal(){
   const d = MODAL_STATE.draft;
   if(!d) return '';
   const defaultPay = Number(d.brands?.base_pay || 0);
+  const brandViewReq = d.brands?.view_requirement;
+  const views = Number(d.view_count || 0);
   return `<div class="modal ${MODAL_ENTER?'modal-enter':''}">
     <h3>Edit tracked video</h3>
-    <div class="hint" style="margin-bottom:12px;">${escapeHtml(d.title || 'Untitled')} — ${escapeHtml(d.brands?.name || 'Unassigned')} · ${(d.platform||'').toUpperCase()}</div>
+    <div class="hint" style="margin-bottom:12px;">${escapeHtml(d.title || 'Untitled')} — ${escapeHtml(d.brands?.name || 'Unassigned')} · ${(d.platform||'').toUpperCase()} · ${views.toLocaleString()} views currently</div>
     <div class="field-row">
       <div class="field"><label>Payout ($)</label><input type="number" id="f-tvpay" value="${d.pay_amount ?? defaultPay}" step="0.01" /></div>
       <div class="field"><label>Status</label>
@@ -3528,6 +3544,8 @@ function renderTrackedVideoModal(){
       </div>
     </div>
     <div class="hint" style="margin:-6px 0 12px;">Defaults to the brand's current rate (${money(defaultPay)}) at the moment it was discovered — override here for a one-off (e.g. a warm-up video paid differently). Set status to "Hit" directly for a video that doesn't need view tracking at all.</div>
+    <div class="field"><label>View requirement for this video</label><input type="number" id="f-tvviewreq" value="${d.view_requirement_override ?? ''}" placeholder="Follows the brand's current requirement (${brandViewReq ?? '—'})" min="0" /></div>
+    <div class="hint" style="margin:-6px 0 12px;">Leave blank to keep following the brand's requirement — which is what makes it move if you edit the brand's own setting later. Set a number to lock this one video to its own threshold instead (e.g. it was negotiated at a different view count, or the brand's requirement changed after this was posted and you don't want it retroactively affected). Already at or above the number you set here? Saving flips it to "Hit" right away.</div>
     <div class="field"><label><input type="checkbox" class="checkbox" id="f-tvexcluded" ${d.excluded?'checked':''}/> Exclude from tracking &amp; earnings — the scouting job stops updating it and it's dropped from every total</label></div>
     <div class="modal-actions">
       <div></div>
@@ -4066,19 +4084,29 @@ function bindGlobalHandlers(){
     const d = MODAL_STATE.draft;
     const id = d.id;
     const payAmount = Number(document.getElementById('f-tvpay').value) || 0;
-    const status = document.getElementById('f-tvstatus').value;
+    let status = document.getElementById('f-tvstatus').value;
     const excluded = document.getElementById('f-tvexcluded').checked;
+    const viewReqRaw = document.getElementById('f-tvviewreq').value.trim();
+    const viewRequirementOverride = viewReqRaw === '' ? null : Number(viewReqRaw);
+    // if it's still sitting at "Tracking" but the requirement just set here is already met by
+    // the view count already on file, flip it to Hit immediately rather than making the user
+    // also separately touch the status dropdown (or wait for tonight's scouting run) —
+    // effectively the same live re-check the scouting job does, just triggered by an edit here
+    // instead of a cron tick.
+    if(status === 'tracking' && viewRequirementOverride !== null && Number(d.view_count || 0) >= viewRequirementOverride){
+      status = 'hit';
+    }
     const earned = status === 'hit';
     saveTrackedVideo.disabled = true; saveTrackedVideo.textContent = 'Saving…';
     try{
       const res = await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${encodeURIComponent(id)}`, {
         method: 'PATCH',
         headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ pay_amount: payAmount, status, excluded, earned })
+        body: JSON.stringify({ pay_amount: payAmount, status, excluded, earned, view_requirement_override: viewRequirementOverride })
       });
       if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
       const row = TRACKED_CONTENT_DATA && TRACKED_CONTENT_DATA.find(r=>r.id===id);
-      if(row){ row.pay_amount = payAmount; row.status = status; row.excluded = excluded; row.earned = earned; }
+      if(row){ row.pay_amount = payAmount; row.status = status; row.excluded = excluded; row.earned = earned; row.view_requirement_override = viewRequirementOverride; }
       closeModal();
     }catch(e){
       alert('Could not save — ' + e.message);

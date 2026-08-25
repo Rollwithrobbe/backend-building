@@ -125,7 +125,10 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
       } else if (row.status === 'tracking') {
         let status = 'tracking';
         let earned = false;
-        if (viewCount >= brand.view_requirement) {
+        // per-video override (set from the "Edit tracked video" modal) wins over the brand's
+        // live requirement — see scout-youtube.js for the full rationale, identical here.
+        const requirement = row.view_requirement_override != null ? row.view_requirement_override : brand.view_requirement;
+        if (viewCount >= requirement) {
           status = 'hit';
           earned = true;
         } else if (row.eligible_until && new Date() > new Date(row.eligible_until)) {
