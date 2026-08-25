@@ -362,7 +362,11 @@
     .storage-pill{ margin-top:0; flex-shrink:0; }
     .data-actions{ margin-top:0; flex-wrap:nowrap; gap:4px; flex-shrink:0; }
     .data-actions button{ flex:none; white-space:nowrap; padding:5px 9px; }
-    .data-actions button.full{ display:none; } /* auto-backup toggle: long label, low-value on mobile (File System Access API barely supported there anyway) */
+    /* auto-backup toggle only, by id — was `.data-actions button.full`, which also matched (and
+       hid) the "Move my data to the cloud" button since it happens to share the same width:100%
+       styling class. Scoped to the actual backup-toggle ids so nothing else can collide with it
+       again the same way. */
+    #btnEnableBackup, #btnBackupStatus, #btnBackupReconnect{ display:none; }
     .main{ padding:18px; }
     .ai-drawer{ width:100vw; max-width:100vw; }
     .two-col{ grid-template-columns:1fr; }
