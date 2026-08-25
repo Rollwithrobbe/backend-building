@@ -1712,6 +1712,23 @@ function renderBrandBreakdown(bounds){
 // pattern as renderBrandBreakdown, for the same reason: a brand automated tracking already
 // knows about shouldn't be invisible here just because this browser hasn't cloud-synced yet.
 const BRAND_TABLE_FALLBACK_COLORS = ['#9a7ec2','#5aa89e','#c1834f','#5b8ab0','#6f8f6a'];
+// Total (not averaged) raw views across every individual platform row posted in the trailing
+// 30 days — deliberately NOT the same "one payout per crosspost" view used for money. This is
+// a pure reach/momentum read: a video crossposted to two platforms really did reach people
+// twice over, so both counts should add here even though they only pay once. And it's a live
+// rolling window, not a cached running total — recomputed fresh off `posted_at` on every call,
+// so a video that was inside the last 30 days yesterday and isn't today just stops contributing
+// on its own the next time this runs. No decay logic needed for that to be true.
+function sumViews30d(predicate){
+  if(!TRACKED_CONTENT_DATA) return 0;
+  const cutoff = Date.now() - 30*86400000;
+  return TRACKED_CONTENT_DATA.reduce((s,r) => {
+    if(r.excluded) return s;
+    if(!r.posted_at || new Date(r.posted_at).getTime() < cutoff) return s;
+    if(!predicate(r)) return s;
+    return s + (Number(r.view_count)||0);
+  }, 0);
+}
 function brandComparisonRows(){
   if(!TRACKED_CONTENT_DATA) return [];
   const rows = [];
@@ -1723,10 +1740,10 @@ function brandComparisonRows(){
     seenNames.add(b.name);
     const bt = brandTotals(b.id);
     const hitCount = items.filter(dv=>dv.status==='hit').length;
-    const avgViews = items.reduce((s,dv)=>s+(Number(dv.rows[0].view_count)||0),0) / items.length;
+    const views30d = sumViews30d(r => r.brand_id === b.supabaseBrandId);
     rows.push({
       id: b.id, name: b.name, color: b.color,
-      count: items.length, hitRate: hitCount/items.length*100, avgViews,
+      count: items.length, hitRate: hitCount/items.length*100, views30d,
       avgPayout: hitCount ? bt.contentEarned/hitCount : 0, earned: bt.totalEarned,
     });
   });
@@ -1739,10 +1756,10 @@ function brandComparisonRows(){
   Object.entries(byName).forEach(([name, items]) => {
     const hitCount = items.filter(dv=>dv.status==='hit').length;
     const earned = items.filter(dv=>dv.status==='hit').reduce((s,dv)=>s+dv.payAmount,0);
-    const avgViews = items.reduce((s,dv)=>s+(Number(dv.rows[0].view_count)||0),0) / items.length;
+    const views30d = sumViews30d(r => r.brands?.name === name);
     rows.push({
       id: null, name, color: BRAND_TABLE_FALLBACK_COLORS[fallbackIdx++ % BRAND_TABLE_FALLBACK_COLORS.length],
-      count: items.length, hitRate: hitCount/items.length*100, avgViews,
+      count: items.length, hitRate: hitCount/items.length*100, views30d,
       avgPayout: hitCount ? earned/hitCount : 0, earned,
     });
   });
@@ -1756,17 +1773,17 @@ function renderBrandComparisonTable(){
     const cmp = typeof a[key]==='string' ? a[key].localeCompare(b[key]) : a[key]-b[key];
     return dir==='asc' ? cmp : -cmp;
   });
-  const col = (k, label, align) => {
+  const col = (k, label, align, title) => {
     const active = key===k;
-    return `<th data-sort-brand="${k}" style="cursor:pointer; user-select:none; white-space:nowrap; ${align?`text-align:${align};`:''} ${active?'color:var(--text);':''}">${escapeHtml(label)}${active ? (dir==='asc'?' ↑':' ↓') : ''}</th>`;
+    return `<th data-sort-brand="${k}" ${title?`title="${escapeHtml(title)}"`:''} style="cursor:pointer; user-select:none; white-space:nowrap; ${align?`text-align:${align};`:''} ${active?'color:var(--text);':''}">${escapeHtml(label)}${active ? (dir==='asc'?' ↑':' ↓') : ''}</th>`;
   };
   return `<div class="table-wrap" style="overflow-x:auto;"><table>
     <thead><tr>
       ${col('name','Brand')}
-      ${col('count','Deliverables','right')}
-      ${col('hitRate','Hit rate','right')}
-      ${col('avgViews','Avg views','right')}
-      ${col('avgPayout','Avg payout','right')}
+      ${col('count','Deliverables','right','All time')}
+      ${col('hitRate','Hit rate','right','All time')}
+      ${col('views30d','Views — 30d','right','Total raw views across every platform posted in the last 30 days (not per-video — a crosspost counts on each platform it reached). Rolls forward live: a video drops out of this the day it turns 31 days old.')}
+      ${col('avgPayout','Avg payout','right','All time, per video that actually hit')}
       ${col('earned','Earned (all time)','right')}
     </tr></thead>
     <tbody>
@@ -1779,7 +1796,7 @@ function renderBrandComparisonTable(){
             <div class="brand-bar-track" style="width:52px;"><div class="brand-bar-fill" style="width:${r.hitRate.toFixed(0)}%; background:${r.hitRate>=50?'var(--fx-green)':'var(--text-faint)'};"></div></div>
           </div>
         </td>
-        <td class="mono" style="text-align:right;">${Math.round(r.avgViews).toLocaleString()}</td>
+        <td class="mono" style="text-align:right;">${Math.round(r.views30d).toLocaleString()}</td>
         <td class="mono" style="text-align:right;">${money(r.avgPayout)}</td>
         <td class="mono fx-green" style="text-align:right;">${money(r.earned)}</td>
       </tr>`).join('')}
