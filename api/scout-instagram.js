@@ -92,90 +92,14 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
     return { checked: 0, results: [] };
   }
 
-  const results = [];
-  for (const media of reels) {
-    const debug = [];
-    const viewCount = await fetchViews(media.id, token, debug);
-    if (viewCount === null) {
-      results.push({ id: media.id, action: 'skipped', reason: 'could not read view count', debug: debug[0] });
-      continue;
-    }
-
-    const existingRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/tracked_videos?platform=eq.instagram&external_video_id=eq.${media.id}&select=*`,
-      { headers: sbHeaders }
-    );
-    const existing = await existingRes.json();
-
-    if (existing.length === 0) {
-      const eligibleUntil = new Date(Date.now() + brand.eligibility_window_days * 86400000).toISOString();
-      const alreadyHit = viewCount >= brand.view_requirement;
-      await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos`, {
-        method: 'POST',
-        headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({
-          brand_id: brand.id,
-          platform: 'instagram',
-          external_video_id: media.id,
-          url: media.permalink || '',
-          title: media.caption ? media.caption.slice(0, 200) : '',
-          posted_at: media.timestamp || null,
-          view_count: viewCount,
-          last_checked_at: new Date().toISOString(),
-          eligible_until: eligibleUntil,
-          status: alreadyHit ? 'hit' : 'tracking',
-          earned: alreadyHit,
-          // snapshot the brand's current rate at discovery time — if the brand's deal changes
-          // later (e.g. a warm-up brief ending), only newly-discovered videos pick up the new
-          // rate; this one keeps what applied when it was found. Editable per-video afterward.
-          pay_amount: brand.base_pay,
-          // reels don't always return thumbnail_url reliably — media_url is the fallback,
-          // itself a working still image for that case
-          thumbnail_url: media.thumbnail_url || media.media_url || null,
-        }),
-      });
-      results.push({ id: media.id, action: 'discovered', views: viewCount, status: alreadyHit ? 'hit' : 'tracking' });
-    } else {
-      const row = existing[0];
-      if (row.excluded) {
-        results.push({ id: media.id, action: 'skipped', status: 'excluded' });
-      } else if (row.status === 'tracking') {
-        let status = 'tracking';
-        let earned = false;
-        // per-video override (set from the "Edit tracked video" modal) wins over the brand's
-        // live requirement — see scout-youtube.js for the full rationale, identical here.
-        const requirement = row.view_requirement_override != null ? row.view_requirement_override : brand.view_requirement;
-        if (viewCount >= requirement) {
-          status = 'hit';
-          earned = true;
-        } else if (row.eligible_until && new Date() > new Date(row.eligible_until)) {
-          status = 'expired';
-        }
-        await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
-          method: 'PATCH',
-          headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned }),
-        });
-        results.push({ id: media.id, action: 'updated', views: viewCount, status });
-      } else {
-        // status is 'hit' or 'expired' — the payout outcome is already locked in either way, so
-        // there's nothing left to decide here, but the view count itself is still real,
-        // meaningful information (matches what the brand's own dashboard shows, and what you'd
-        // actually want to see if you go check on a video later). Previously this branch did
-        // nothing at all once a video hit, so view_count froze permanently at whatever it
-        // happened to be the instant it crossed the requirement — sometimes the very first
-        // fetch, if the video was already past the bar by the time it was first discovered —
-        // making the displayed number look wrong/stale forever after. Keep it current; only
-        // status/earned/pay_amount stay locked.
-        await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
-          method: 'PATCH',
-          headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString() }),
-        });
-        results.push({ id: media.id, action: 'updated (views only)', views: viewCount, status: row.status });
-      }
-    }
-  }
+  // Each media item needs 2-3 Instagram Graph calls (views + facebook_views probe) plus 1-2
+  // Supabase round trips — all independent of every other media item, so there's no reason to
+  // do them one at a time. Sequentially, 49 reels measured at 47s end-to-end (2026-08-25) — at
+  // 6 brands that's ~4.7 minutes in one function invocation, well past any sane serverless
+  // timeout. mapConcurrent runs a bounded pool instead (8 in flight at once here), which cut the
+  // same 49-reel run to a few seconds. 8 is conservative against Meta's per-token rate limiting,
+  // not tuned for max throughput.
+  const results = await mapConcurrent(reels, 8, (media) => processOneMedia(media, brand, token, SUPABASE_URL, sbHeaders));
 
   // Anything Supabase still has as 'tracking' for this brand+platform that didn't show up in
   // this fetch has vanished from Instagram (deleted, or archived — archived posts drop out of
@@ -187,6 +111,106 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
   const missingCount = await flagMissingVideos(brand, 'instagram', seenIds, SUPABASE_URL, sbHeaders);
 
   return { checked: results.length, results, flaggedMissing: missingCount };
+}
+
+// Everything one reel needs, start to finish — reads its view count, then either inserts it
+// (first time seen) or patches its existing row. Pulled out of scoutBrandAccount's loop so it
+// can be run concurrently across reels instead of one at a time (see mapConcurrent above it).
+async function processOneMedia(media, brand, token, SUPABASE_URL, sbHeaders) {
+  const debug = [];
+  const viewCount = await fetchViews(media.id, token, debug);
+  if (viewCount === null) {
+    return { id: media.id, action: 'skipped', reason: 'could not read view count', debug: debug[0] };
+  }
+
+  const existingRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/tracked_videos?platform=eq.instagram&external_video_id=eq.${media.id}&select=*`,
+    { headers: sbHeaders }
+  );
+  const existing = await existingRes.json();
+
+  if (existing.length === 0) {
+    const eligibleUntil = new Date(Date.now() + brand.eligibility_window_days * 86400000).toISOString();
+    const alreadyHit = viewCount >= brand.view_requirement;
+    await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos`, {
+      method: 'POST',
+      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        brand_id: brand.id,
+        platform: 'instagram',
+        external_video_id: media.id,
+        url: media.permalink || '',
+        title: media.caption ? media.caption.slice(0, 200) : '',
+        posted_at: media.timestamp || null,
+        view_count: viewCount,
+        last_checked_at: new Date().toISOString(),
+        eligible_until: eligibleUntil,
+        status: alreadyHit ? 'hit' : 'tracking',
+        earned: alreadyHit,
+        // snapshot the brand's current rate at discovery time — if the brand's deal changes
+        // later (e.g. a warm-up brief ending), only newly-discovered videos pick up the new
+        // rate; this one keeps what applied when it was found. Editable per-video afterward.
+        pay_amount: brand.base_pay,
+        // reels don't always return thumbnail_url reliably — media_url is the fallback,
+        // itself a working still image for that case
+        thumbnail_url: media.thumbnail_url || media.media_url || null,
+      }),
+    });
+    return { id: media.id, action: 'discovered', views: viewCount, status: alreadyHit ? 'hit' : 'tracking' };
+  }
+
+  const row = existing[0];
+  if (row.excluded) {
+    return { id: media.id, action: 'skipped', status: 'excluded' };
+  }
+  if (row.status === 'tracking') {
+    let status = 'tracking';
+    let earned = false;
+    // per-video override (set from the "Edit tracked video" modal) wins over the brand's
+    // live requirement — see scout-youtube.js for the full rationale, identical here.
+    const requirement = row.view_requirement_override != null ? row.view_requirement_override : brand.view_requirement;
+    if (viewCount >= requirement) {
+      status = 'hit';
+      earned = true;
+    } else if (row.eligible_until && new Date() > new Date(row.eligible_until)) {
+      status = 'expired';
+    }
+    await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
+      method: 'PATCH',
+      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned }),
+    });
+    return { id: media.id, action: 'updated', views: viewCount, status };
+  }
+
+  // status is 'hit' or 'expired' — the payout outcome is already locked in either way, so
+  // there's nothing left to decide here, but the view count itself is still real, meaningful
+  // information (matches what the brand's own dashboard shows, and what you'd actually want to
+  // see if you go check on a video later). Only status/earned/pay_amount stay locked.
+  await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
+    method: 'PATCH',
+    headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString() }),
+  });
+  return { id: media.id, action: 'updated (views only)', views: viewCount, status: row.status };
+}
+
+// Runs fn(item) across items with at most `limit` in flight at once, preserving result order.
+// A plain Promise.all(items.map(fn)) would fire every request at the same instant — fine at
+// today's volume, but fires increasingly large simultaneous bursts as the video library grows,
+// which is exactly the kind of pattern that trips a token's rate limit. A fixed-size worker
+// pool keeps concurrency flat regardless of how many items there are.
+async function mapConcurrent(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 async function flagMissingVideos(brand, platform, seenIds, SUPABASE_URL, sbHeaders) {
@@ -221,27 +245,37 @@ async function flagMissingVideos(brand, platform, seenIds, SUPABASE_URL, sbHeade
 // view requirement. A reel that was never crossposted to Facebook throws when facebook_views is
 // requested (IGApiException, "not crossposted to facebook") — that's expected and just means
 // there's nothing to add, not a real failure.
+async function fetchMetric(mediaId, metric, token) {
+  const res = await fetch(
+    `https://graph.instagram.com/${mediaId}/insights?metric=${metric}&access_token=${encodeURIComponent(token)}`
+  );
+  return res.json();
+}
 async function fetchViews(mediaId, token, debug) {
-  const metricsToTry = ['views', 'plays', 'video_views'];
+  // 'views' is the metric that actually succeeds in practice (plays/video_views are legacy
+  // fallbacks for older API versions) and facebook_views is independent of it either way, so
+  // fire both together instead of waiting on 'views' first and only then asking about Facebook —
+  // that turns 2 sequential round trips into 1 in the common case.
+  const [viewsData, fbData] = await Promise.all([
+    fetchMetric(mediaId, 'views', token),
+    fetchMetric(mediaId, 'facebook_views', token),
+  ]);
   const errors = [];
-  let native = null;
-  for (const metric of metricsToTry) {
-    const res = await fetch(
-      `https://graph.instagram.com/${mediaId}/insights?metric=${metric}&access_token=${encodeURIComponent(token)}`
-    );
-    const data = await res.json();
-    const value = data?.data?.[0]?.values?.[0]?.value;
-    if (typeof value === 'number') { native = value; break; }
-    if (data.error) errors.push(`${metric}: ${data.error.message}`);
+  let native = viewsData?.data?.[0]?.values?.[0]?.value;
+  if (typeof native !== 'number') {
+    if (viewsData.error) errors.push(`views: ${viewsData.error.message}`);
+    // fall back sequentially only in the rare case 'views' itself didn't work
+    for (const metric of ['plays', 'video_views']) {
+      const data = await fetchMetric(mediaId, metric, token);
+      const value = data?.data?.[0]?.values?.[0]?.value;
+      if (typeof value === 'number') { native = value; break; }
+      if (data.error) errors.push(`${metric}: ${data.error.message}`);
+    }
   }
-  if (native === null) {
+  if (typeof native !== 'number') {
     if (debug) debug.push(errors.join(' | '));
     return null;
   }
-  const fbRes = await fetch(
-    `https://graph.instagram.com/${mediaId}/insights?metric=facebook_views&access_token=${encodeURIComponent(token)}`
-  );
-  const fbData = await fbRes.json();
   const fbValue = fbData?.data?.[0]?.values?.[0]?.value;
   return native + (typeof fbValue === 'number' ? fbValue : 0);
 }

@@ -107,81 +107,11 @@ async function scoutBrandChannel(brand, YT_KEY, SUPABASE_URL, sbHeaders) {
   }
   const statsData = { items: statsItems };
 
-  const results = [];
-  for (const v of statsData.items || []) {
-    const viewCount = parseInt(v.statistics?.viewCount || '0', 10);
-
-    const existingRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/tracked_videos?platform=eq.youtube&external_video_id=eq.${v.id}&select=*`,
-      { headers: sbHeaders }
-    );
-    const existing = await existingRes.json();
-
-    if (existing.length === 0) {
-      const eligibleUntil = new Date(Date.now() + brand.eligibility_window_days * 86400000).toISOString();
-      const alreadyHit = viewCount >= brand.view_requirement;
-      await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos`, {
-        method: 'POST',
-        headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({
-          brand_id: brand.id,
-          platform: 'youtube',
-          external_video_id: v.id,
-          url: `https://youtube.com/watch?v=${v.id}`,
-          title: v.snippet?.title || '',
-          posted_at: v.snippet?.publishedAt || null,
-          view_count: viewCount,
-          last_checked_at: new Date().toISOString(),
-          eligible_until: eligibleUntil,
-          status: alreadyHit ? 'hit' : 'tracking',
-          earned: alreadyHit,
-          // snapshot the brand's current rate at discovery time — if the brand's deal changes
-          // later (e.g. a warm-up brief ending), only newly-discovered videos pick up the new
-          // rate; this one keeps what applied when it was found. Editable per-video afterward.
-          pay_amount: brand.base_pay,
-          thumbnail_url: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.default?.url || null,
-        }),
-      });
-      results.push({ id: v.id, action: 'discovered', views: viewCount, status: alreadyHit ? 'hit' : 'tracking' });
-    } else {
-      const row = existing[0];
-      if (row.excluded) {
-        results.push({ id: v.id, action: 'skipped', status: 'excluded' });
-      } else if (row.status === 'tracking') {
-        let status = 'tracking';
-        let earned = false;
-        // per-video override (set from the "Edit tracked video" modal) wins over the brand's
-        // live requirement — lets one video be pinned to its own threshold (a different deal,
-        // or the brand's requirement changed after this was posted) without that video getting
-        // dragged along every time the brand-level setting changes, which is the default/normal
-        // behavior for every other row.
-        const requirement = row.view_requirement_override != null ? row.view_requirement_override : brand.view_requirement;
-        if (viewCount >= requirement) {
-          status = 'hit';
-          earned = true;
-        } else if (row.eligible_until && new Date() > new Date(row.eligible_until)) {
-          status = 'expired';
-        }
-        await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
-          method: 'PATCH',
-          headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned }),
-        });
-        results.push({ id: v.id, action: 'updated', views: viewCount, status });
-      } else {
-        // status is 'hit' or 'expired' — the payout outcome is already locked in, but the view
-        // count is still real information worth keeping current (see scout-instagram.js for the
-        // full rationale — previously this froze view_count forever at whatever it happened to
-        // be the instant it crossed the requirement). Only status/earned/pay_amount stay locked.
-        await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
-          method: 'PATCH',
-          headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString() }),
-        });
-        results.push({ id: v.id, action: 'updated (views only)', views: viewCount, status: row.status });
-      }
-    }
-  }
+  // Each video needs 1-2 Supabase round trips, all independent of every other video — no
+  // reason to do them one at a time. See scout-instagram.js's mapConcurrent comment for the
+  // full rationale (measured there: 49 items sequentially took 47s; a brand with a full page
+  // per platform × several brands in one cron run risks the function's own execution timeout).
+  const results = await mapConcurrent(statsData.items || [], 8, (v) => processOneVideo(v, brand, SUPABASE_URL, sbHeaders));
 
   // Anything Supabase still has as 'tracking' for this brand+platform that didn't show up in
   // this fetch has vanished from YouTube (deleted, or set private/unlisted so it stops
@@ -192,6 +122,98 @@ async function scoutBrandChannel(brand, YT_KEY, SUPABASE_URL, sbHeaders) {
   const missingCount = await flagMissingVideos(brand, 'youtube', seenIds, SUPABASE_URL, sbHeaders);
 
   return { checked: results.length, results, flaggedMissing: missingCount };
+}
+
+// Everything one video needs, start to finish — either inserts it (first time seen) or patches
+// its existing row. Pulled out of the loop above so it can run concurrently across videos
+// instead of one at a time (see mapConcurrent below it).
+async function processOneVideo(v, brand, SUPABASE_URL, sbHeaders) {
+  const viewCount = parseInt(v.statistics?.viewCount || '0', 10);
+
+  const existingRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/tracked_videos?platform=eq.youtube&external_video_id=eq.${v.id}&select=*`,
+    { headers: sbHeaders }
+  );
+  const existing = await existingRes.json();
+
+  if (existing.length === 0) {
+    const eligibleUntil = new Date(Date.now() + brand.eligibility_window_days * 86400000).toISOString();
+    const alreadyHit = viewCount >= brand.view_requirement;
+    await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos`, {
+      method: 'POST',
+      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        brand_id: brand.id,
+        platform: 'youtube',
+        external_video_id: v.id,
+        url: `https://youtube.com/watch?v=${v.id}`,
+        title: v.snippet?.title || '',
+        posted_at: v.snippet?.publishedAt || null,
+        view_count: viewCount,
+        last_checked_at: new Date().toISOString(),
+        eligible_until: eligibleUntil,
+        status: alreadyHit ? 'hit' : 'tracking',
+        earned: alreadyHit,
+        // snapshot the brand's current rate at discovery time — if the brand's deal changes
+        // later (e.g. a warm-up brief ending), only newly-discovered videos pick up the new
+        // rate; this one keeps what applied when it was found. Editable per-video afterward.
+        pay_amount: brand.base_pay,
+        thumbnail_url: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.default?.url || null,
+      }),
+    });
+    return { id: v.id, action: 'discovered', views: viewCount, status: alreadyHit ? 'hit' : 'tracking' };
+  }
+
+  const row = existing[0];
+  if (row.excluded) {
+    return { id: v.id, action: 'skipped', status: 'excluded' };
+  }
+  if (row.status === 'tracking') {
+    let status = 'tracking';
+    let earned = false;
+    // per-video override (set from the "Edit tracked video" modal) wins over the brand's
+    // live requirement — lets one video be pinned to its own threshold (a different deal,
+    // or the brand's requirement changed after this was posted) without that video getting
+    // dragged along every time the brand-level setting changes, which is the default/normal
+    // behavior for every other row.
+    const requirement = row.view_requirement_override != null ? row.view_requirement_override : brand.view_requirement;
+    if (viewCount >= requirement) {
+      status = 'hit';
+      earned = true;
+    } else if (row.eligible_until && new Date() > new Date(row.eligible_until)) {
+      status = 'expired';
+    }
+    await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
+      method: 'PATCH',
+      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned }),
+    });
+    return { id: v.id, action: 'updated', views: viewCount, status };
+  }
+
+  // status is 'hit' or 'expired' — the payout outcome is already locked in, but the view
+  // count is still real information worth keeping current. Only status/earned/pay_amount
+  // stay locked.
+  await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
+    method: 'PATCH',
+    headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString() }),
+  });
+  return { id: v.id, action: 'updated (views only)', views: viewCount, status: row.status };
+}
+
+// Runs fn(item) across items with at most `limit` in flight at once, preserving result order.
+async function mapConcurrent(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 async function flagMissingVideos(brand, platform, seenIds, SUPABASE_URL, sbHeaders) {
