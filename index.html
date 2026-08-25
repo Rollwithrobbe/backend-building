@@ -125,12 +125,21 @@
     border-radius:var(--radius-sm); cursor:pointer; transition:border-color 150ms ease, background 100ms ease-out;
   }
   .mobile-nav-toggle:active{ background:var(--surface); }
-  .mobile-nav-toggle span{ display:block; width:16px; height:2px; border-radius:1px; background:var(--text); transition:transform 180ms ease, opacity 180ms ease; }
+  .mobile-nav-toggle span{ display:block; width:16px; height:2px; border-radius:1px; background:var(--text); transition:transform 260ms cubic-bezier(.32,.72,0,1), opacity 200ms ease; }
   .mobile-nav-toggle.open span:nth-child(1){ transform:translateY(7px) rotate(45deg); }
   .mobile-nav-toggle.open span:nth-child(2){ opacity:0; }
   .mobile-nav-toggle.open span:nth-child(3){ transform:translateY(-7px) rotate(-45deg); }
-  .mobile-nav-scrim{ position:fixed; inset:0; background:rgba(10,9,13,.6); z-index:95; opacity:0; animation:scrimFadeIn 180ms ease forwards; }
-  @keyframes scrimFadeIn{ from{ opacity:0; } to{ opacity:1; } }
+  /* always in the DOM (not conditionally rendered) so it's the *same* node across an
+     open/close toggle — see setMobileNavOpen(), which flips .visible directly with
+     classList instead of going through the innerHTML-replacing render() pipeline.
+     Replacing the node on every toggle is exactly what made this "just pop" instead of
+     fading: a freshly-created element has no prior frame to transition from. pointer-events
+     is tied to the same class so the invisible scrim never eats clicks on the page below it. */
+  .mobile-nav-scrim{
+    position:fixed; inset:0; background:rgba(10,9,13,.6); z-index:95;
+    opacity:0; pointer-events:none; transition:opacity 320ms cubic-bezier(.32,.72,0,1);
+  }
+  .mobile-nav-scrim.visible{ opacity:1; pointer-events:auto; }
   .storage-pill{
     display:inline-flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);
     background:var(--surface); border:1px solid var(--border-soft); padding:4px 8px; border-radius:20px; margin-top:8px;
@@ -394,7 +403,11 @@
 
     .sidebar{
       position:fixed; top:0; left:0; height:100vh; width:270px; max-width:82vw; z-index:100;
-      transform:translateX(-100%); transition:transform 220ms cubic-bezier(.2,.8,.2,1);
+      transform:translateX(-100%); will-change:transform;
+      /* iOS sheet/drawer curve — fast off the mark, gentle settle at the end, no bounce.
+         Matched by the scrim's own opacity transition (same duration+curve) above so the
+         dim and the slide always finish together instead of one lagging the other. */
+      transition:transform 320ms cubic-bezier(.32,.72,0,1);
       border-right:1px solid var(--border-soft); border-bottom:none;
     }
     .sidebar.mobile-open{ transform:translateX(0); box-shadow:var(--shadow-elevated-right); }
@@ -1640,7 +1653,7 @@ function render(){
     root.innerHTML = `
       ${renderMobileTopbar()}
       ${renderSidebar()}
-      ${MOBILE_NAV_OPEN ? '<div class="mobile-nav-scrim" id="mobileNavScrim"></div>' : ''}
+      <div class="mobile-nav-scrim ${MOBILE_NAV_OPEN ? 'visible' : ''}" id="mobileNavScrim"></div>
       <div class="main">${renderView()}</div>
       ${renderModals()}
       ${renderAIDrawer()}
@@ -1656,6 +1669,35 @@ function render(){
     console.error('Render failed — the view may be showing stale data. Full error:', err);
     showToast('Something went wrong updating the view — check the browser console');
   }
+}
+
+// Opens/closes the mobile nav drawer by toggling classes directly on the sidebar/scrim/
+// toggle-button DOM nodes that are already sitting in the page, instead of going through
+// render() (which replaces root.innerHTML wholesale — including the sidebar itself — so the
+// browser never sees a "before" frame to transition from, and the drawer just snaps open
+// instead of sliding). Mutating an existing node's class is what actually lets the CSS
+// transitions on .sidebar / .mobile-nav-scrim / .mobile-nav-toggle run.
+function setMobileNavOpen(open){
+  MOBILE_NAV_OPEN = open;
+  const sidebar = document.querySelector('.sidebar');
+  const scrim = document.getElementById('mobileNavScrim');
+  const toggle = document.getElementById('mobileNavToggle');
+  if(sidebar) sidebar.classList.toggle('mobile-open', open);
+  if(scrim) scrim.classList.toggle('visible', open);
+  if(toggle){
+    toggle.classList.toggle('open', open);
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.setAttribute('aria-label', open ? 'Close menu' : 'Open menu');
+  }
+}
+
+// Shared by the sidebar nav buttons and every other [data-nav] shortcut in the app (e.g.
+// "View all →" on the dashboard's task list) — pulled out so the mobile-drawer close path
+// below can reuse the exact same view-switch logic instead of duplicating it.
+function goToView(id){
+  VIEW = id; ACTIVE_BRAND_FILTER = null;
+  if(VIEW==='trackedContent' && TRACKED_CONTENT_DATA===null && !TRACKED_CONTENT_LOADING){ loadTrackedContent(); return; }
+  render();
 }
 
 // Published lives inside Content now (a view toggle, see renderContent) rather than its own
@@ -3523,14 +3565,21 @@ function renderMergeReviewModal(){
 /* ---------------- handlers ---------------- */
 function bindGlobalHandlers(){
   document.querySelectorAll('[data-nav]').forEach(el => el.addEventListener('click', () => {
-    VIEW = el.dataset.nav; ACTIVE_BRAND_FILTER=null; MOBILE_NAV_OPEN=false;
-    if(VIEW==='trackedContent' && TRACKED_CONTENT_DATA===null && !TRACKED_CONTENT_LOADING){ loadTrackedContent(); return; }
-    render();
+    const target = el.dataset.nav;
+    if(MOBILE_NAV_OPEN){
+      // let the drawer actually slide shut first — swapping VIEW immediately underneath it
+      // (the old behavior) meant the page content changed at the exact same instant the
+      // drawer vanished, which read as one big pop instead of two clean, readable motions.
+      setMobileNavOpen(false);
+      setTimeout(() => goToView(target), 220);
+    } else {
+      goToView(target);
+    }
   }));
   const mobileNavToggle = document.getElementById('mobileNavToggle');
-  if(mobileNavToggle) mobileNavToggle.addEventListener('click', () => { MOBILE_NAV_OPEN = !MOBILE_NAV_OPEN; render(); });
+  if(mobileNavToggle) mobileNavToggle.addEventListener('click', () => setMobileNavOpen(!MOBILE_NAV_OPEN));
   const mobileNavScrim = document.getElementById('mobileNavScrim');
-  if(mobileNavScrim) mobileNavScrim.addEventListener('click', () => { MOBILE_NAV_OPEN = false; render(); });
+  if(mobileNavScrim) mobileNavScrim.addEventListener('click', () => setMobileNavOpen(false));
   const refreshTrackedContent = document.getElementById('refreshTrackedContent');
   if(refreshTrackedContent) refreshTrackedContent.addEventListener('click', () => { TRACKED_CONTENT_DATA = null; loadTrackedContent(); });
   document.querySelectorAll('[data-open-modal]').forEach(el => el.addEventListener('click', () => openModal(el.dataset.openModal)));
