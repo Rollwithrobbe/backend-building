@@ -147,7 +147,16 @@ async function scoutBrandChannel(brand, YT_KEY, SUPABASE_URL, sbHeaders) {
         });
         results.push({ id: v.id, action: 'updated', views: viewCount, status });
       } else {
-        results.push({ id: v.id, action: 'skipped', status: row.status });
+        // status is 'hit' or 'expired' — the payout outcome is already locked in, but the view
+        // count is still real information worth keeping current (see scout-instagram.js for the
+        // full rationale — previously this froze view_count forever at whatever it happened to
+        // be the instant it crossed the requirement). Only status/earned/pay_amount stay locked.
+        await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
+          method: 'PATCH',
+          headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+          body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString() }),
+        });
+        results.push({ id: v.id, action: 'updated (views only)', views: viewCount, status: row.status });
       }
     }
   }

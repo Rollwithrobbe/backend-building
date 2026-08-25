@@ -141,7 +141,21 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
         });
         results.push({ id: media.id, action: 'updated', views: viewCount, status });
       } else {
-        results.push({ id: media.id, action: 'skipped', status: row.status });
+        // status is 'hit' or 'expired' — the payout outcome is already locked in either way, so
+        // there's nothing left to decide here, but the view count itself is still real,
+        // meaningful information (matches what the brand's own dashboard shows, and what you'd
+        // actually want to see if you go check on a video later). Previously this branch did
+        // nothing at all once a video hit, so view_count froze permanently at whatever it
+        // happened to be the instant it crossed the requirement — sometimes the very first
+        // fetch, if the video was already past the bar by the time it was first discovered —
+        // making the displayed number look wrong/stale forever after. Keep it current; only
+        // status/earned/pay_amount stay locked.
+        await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
+          method: 'PATCH',
+          headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+          body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString() }),
+        });
+        results.push({ id: media.id, action: 'updated (views only)', views: viewCount, status: row.status });
       }
     }
   }
