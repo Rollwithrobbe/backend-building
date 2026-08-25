@@ -376,6 +376,37 @@
   .chart-tooltip .ct-row{ display:flex; justify-content:space-between; gap:14px; color:var(--text-dim); font-size:11.5px; white-space:nowrap; }
   .chart-tooltip .ct-row .ct-amt{ font-family:'IBM Plex Mono',monospace; color:var(--text); }
 
+  /* ---- earnings line chart: materialize-in + hover crosshair ----
+     Base rules below are the AT-REST state (fully drawn, fully visible, no offset) — the
+     no-preference media query is what layers the enter animation on top, so a
+     prefers-reduced-motion user (or the base rule before the @media block loads) simply sees
+     the finished chart with no motion at all, never an invisible one waiting on an animation
+     that isn't going to run. Only elements built with the .chart-enter class actually got the
+     stagger delays baked into their markup (see renderLineChartSvg) — a plain re-render (no
+     class) is inert, so switching a task's priority elsewhere on the page doesn't make the
+     dashboard chart redraw itself for no reason. */
+  .chart-line-path{ stroke-dashoffset:0; }
+  .chart-area-path{ opacity:1; transform:none; transform-origin:bottom; }
+  .chart-pt{ opacity:1; transform:scale(1); transform-box:fill-box; transform-origin:center; transition:transform 150ms cubic-bezier(.22,1,.36,1); }
+  @media (prefers-reduced-motion: no-preference){
+    .chart-enter .chart-line-path{ animation:chartDraw 900ms cubic-bezier(.16,1,.3,1) both; }
+    .chart-enter .chart-area-path{ animation:chartAreaIn 700ms cubic-bezier(.16,1,.3,1) 220ms both; }
+    .chart-enter .chart-pt{ animation:chartPtIn 420ms cubic-bezier(.34,1.4,.64,1) both; }
+  }
+  @keyframes chartDraw{ from{ stroke-dashoffset:1; } to{ stroke-dashoffset:0; } }
+  @keyframes chartAreaIn{ from{ opacity:0; transform:scaleY(.85); } to{ opacity:1; transform:scaleY(1); } }
+  @keyframes chartPtIn{ from{ opacity:0; transform:scale(0); } to{ opacity:1; transform:scale(1); } }
+
+  /* one persistent group instead of per-point elements — moving it (transform, x) and the
+     circle's own cy is what makes hovering from one point to the next read as the guide
+     *sliding* to the new position rather than teleporting; x is shared (group transform) since
+     the vertical line's ends don't need independent y movement, only the dot riding the curve does */
+  .chart-hover-guide{ opacity:0; pointer-events:none; transition:opacity 140ms ease, transform 150ms cubic-bezier(.22,1,.36,1); }
+  .chart-hover-guide.show{ opacity:1; }
+  .chart-hover-guide line{ stroke:var(--border); stroke-width:1; }
+  .chart-hover-guide circle{ fill:var(--fx-green); stroke:var(--surface); stroke-width:2; transition:cy 150ms cubic-bezier(.22,1,.36,1); }
+  .chart-pt-hit:hover + .chart-pt{ transform:scale(1.35); }
+
   .toast{ position:fixed; bottom:20px; right:20px; background:var(--surface-2); border:1px solid var(--border); color:var(--text); padding:10px 16px; border-radius:var(--radius-sm); font-size:13px; z-index:100; opacity:0; transform:translateY(6px); transition:.2s; pointer-events:none; }
   .toast.show{ opacity:1; transform:translateY(0); }
 
@@ -684,6 +715,13 @@ let CONTENT_VIEW_MODE = 'pipeline'; // 'pipeline' (in progress) | 'published' �
 let PAYMENTS_FILTER = { brandId:'' };
 let DP = null; // { key, month: Date }
 let DASH_RANGE = 'month';
+// mirrors MODAL_ENTER's pattern (see openModal): true only for the one render() call that
+// should play the chart's materialize-in animation — first mount, a range switch, or the
+// moment tracked-content data first lands. Every other render() (checking a task, editing a
+// payment, the mobile drawer, etc.) leaves it false so the chart doesn't visibly redraw itself
+// on unrelated interactions, which read as gimmicky rather than intentional.
+let CHART_ENTER = false;
+function renderWithChartEnter(){ CHART_ENTER = true; render(); CHART_ENTER = false; }
 let TASK_TIMERS = {}; // taskId -> { remaining, intervalId }
 let TIMER_DONE_POPUP = null; // { taskTitle }
 let TIMER_ENTER = false;
@@ -750,7 +788,7 @@ async function loadData(){
   saveData();
   await loadAISettings();
   await restoreAutoBackupHandle();
-  render();
+  renderWithChartEnter();
   loadTrackedContent(); // fire-and-forget — dashboard totals update on their own once this resolves
 }
 async function loadAISettings(){
@@ -1549,6 +1587,23 @@ function hideChartTooltip(){
   const tip = document.getElementById('chartTooltip');
   if(tip) tip.classList.remove('show');
 }
+// Slides the crosshair + dot (see .chart-hover-guide) to whichever point is hovered — reads
+// the already-positioned invisible hit-circle's own cx/cy rather than recomputing chart
+// geometry, so it can never drift out of sync with what's actually drawn.
+function moveChartHoverGuide(hitCircleEl){
+  const guide = document.getElementById('chartHoverGuide');
+  if(!guide) return;
+  const x = hitCircleEl.getAttribute('cx');
+  const y = hitCircleEl.getAttribute('cy');
+  guide.style.transform = `translateX(${x}px)`;
+  const dot = guide.querySelector('circle');
+  if(dot) dot.setAttribute('cy', y);
+  guide.classList.add('show');
+}
+function hideChartHoverGuide(){
+  const guide = document.getElementById('chartHoverGuide');
+  if(guide) guide.classList.remove('show');
+}
 function renderDelta(pct){
   if(pct===null || pct===undefined) return '';
   const up = pct >= 0;
@@ -1583,19 +1638,27 @@ function renderLineChartSvg(series){
   const linePath = smoothPath(pts);
   const areaPath = n>1 ? `${linePath} L${pts[n-1].x.toFixed(1)},${(H-pad).toFixed(1)} L${pts[0].x.toFixed(1)},${(H-pad).toFixed(1)} Z` : '';
   const labelStep = chartLabelStep(n);
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" style="display:block; overflow:visible;">
+  // pathLength="1" normalizes stroke-dasharray/dashoffset to the 0–1 range regardless of the
+  // path's actual on-screen length, so the draw-in animation (see .chart-line-path in <style>)
+  // doesn't need JS to measure getTotalLength() for every redraw.
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" style="display:block; overflow:visible;" class="${CHART_ENTER?'chart-enter':''}">
       <defs>
         <linearGradient id="chartFillGrad" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stop-color="var(--fx-green)" stop-opacity="0.30"/>
           <stop offset="100%" stop-color="var(--fx-green)" stop-opacity="0"/>
         </linearGradient>
       </defs>
-      ${areaPath ? `<path d="${areaPath}" fill="url(#chartFillGrad)" stroke="none"/>` : ''}
-      <path d="${linePath}" fill="none" stroke="var(--fx-green)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+      ${areaPath ? `<path class="chart-area-path" d="${areaPath}" fill="url(#chartFillGrad)" stroke="none"/>` : ''}
+      <path class="chart-line-path" pathLength="1" d="${linePath}" fill="none" stroke="var(--fx-green)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="1"/>
       ${pts.map((p,i) => {
         const isLast = i===n-1;
-        return `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="13" fill="transparent" style="cursor:pointer; pointer-events:all;" data-chart-point="${i}"></circle><circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${isLast?3.6:2.2}" fill="var(--fx-green)" style="pointer-events:none;" opacity="${isLast?1:0.7}"/>`;
+        const delay = CHART_ENTER ? `style="animation-delay:${520+i*28}ms"` : '';
+        return `<circle class="chart-pt-hit" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="13" fill="transparent" style="cursor:pointer; pointer-events:all;" data-chart-point="${i}"></circle><circle class="chart-pt" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${isLast?3.6:2.2}" fill="var(--fx-green)" ${delay} opacity="${isLast?1:0.7}"/>`;
       }).join('')}
+      <g class="chart-hover-guide" id="chartHoverGuide">
+        <line x1="0" y1="${topPad}" x2="0" y2="${H-pad}"/>
+        <circle cx="0" cy="0" r="4.5"/>
+      </g>
     </svg>
     <div style="display:flex; justify-content:space-between; margin-top:6px;">
       ${series.map((s,i)=> `<span style="font-size:10px;color:var(--text-faint);">${i%labelStep===0 ? escapeHtml(s.label) : ''}</span>`).join('')}
@@ -1711,6 +1774,7 @@ function setMobileNavOpen(open){
 function goToView(id){
   VIEW = id; ACTIVE_BRAND_FILTER = null;
   if(VIEW==='trackedContent' && TRACKED_CONTENT_DATA===null && !TRACKED_CONTENT_LOADING){ loadTrackedContent(); return; }
+  if(VIEW==='dashboard'){ renderWithChartEnter(); return; }
   render();
 }
 
@@ -1833,7 +1897,7 @@ async function loadTrackedContent(){
     console.error('loadTrackedContent failed', e);
   }
   TRACKED_CONTENT_LOADING = false;
-  render();
+  renderWithChartEnter();
 }
 
 // Pulls the connection status (YouTube handle, Instagram/TikTok username + whether a token is
@@ -3652,12 +3716,12 @@ function bindGlobalHandlers(){
   }));
 
   // dashboard range + chart type
-  document.querySelectorAll('[data-range]').forEach(el => el.addEventListener('click', () => { DASH_RANGE = el.dataset.range; render(); }));
+  document.querySelectorAll('[data-range]').forEach(el => el.addEventListener('click', () => { DASH_RANGE = el.dataset.range; renderWithChartEnter(); }));
   document.querySelectorAll('[data-chart-point]').forEach(el => {
     const idx = Number(el.dataset.chartPoint);
-    el.addEventListener('mouseenter', (e) => showChartTooltip(idx, e.clientX, e.clientY));
+    el.addEventListener('mouseenter', (e) => { showChartTooltip(idx, e.clientX, e.clientY); moveChartHoverGuide(el); });
     el.addEventListener('mousemove', (e) => positionChartTooltip(e.clientX, e.clientY));
-    el.addEventListener('mouseleave', hideChartTooltip);
+    el.addEventListener('mouseleave', () => { hideChartTooltip(); hideChartHoverGuide(); });
   });
 
   // tasks
