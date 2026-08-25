@@ -1677,6 +1677,10 @@ let TRACKED_CONTENT_ERROR = null;
 // Row ids (individual tracked_videos, not deliverables) currently checked for merging into one
 // crossposted deliverable — see the Merge button in renderTrackedContent() and renderMergeReviewModal().
 let MERGE_SELECTED = new Set();
+let TC_FILTER = { brand:'', platform:'', status:'', q:'' };
+// deliverable keys (group_id or row id) whose long caption/title is currently shown in full —
+// everything else stays truncated so a hashtag-heavy caption doesn't blow up the row height
+let TC_EXPANDED = new Set();
 
 // Publish hand-off: once ANY platform on a manual Content item goes 'published', that item's
 // job in the manual pipeline is done — the real video now gets discovered and tracked
@@ -1744,6 +1748,19 @@ function platformPill(row){
     : `<span class="tag tag-${row.platform}" style="${style}">${label}</span>`;
 }
 
+// Long hashtag-heavy captions blow up a row's height if shown in full by default — truncate to
+// a fixed length with a "more/less" toggle per deliverable (state kept in TC_EXPANDED).
+function renderTitleCell(dv){
+  const LIMIT = 60;
+  const full = dv.title || 'Untitled';
+  const suffix = dv.grouped ? ` <span class="hint">(${dv.rows.length} platforms merged)</span>` : '';
+  if(full.length <= LIMIT) return `${escapeHtml(full)}${suffix}`;
+  const expanded = TC_EXPANDED.has(dv.key);
+  const shown = expanded ? escapeHtml(full) : escapeHtml(full.slice(0, LIMIT)) + '…';
+  const toggleLabel = expanded ? 'Show less' : 'Show more';
+  return `${shown} <button type="button" data-toggle-title="${dv.key}" style="background:none; border:none; padding:0; color:var(--accent); font-size:inherit; cursor:pointer; text-decoration:underline;">${toggleLabel}</button>${suffix}`;
+}
+
 function renderTrackedContent(){
   const head = `
     <div class="page-head">
@@ -1761,7 +1778,36 @@ function renderTrackedContent(){
     return head + `<div class="table-wrap"><div class="empty">Loading…</div></div>`;
   }
 
-  const deliverables = getDeliverables();
+  const allDeliverables = getDeliverables();
+  const brandNames = [...new Set(TRACKED_CONTENT_DATA.map(r=>r.brands?.name).filter(Boolean))].sort();
+  const platformsPresent = [...new Set(TRACKED_CONTENT_DATA.map(r=>r.platform).filter(Boolean))].sort();
+
+  const deliverables = allDeliverables.filter(dv => {
+    if(TC_FILTER.brand && dv.brandName !== TC_FILTER.brand) return false;
+    if(TC_FILTER.platform && !dv.rows.some(r=>r.platform===TC_FILTER.platform)) return false;
+    if(TC_FILTER.status){
+      if(TC_FILTER.status==='excluded' && !dv.excluded) return false;
+      if(TC_FILTER.status!=='excluded' && (dv.excluded || dv.status!==TC_FILTER.status)) return false;
+    }
+    if(TC_FILTER.q && !(dv.title||'').toLowerCase().includes(TC_FILTER.q.toLowerCase())) return false;
+    return true;
+  });
+
+  const filterBar = `
+    <div class="filter-bar">
+      <select id="tcBrand"><option value="">All brands</option>${brandNames.map(n=>`<option value="${escapeHtml(n)}" ${TC_FILTER.brand===n?'selected':''}>${escapeHtml(n)}</option>`).join('')}</select>
+      <select id="tcPlatform"><option value="">All platforms</option>${platformsPresent.map(p=>`<option value="${p}" ${TC_FILTER.platform===p?'selected':''}>${p.toUpperCase()}</option>`).join('')}</select>
+      <select id="tcStatus">
+        <option value="" ${!TC_FILTER.status?'selected':''}>All statuses</option>
+        <option value="hit" ${TC_FILTER.status==='hit'?'selected':''}>Hit</option>
+        <option value="tracking" ${TC_FILTER.status==='tracking'?'selected':''}>Tracking</option>
+        <option value="expired" ${TC_FILTER.status==='expired'?'selected':''}>Expired</option>
+        <option value="excluded" ${TC_FILTER.status==='excluded'?'selected':''}>Excluded</option>
+      </select>
+      <input type="text" id="tcSearch" placeholder="Search title…" value="${escapeHtml(TC_FILTER.q)}" />
+      ${(TC_FILTER.brand||TC_FILTER.platform||TC_FILTER.status||TC_FILTER.q) ? `<button type="button" class="btn btn-ghost btn-sm" id="tcClearFilters">Clear filters</button>` : ''}
+    </div>`;
+
   const counted = deliverables.filter(d=>!d.excluded);
   const hit = counted.filter(d=>d.status==='hit');
   const tracking = counted.filter(d=>d.status==='tracking');
@@ -1770,13 +1816,13 @@ function renderTrackedContent(){
   const totalEarned = hit.reduce((s,d)=> s + d.payAmount, 0);
   const totalPending = tracking.reduce((s,d)=> s + d.payAmount, 0);
 
-  return head + `
-    <div class="grid grid-cards" style="margin-bottom:20px;">
+  return head + filterBar + `
+    <div class="grid grid-cards" style="margin:16px 0 20px;">
       <div class="card"><div class="label">Earned — automatic</div><div class="big mono fx-green">${money(totalEarned)}</div><div class="foot">${hit.length} deliverable${hit.length===1?'':'s'} hit its requirement</div></div>
       <div class="card"><div class="label">Pending</div><div class="big mono" style="color:var(--text-dim)">${money(totalPending)}</div><div class="foot">${tracking.length} still tracking</div></div>
       <div class="card"><div class="label">Expired</div><div class="big mono ${expired.length>0?'fx-red':''}">${expired.length}</div><div class="foot">Window passed unmet${excludedCount ? ` · ${excludedCount} excluded` : ''}</div></div>
     </div>
-    ${deliverables.length===0 ? emptyState('Nothing tracked yet','Connect a brand\'s channel and wait for the next scouting run.') : `
+    ${deliverables.length===0 ? emptyState(allDeliverables.length===0 ? 'Nothing tracked yet' : 'No matches', allDeliverables.length===0 ? 'Connect a brand\'s channel and wait for the next scouting run.' : 'Try clearing a filter.') : `
     <div class="table-wrap" style="overflow-x:auto;"><table>
       <thead><tr><th></th><th></th><th>Brand</th><th>Platform(s)</th><th>Title</th><th>Views</th><th>Status</th><th>Payout</th><th>Discovered</th><th></th></tr></thead>
       <tbody>
@@ -1788,7 +1834,7 @@ function renderTrackedContent(){
             <td>${dv.thumbnail ? `<img src="${dv.thumbnail}" alt="" style="width:40px; height:40px; object-fit:cover; border-radius:6px; display:block;" />` : `<div style="width:40px; height:40px; border-radius:6px; background:var(--surface);"></div>`}</td>
             <td>${dv.brand ? escapeHtml(dv.brand.name) : '<span style="color:var(--text-faint)">—</span>'}</td>
             <td>${dv.grouped ? dv.rows.map(platformPill).join('') : `<span class="tag tag-${rep.platform}">${(rep.platform||'').toUpperCase()}</span>`}</td>
-            <td>${escapeHtml(dv.title || 'Untitled')}${dv.grouped ? ` <span class="hint">(${dv.rows.length} platforms merged)</span>` : ''}</td>
+            <td style="max-width:260px;">${renderTitleCell(dv)}</td>
             <td class="mono">${dv.grouped ? '<span style="color:var(--text-faint)">see platforms</span>' : `${(rep.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`}</td>
             <td>${dv.excluded ? '<span class="tag tag-neutral">Excluded</span>' : dv.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : dv.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
             <td class="mono">${dv.status==='hit' && !dv.excluded ? money(dv.payAmount) : `<span style="color:var(--text-faint)">${money(dv.payAmount)}${dv.excluded?'':' pending'}</span>`}</td>
@@ -3318,6 +3364,21 @@ function bindGlobalHandlers(){
       render();
     });
   }));
+  document.querySelectorAll('[data-toggle-title]').forEach(el => el.addEventListener('click', () => {
+    const key = el.dataset.toggleTitle;
+    if(TC_EXPANDED.has(key)) TC_EXPANDED.delete(key); else TC_EXPANDED.add(key);
+    render();
+  }));
+  const tcBrand = document.getElementById('tcBrand');
+  if(tcBrand) tcBrand.addEventListener('change', () => { TC_FILTER.brand = tcBrand.value; render(); });
+  const tcPlatform = document.getElementById('tcPlatform');
+  if(tcPlatform) tcPlatform.addEventListener('change', () => { TC_FILTER.platform = tcPlatform.value; render(); });
+  const tcStatus = document.getElementById('tcStatus');
+  if(tcStatus) tcStatus.addEventListener('change', () => { TC_FILTER.status = tcStatus.value; render(); });
+  const tcSearch = document.getElementById('tcSearch');
+  if(tcSearch) tcSearch.addEventListener('input', () => { TC_FILTER.q = tcSearch.value; render(); tcSearch.focus(); tcSearch.setSelectionRange(tcSearch.value.length, tcSearch.value.length); });
+  const tcClearFilters = document.getElementById('tcClearFilters');
+  if(tcClearFilters) tcClearFilters.addEventListener('click', () => { TC_FILTER = { brand:'', platform:'', status:'', q:'' }; render(); });
 
   // dashboard range + chart type
   document.querySelectorAll('[data-range]').forEach(el => el.addEventListener('click', () => { DASH_RANGE = el.dataset.range; render(); }));
