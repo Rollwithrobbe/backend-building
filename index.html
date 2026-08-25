@@ -1835,6 +1835,7 @@ function renderBrandBreakdownModal(){
   if(!d) return '';
   const data = brandViewsBreakdownData(d.brandId, d.brandName);
   const maxPlatform = Math.max(...data.platformTotals.map(p=>p.views), 1);
+  const maxTopViews = Math.max(...data.topVideos.map(v=>Number(v.view_count)||0), 1);
   return `<div class="modal ${MODAL_ENTER?'modal-enter':''}" style="max-width:560px;">
     <h3><span class="swatch" style="background:${d.brandColor}"></span>${escapeHtml(d.brandName)} — views (last 30 days)</h3>
     <div class="hint" style="margin-bottom:14px;">${data.totalViews.toLocaleString()} total views across ${data.platformTotals.length} platform${data.platformTotals.length===1?'':'s'} — same window as the "Views — 30d" column, so it always adds up to that number.</div>
@@ -1849,15 +1850,21 @@ function renderBrandBreakdownModal(){
     </div>
     <div class="hint" style="margin-bottom:8px; font-weight:600; color:var(--text-dim); text-transform:uppercase; font-size:11px; letter-spacing:.06em;">Top ${data.topVideos.length} video${data.topVideos.length===1?'':'s'}</div>
     <div style="display:flex; flex-direction:column; gap:8px;">
-      ${data.topVideos.map(v => `
+      ${data.topVideos.map(v => {
+        const pct = (Number(v.view_count)||0) / maxTopViews * 100;
+        return `
         <div style="display:flex; gap:10px; align-items:center; padding:6px 0; border-bottom:1px solid var(--border-soft);">
           ${v.thumbnail_url ? `<img src="${v.thumbnail_url}" alt="" style="width:40px; height:40px; object-fit:cover; border-radius:6px; flex-shrink:0;" />` : `<div style="width:40px; height:40px; border-radius:6px; background:var(--surface); flex-shrink:0;"></div>`}
           <div style="flex:1; min-width:0;">
             <div style="display:flex; align-items:center; gap:6px;"><span class="tag tag-${v.platform}" style="font-size:10px;">${escapeHtml((v.platform||'').toUpperCase())}</span><span style="font-size:12.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(v.title || 'Untitled')}</span></div>
-            <div class="hint" style="margin-top:2px;">${(v.view_count||0).toLocaleString()} views · ${v.posted_at ? fmtDate(v.posted_at.slice(0,10)) : '—'}</div>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:4px;">
+              <div class="brand-bar-track" style="height:5px; max-width:120px;"><div class="brand-bar-fill" style="width:${pct.toFixed(0)}%; background:var(--${v.platform});"></div></div>
+              <span class="hint" style="white-space:nowrap;">${(v.view_count||0).toLocaleString()} views · ${v.posted_at ? fmtDate(v.posted_at.slice(0,10)) : '—'}</span>
+            </div>
           </div>
           ${v.url ? `<a href="${v.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm" style="flex-shrink:0;">Open</a>` : ''}
-        </div>`).join('')}
+        </div>`;
+      }).join('')}
     </div>
     `}
     <div class="modal-actions" style="margin-top:14px;">
