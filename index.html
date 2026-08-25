@@ -1787,7 +1787,7 @@ function renderBrandComparisonTable(){
       ${col('earned','Earned (all time)','right')}
     </tr></thead>
     <tbody>
-      ${sorted.map(r => `<tr ${r.id?`class="row-click" data-goto-brand="${r.id}"`:''}>
+      ${sorted.map(r => `<tr class="row-click" data-open-brand-breakdown data-brand-id="${r.id||''}" data-brand-name="${escapeHtml(r.name)}" data-brand-color="${r.color}">
         <td><span class="swatch" style="background:${r.color}"></span>${escapeHtml(r.name)}</td>
         <td class="mono" style="text-align:right;">${r.count}</td>
         <td style="text-align:right;">
@@ -1802,6 +1802,69 @@ function renderBrandComparisonTable(){
       </tr>`).join('')}
     </tbody>
   </table></div>`;
+}
+
+// Same 30-day rolling window as the "Views — 30d" column this opens from — the breakdown exists
+// to answer "what actually makes up that number", so it has to read off the exact same window
+// or the two would silently disagree the moment a video ages past 30 days between renders.
+function brandViewsBreakdownData(brandId, brandName, topN=5){
+  if(!TRACKED_CONTENT_DATA) return { platformTotals: [], topVideos: [], totalViews: 0 };
+  const cutoff = Date.now() - 30*86400000;
+  const rows = TRACKED_CONTENT_DATA.filter(r => {
+    if(r.excluded) return false;
+    if(!r.posted_at || new Date(r.posted_at).getTime() < cutoff) return false;
+    return brandId ? r.brand_id === brandId : r.brands?.name === brandName;
+  });
+  const byPlatform = {};
+  rows.forEach(r => { byPlatform[r.platform] = (byPlatform[r.platform]||0) + (Number(r.view_count)||0); });
+  const platformTotals = Object.entries(byPlatform).map(([platform,views]) => ({platform, views})).sort((a,b)=>b.views-a.views);
+  const topVideos = [...rows].sort((a,b)=>(Number(b.view_count)||0)-(Number(a.view_count)||0)).slice(0, topN);
+  return { platformTotals, topVideos, totalViews: rows.reduce((s,r)=>s+(Number(r.view_count)||0),0) };
+}
+function openBrandBreakdown(brandId, brandName, brandColor){
+  MODAL_STATE.type = 'brandBreakdown';
+  MODAL_STATE.id = brandId || brandName;
+  MODAL_STATE.draft = { brandId: brandId || null, brandName, brandColor };
+  MODAL_ENTER = true;
+  render();
+  MODAL_ENTER = false;
+  document.getElementById('overlay').classList.add('open');
+}
+function renderBrandBreakdownModal(){
+  const d = MODAL_STATE.draft;
+  if(!d) return '';
+  const data = brandViewsBreakdownData(d.brandId, d.brandName);
+  const maxPlatform = Math.max(...data.platformTotals.map(p=>p.views), 1);
+  return `<div class="modal ${MODAL_ENTER?'modal-enter':''}" style="max-width:560px;">
+    <h3><span class="swatch" style="background:${d.brandColor}"></span>${escapeHtml(d.brandName)} — views (last 30 days)</h3>
+    <div class="hint" style="margin-bottom:14px;">${data.totalViews.toLocaleString()} total views across ${data.platformTotals.length} platform${data.platformTotals.length===1?'':'s'} — same window as the "Views — 30d" column, so it always adds up to that number.</div>
+    ${data.platformTotals.length===0 ? emptyState('Nothing in the last 30 days', 'Once this brand has videos posted within the window, they show up here.') : `
+    <div class="card" style="margin-bottom:16px;">
+      ${data.platformTotals.map(p => `
+        <div class="brand-bar-row">
+          <div style="width:90px; flex-shrink:0;"><span class="tag tag-${p.platform}">${escapeHtml((p.platform||'').toUpperCase())}</span></div>
+          <div class="brand-bar-track"><div class="brand-bar-fill" style="width:${(p.views/maxPlatform*100).toFixed(0)}%; background:var(--${p.platform});"></div></div>
+          <div class="mono" style="width:80px; text-align:right; font-size:12.5px; flex-shrink:0;">${p.views.toLocaleString()}</div>
+        </div>`).join('')}
+    </div>
+    <div class="hint" style="margin-bottom:8px; font-weight:600; color:var(--text-dim); text-transform:uppercase; font-size:11px; letter-spacing:.06em;">Top ${data.topVideos.length} video${data.topVideos.length===1?'':'s'}</div>
+    <div style="display:flex; flex-direction:column; gap:8px;">
+      ${data.topVideos.map(v => `
+        <div style="display:flex; gap:10px; align-items:center; padding:6px 0; border-bottom:1px solid var(--border-soft);">
+          ${v.thumbnail_url ? `<img src="${v.thumbnail_url}" alt="" style="width:40px; height:40px; object-fit:cover; border-radius:6px; flex-shrink:0;" />` : `<div style="width:40px; height:40px; border-radius:6px; background:var(--surface); flex-shrink:0;"></div>`}
+          <div style="flex:1; min-width:0;">
+            <div style="display:flex; align-items:center; gap:6px;"><span class="tag tag-${v.platform}" style="font-size:10px;">${escapeHtml((v.platform||'').toUpperCase())}</span><span style="font-size:12.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(v.title || 'Untitled')}</span></div>
+            <div class="hint" style="margin-top:2px;">${(v.view_count||0).toLocaleString()} views · ${v.posted_at ? fmtDate(v.posted_at.slice(0,10)) : '—'}</div>
+          </div>
+          ${v.url ? `<a href="${v.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm" style="flex-shrink:0;">Open</a>` : ''}
+        </div>`).join('')}
+    </div>
+    `}
+    <div class="modal-actions" style="margin-top:14px;">
+      <div></div>
+      <div class="right"><button class="btn btn-primary" id="cancelModal" type="button">Close</button></div>
+    </div>
+  </div>`;
 }
 
 // Tracked, still-pending deliverables ranked by whichever platform's eligibility window runs
@@ -3447,6 +3510,7 @@ function renderModalBody(){
   if(MODAL_STATE.type==='task') return renderTaskModal();
   if(MODAL_STATE.type==='trackedVideo') return renderTrackedVideoModal();
   if(MODAL_STATE.type==='mergeReview') return renderMergeReviewModal();
+  if(MODAL_STATE.type==='brandBreakdown') return renderBrandBreakdownModal();
   return '';
 }
 
@@ -3804,7 +3868,9 @@ function bindGlobalHandlers(){
   const refreshTrackedContent = document.getElementById('refreshTrackedContent');
   if(refreshTrackedContent) refreshTrackedContent.addEventListener('click', () => { TRACKED_CONTENT_DATA = null; loadTrackedContent(); });
   document.querySelectorAll('[data-open-modal]').forEach(el => el.addEventListener('click', () => openModal(el.dataset.openModal)));
-  document.querySelectorAll('[data-goto-brand]').forEach(el => el.addEventListener('click', () => { VIEW='content'; ACTIVE_BRAND_FILTER = el.dataset.gotoBrand; render(); }));
+  document.querySelectorAll('[data-open-brand-breakdown]').forEach(el => el.addEventListener('click', () => {
+    openBrandBreakdown(el.dataset.brandId || null, el.dataset.brandName, el.dataset.brandColor);
+  }));
   document.querySelectorAll('[data-open-content]').forEach(el => el.addEventListener('click', () => openModal('content', el.dataset.openContent)));
   document.querySelectorAll('[data-open-brand], [data-edit-brand]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); openModal('brand', el.dataset.openBrand || el.dataset.editBrand); }));
   document.querySelectorAll('[data-del-payment]').forEach(el => el.addEventListener('click', () => { DATA.payments = DATA.payments.filter(p=>p.id!==el.dataset.delPayment); saveData(); render(); }));
