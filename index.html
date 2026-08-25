@@ -1678,6 +1678,7 @@ let TRACKED_CONTENT_ERROR = null;
 // crossposted deliverable — see the Merge button in renderTrackedContent() and renderMergeReviewModal().
 let MERGE_SELECTED = new Set();
 let TC_FILTER = { brand:'', platform:'', status:'', q:'' };
+let TC_VIEW_MODE = 'table'; // 'table' | 'compare' — see renderCompareView()
 // deliverable keys (group_id or row id) whose long caption/title is currently shown in full —
 // everything else stays truncated so a hashtag-heavy caption doesn't blow up the row height
 let TC_EXPANDED = new Set();
@@ -1750,6 +1751,75 @@ function platformPill(row){
 
 // Long hashtag-heavy captions blow up a row's height if shown in full by default — truncate to
 // a fixed length with a "more/less" toggle per deliverable (state kept in TC_EXPANDED).
+// 24-hour clock, no AM/PM ambiguity — matters here because matching crossposts often comes
+// down to "these are 3 minutes apart", which AM/PM makes annoying to eyeball.
+function fmtTime24(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+function fmtDateTime(iso){
+  if(!iso) return '—';
+  return `${fmtDate(iso.slice(0,10))} · ${fmtTime24(iso)}`;
+}
+// Groups a brand's still-unmerged videos into "this is probably one crosspost" clusters by how
+// close together they were actually posted (not discovered — see fmtDateTime above) — real data
+// shows Robbe crossposts within minutes, so a few hours is a generous, still-safe window given
+// he posts 9-13 videos/day (unrelated posts land hours apart, not minutes). This only *suggests*
+// a grouping for the Compare view's "Link these" shortcut — nothing merges without going through
+// the same review-and-confirm modal as a manual selection.
+const COMPARE_CLUSTER_WINDOW_MS = 3 * 60 * 60 * 1000;
+function clusterForCompare(brandName){
+  if(!TRACKED_CONTENT_DATA) return [];
+  const rows = TRACKED_CONTENT_DATA.filter(r => !r.group_id && !r.excluded && (r.brands?.name || 'Unassigned (automated)') === brandName && r.posted_at);
+  const sorted = [...rows].sort((a,b) => new Date(a.posted_at) - new Date(b.posted_at));
+  const clusters = [];
+  sorted.forEach(r => {
+    const last = clusters[clusters.length - 1];
+    if(last && !last.byPlatform[r.platform] && (new Date(r.posted_at) - new Date(last.anchorTime)) <= COMPARE_CLUSTER_WINDOW_MS){
+      last.byPlatform[r.platform] = r;
+      last.rows.push(r);
+    } else {
+      clusters.push({ anchorTime: r.posted_at, byPlatform: { [r.platform]: r }, rows: [r] });
+    }
+  });
+  return clusters;
+}
+function renderCompareView(brandName, searchQ){
+  if(!brandName){
+    return `<div class="table-wrap"><div class="empty">Pick a brand above to compare its platforms side by side.</div></div>`;
+  }
+  let clusters = clusterForCompare(brandName);
+  if(searchQ) clusters = clusters.filter(c => c.rows.some(r => (r.title||'').toLowerCase().includes(searchQ.toLowerCase())));
+  if(clusters.length===0){
+    return `<div class="table-wrap"><div class="empty">Nothing unmerged for ${escapeHtml(brandName)} right now — everything's already linked or there's no overlap yet.</div></div>`;
+  }
+  const platforms = [...new Set(clusters.flatMap(c=>Object.keys(c.byPlatform)))].sort();
+  return `<div class="table-wrap" style="overflow-x:auto;"><table>
+    <thead><tr><th>Posted</th>${platforms.map(p=>`<th>${p.toUpperCase()}</th>`).join('')}<th></th></tr></thead>
+    <tbody>
+      ${clusters.map(c => `<tr>
+        <td class="mono" style="white-space:nowrap;">${fmtDateTime(c.anchorTime)}</td>
+        ${platforms.map(p => {
+          const r = c.byPlatform[p];
+          if(!r) return `<td><span style="color:var(--text-faint)">—</span></td>`;
+          const req = r.brands ? Number(r.brands.view_requirement) : null;
+          return `<td>
+            <div style="display:flex; gap:8px; align-items:center;">
+              ${r.thumbnail_url ? `<img src="${r.thumbnail_url}" alt="" style="width:32px; height:32px; object-fit:cover; border-radius:5px; flex-shrink:0;" />` : `<div style="width:32px; height:32px; border-radius:5px; background:var(--surface); flex-shrink:0;"></div>`}
+              <div style="min-width:0;">
+                <div class="mono" style="font-size:12px;">${(r.view_count||0).toLocaleString()}${req?` / ${req.toLocaleString()}`:''}</div>
+                <div class="hint">${fmtTime24(r.posted_at)}${r.url ? ` · <a href="${r.url}" target="_blank" rel="noopener">open</a>` : ''}</div>
+              </div>
+            </div>
+          </td>`;
+        }).join('')}
+        <td>${c.rows.length>=2 ? `<button class="btn btn-primary btn-sm" data-link-cluster="${c.rows.map(r=>r.id).join(',')}" type="button">Link these</button>` : `<span class="hint">only 1 platform</span>`}</td>
+      </tr>`).join('')}
+    </tbody>
+  </table></div>`;
+}
+
 function renderTitleCell(dv){
   const LIMIT = 60;
   const full = dv.title || 'Untitled';
@@ -1766,6 +1836,10 @@ function renderTrackedContent(){
     <div class="page-head">
       <div><h2>Tracked Content</h2><div class="sub">Discovered and tracked automatically from each brand's connected account — nothing here is entered by hand. Select 2+ from the same brand to merge a crossposted video into one deliverable.</div></div>
       <div class="head-actions">
+        <div class="seg" style="display:inline-flex; border:1px solid var(--border-soft); border-radius:8px; overflow:hidden;">
+          <button class="btn btn-sm ${TC_VIEW_MODE==='table'?'btn-primary':'btn-ghost'}" id="tcViewTable" type="button" style="border-radius:0;">Table</button>
+          <button class="btn btn-sm ${TC_VIEW_MODE==='compare'?'btn-primary':'btn-ghost'}" id="tcViewCompare" type="button" style="border-radius:0;">Compare platforms</button>
+        </div>
         ${MERGE_SELECTED.size>=2 ? `<button class="btn btn-primary" id="openMergeReview" type="button">Merge ${MERGE_SELECTED.size} selected</button>` : ''}
         <button class="btn btn-ghost" id="refreshTrackedContent" type="button" ${TRACKED_CONTENT_LOADING?'disabled':''}>${TRACKED_CONTENT_LOADING?'Refreshing…':'↻ Refresh'}</button>
       </div>
@@ -1793,9 +1867,11 @@ function renderTrackedContent(){
     return true;
   });
 
+  const isCompare = TC_VIEW_MODE === 'compare';
   const filterBar = `
     <div class="filter-bar">
-      <select id="tcBrand"><option value="">All brands</option>${brandNames.map(n=>`<option value="${escapeHtml(n)}" ${TC_FILTER.brand===n?'selected':''}>${escapeHtml(n)}</option>`).join('')}</select>
+      <select id="tcBrand"><option value="">${isCompare ? 'Pick a brand…' : 'All brands'}</option>${brandNames.map(n=>`<option value="${escapeHtml(n)}" ${TC_FILTER.brand===n?'selected':''}>${escapeHtml(n)}</option>`).join('')}</select>
+      ${!isCompare ? `
       <select id="tcPlatform"><option value="">All platforms</option>${platformsPresent.map(p=>`<option value="${p}" ${TC_FILTER.platform===p?'selected':''}>${p.toUpperCase()}</option>`).join('')}</select>
       <select id="tcStatus">
         <option value="" ${!TC_FILTER.status?'selected':''}>All statuses</option>
@@ -1803,10 +1879,14 @@ function renderTrackedContent(){
         <option value="tracking" ${TC_FILTER.status==='tracking'?'selected':''}>Tracking</option>
         <option value="expired" ${TC_FILTER.status==='expired'?'selected':''}>Expired</option>
         <option value="excluded" ${TC_FILTER.status==='excluded'?'selected':''}>Excluded</option>
-      </select>
+      </select>` : ''}
       <input type="text" id="tcSearch" placeholder="Search title…" value="${escapeHtml(TC_FILTER.q)}" />
       ${(TC_FILTER.brand||TC_FILTER.platform||TC_FILTER.status||TC_FILTER.q) ? `<button type="button" class="btn btn-ghost btn-sm" id="tcClearFilters">Clear filters</button>` : ''}
     </div>`;
+
+  if(isCompare){
+    return head + filterBar + `<div style="margin-top:16px;">` + renderCompareView(TC_FILTER.brand, TC_FILTER.q) + `</div>`;
+  }
 
   const counted = deliverables.filter(d=>!d.excluded);
   const hit = counted.filter(d=>d.status==='hit');
@@ -3379,6 +3459,14 @@ function bindGlobalHandlers(){
   if(tcSearch) tcSearch.addEventListener('input', () => { TC_FILTER.q = tcSearch.value; render(); tcSearch.focus(); tcSearch.setSelectionRange(tcSearch.value.length, tcSearch.value.length); });
   const tcClearFilters = document.getElementById('tcClearFilters');
   if(tcClearFilters) tcClearFilters.addEventListener('click', () => { TC_FILTER = { brand:'', platform:'', status:'', q:'' }; render(); });
+  const tcViewTable = document.getElementById('tcViewTable');
+  if(tcViewTable) tcViewTable.addEventListener('click', () => { TC_VIEW_MODE = 'table'; render(); });
+  const tcViewCompare = document.getElementById('tcViewCompare');
+  if(tcViewCompare) tcViewCompare.addEventListener('click', () => { TC_VIEW_MODE = 'compare'; TC_FILTER.platform=''; TC_FILTER.status=''; render(); });
+  document.querySelectorAll('[data-link-cluster]').forEach(el => el.addEventListener('click', () => {
+    MERGE_SELECTED = new Set(el.dataset.linkCluster.split(','));
+    openModal('mergeReview');
+  }));
 
   // dashboard range + chart type
   document.querySelectorAll('[data-range]').forEach(el => el.addEventListener('click', () => { DASH_RANGE = el.dataset.range; render(); }));
