@@ -178,18 +178,39 @@ async function flagMissingVideos(brand, platform, seenIds, SUPABASE_URL, sbHeade
 // Instagram has renamed/consolidated its view-count metric a few times across API
 // versions ("views" is the current unified one; older versions used "plays" or
 // "video_views"). Try each in order and use whichever the account/API version accepts.
+//
+// That "views" figure is Instagram-native only. When a reel is also crossposted to a linked
+// Facebook Page (Instagram's own "share to Facebook" toggle at the moment of posting — not a
+// separate native upload to Facebook), the plays picked up over on Facebook land under a
+// distinct `facebook_views` metric and are NOT folded into `views` by this API. Instagram's own
+// app *does* show one combined number on the post's own Insights screen (it sums the two for
+// display) — confirmed directly against the API (2026-08-25): `views` + `facebook_views` is
+// exactly that combined figure. So this adds facebook_views on top whenever it's present, to
+// match what's shown there and to avoid under-counting a crossposted video against the brand's
+// view requirement. A reel that was never crossposted to Facebook throws when facebook_views is
+// requested (IGApiException, "not crossposted to facebook") — that's expected and just means
+// there's nothing to add, not a real failure.
 async function fetchViews(mediaId, token, debug) {
   const metricsToTry = ['views', 'plays', 'video_views'];
   const errors = [];
+  let native = null;
   for (const metric of metricsToTry) {
     const res = await fetch(
       `https://graph.instagram.com/${mediaId}/insights?metric=${metric}&access_token=${encodeURIComponent(token)}`
     );
     const data = await res.json();
     const value = data?.data?.[0]?.values?.[0]?.value;
-    if (typeof value === 'number') return value;
+    if (typeof value === 'number') { native = value; break; }
     if (data.error) errors.push(`${metric}: ${data.error.message}`);
   }
-  if (debug) debug.push(errors.join(' | '));
-  return null;
+  if (native === null) {
+    if (debug) debug.push(errors.join(' | '));
+    return null;
+  }
+  const fbRes = await fetch(
+    `https://graph.instagram.com/${mediaId}/insights?metric=facebook_views&access_token=${encodeURIComponent(token)}`
+  );
+  const fbData = await fbRes.json();
+  const fbValue = fbData?.data?.[0]?.values?.[0]?.value;
+  return native + (typeof fbValue === 'number' ? fbValue : 0);
 }

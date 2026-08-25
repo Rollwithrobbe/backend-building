@@ -715,6 +715,7 @@ let CONTENT_VIEW_MODE = 'pipeline'; // 'pipeline' (in progress) | 'published' �
 let PAYMENTS_FILTER = { brandId:'' };
 let DP = null; // { key, month: Date }
 let DASH_RANGE = 'month';
+let BRAND_TABLE_SORT = { key:'earned', dir:'desc' };
 // mirrors MODAL_ENTER's pattern (see openModal): true only for the one render() call that
 // should play the chart's materialize-in animation — first mount, a range switch, or the
 // moment tracked-content data first lands. Every other render() (checking a task, editing a
@@ -1704,6 +1705,138 @@ function renderBrandBreakdown(bounds){
     </div>`).join('')}</div>`;
 }
 
+// All-time, per-brand comparison — deliberately not scoped to DASH_RANGE like the "By brand"
+// bar list above it: that one answers "how did this period split up", this one answers "which
+// brands are actually worth my time" across the whole relationship, so it stays put while you
+// flip between Week/Month/etc. above. Same DATA.brands-first-then-Supabase-only-fallback
+// pattern as renderBrandBreakdown, for the same reason: a brand automated tracking already
+// knows about shouldn't be invisible here just because this browser hasn't cloud-synced yet.
+const BRAND_TABLE_FALLBACK_COLORS = ['#9a7ec2','#5aa89e','#c1834f','#5b8ab0','#6f8f6a'];
+function brandComparisonRows(){
+  if(!TRACKED_CONTENT_DATA) return [];
+  const rows = [];
+  const seenNames = new Set();
+  DATA.brands.forEach(b => {
+    if(!b.supabaseBrandId) return; // not wired to automated tracking — nothing to compare yet
+    const items = getDeliverables().filter(dv => !dv.excluded && dv.rows[0].brand_id === b.supabaseBrandId);
+    if(items.length === 0) return;
+    seenNames.add(b.name);
+    const bt = brandTotals(b.id);
+    const hitCount = items.filter(dv=>dv.status==='hit').length;
+    const avgViews = items.reduce((s,dv)=>s+(Number(dv.rows[0].view_count)||0),0) / items.length;
+    rows.push({
+      id: b.id, name: b.name, color: b.color,
+      count: items.length, hitRate: hitCount/items.length*100, avgViews,
+      avgPayout: hitCount ? bt.contentEarned/hitCount : 0, earned: bt.totalEarned,
+    });
+  });
+  let fallbackIdx = 0;
+  const byName = {};
+  getDeliverables().forEach(dv => {
+    if(dv.excluded || seenNames.has(dv.brandName)) return;
+    (byName[dv.brandName] = byName[dv.brandName] || []).push(dv);
+  });
+  Object.entries(byName).forEach(([name, items]) => {
+    const hitCount = items.filter(dv=>dv.status==='hit').length;
+    const earned = items.filter(dv=>dv.status==='hit').reduce((s,dv)=>s+dv.payAmount,0);
+    const avgViews = items.reduce((s,dv)=>s+(Number(dv.rows[0].view_count)||0),0) / items.length;
+    rows.push({
+      id: null, name, color: BRAND_TABLE_FALLBACK_COLORS[fallbackIdx++ % BRAND_TABLE_FALLBACK_COLORS.length],
+      count: items.length, hitRate: hitCount/items.length*100, avgViews,
+      avgPayout: hitCount ? earned/hitCount : 0, earned,
+    });
+  });
+  return rows;
+}
+function renderBrandComparisonTable(){
+  const rows = brandComparisonRows();
+  if(rows.length===0) return emptyState('Nothing to compare yet', 'Once a brand has automated deliverables, it shows up here.');
+  const { key, dir } = BRAND_TABLE_SORT;
+  const sorted = [...rows].sort((a,b) => {
+    const cmp = typeof a[key]==='string' ? a[key].localeCompare(b[key]) : a[key]-b[key];
+    return dir==='asc' ? cmp : -cmp;
+  });
+  const col = (k, label, align) => {
+    const active = key===k;
+    return `<th data-sort-brand="${k}" style="cursor:pointer; user-select:none; white-space:nowrap; ${align?`text-align:${align};`:''} ${active?'color:var(--text);':''}">${escapeHtml(label)}${active ? (dir==='asc'?' ↑':' ↓') : ''}</th>`;
+  };
+  return `<div class="table-wrap" style="overflow-x:auto;"><table>
+    <thead><tr>
+      ${col('name','Brand')}
+      ${col('count','Deliverables','right')}
+      ${col('hitRate','Hit rate','right')}
+      ${col('avgViews','Avg views','right')}
+      ${col('avgPayout','Avg payout','right')}
+      ${col('earned','Earned (all time)','right')}
+    </tr></thead>
+    <tbody>
+      ${sorted.map(r => `<tr ${r.id?`class="row-click" data-goto-brand="${r.id}"`:''}>
+        <td><span class="swatch" style="background:${r.color}"></span>${escapeHtml(r.name)}</td>
+        <td class="mono" style="text-align:right;">${r.count}</td>
+        <td style="text-align:right;">
+          <div style="display:inline-flex; align-items:center; gap:8px;">
+            <span class="mono" style="font-size:11.5px;">${r.hitRate.toFixed(0)}%</span>
+            <div class="brand-bar-track" style="width:52px;"><div class="brand-bar-fill" style="width:${r.hitRate.toFixed(0)}%; background:${r.hitRate>=50?'var(--fx-green)':'var(--text-faint)'};"></div></div>
+          </div>
+        </td>
+        <td class="mono" style="text-align:right;">${Math.round(r.avgViews).toLocaleString()}</td>
+        <td class="mono" style="text-align:right;">${money(r.avgPayout)}</td>
+        <td class="mono fx-green" style="text-align:right;">${money(r.earned)}</td>
+      </tr>`).join('')}
+    </tbody>
+  </table></div>`;
+}
+
+// Tracked, still-pending deliverables ranked by whichever platform's eligibility window runs
+// out soonest — turns the "Pending $X" stat tile from a number into an actual worklist. A
+// grouped (crossposted) deliverable is only really "safe" once every platform in it is either
+// past its window or excluded, so this looks at each platform's own eligible_until rather than
+// the deliverable's aggregate status, and surfaces the tightest one.
+function expiringSoonDeliverables(limit=8){
+  if(!TRACKED_CONTENT_DATA) return [];
+  return getDeliverables()
+    .filter(dv => !dv.excluded && dv.status==='tracking')
+    .map(dv => {
+      const trackingRows = dv.rows.filter(r => !r.excluded && r.status==='tracking' && r.eligible_until);
+      if(trackingRows.length===0) return null;
+      const soonest = trackingRows.reduce((a,b)=> new Date(a.eligible_until) < new Date(b.eligible_until) ? a : b);
+      const req = soonest.view_requirement_override != null ? Number(soonest.view_requirement_override) : Number(dv.brand?.view_requirement)||0;
+      return { ...dv, eligibleUntil: soonest.eligible_until, repRow: soonest, viewCount: Number(soonest.view_count)||0, req };
+    })
+    .filter(Boolean)
+    .sort((a,b) => new Date(a.eligibleUntil) - new Date(b.eligibleUntil))
+    .slice(0, limit);
+}
+function renderExpiringSoonTable(){
+  const items = expiringSoonDeliverables();
+  if(items.length===0) return `<div class="table-wrap"><div class="empty" style="padding:24px 10px;">Nothing at risk right now — every tracking video has plenty of runway.</div></div>`;
+  const now = new Date();
+  return `<div class="table-wrap" style="overflow-x:auto;"><table>
+    <thead><tr><th></th><th>Brand</th><th>Title</th><th style="text-align:right;">Progress</th><th style="text-align:right;">Time left</th><th></th></tr></thead>
+    <tbody>
+      ${items.map(dv => {
+        const daysLeft = Math.ceil((new Date(dv.eligibleUntil) - now) / 86400000);
+        const pct = dv.req>0 ? Math.min(100, dv.viewCount/dv.req*100) : 0;
+        const cls = daysLeft<=2 ? 'tag-danger' : daysLeft<=5 ? 'tag-warn' : 'tag-neutral';
+        const label = daysLeft<0 ? 'Overdue' : daysLeft===0 ? 'Today' : `${daysLeft}d left`;
+        return `<tr>
+          <td>${dv.thumbnail ? `<img src="${dv.thumbnail}" alt="" style="width:36px; height:36px; object-fit:cover; border-radius:5px; display:block;" />` : `<div style="width:36px; height:36px; border-radius:5px; background:var(--surface);"></div>`}</td>
+          <td style="white-space:nowrap;">${escapeHtml(dv.brandName)}</td>
+          <td style="max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(dv.repRow.title||'')}">${escapeHtml(dv.repRow.title || 'Untitled')}</td>
+          <td style="text-align:right;">
+            <div style="display:inline-flex; align-items:center; gap:8px;">
+              <span class="mono" style="font-size:11px; color:var(--text-dim); white-space:nowrap;">${dv.viewCount.toLocaleString()}/${dv.req.toLocaleString()}</span>
+              <div class="brand-bar-track" style="width:56px;"><div class="brand-bar-fill" style="width:${pct.toFixed(0)}%; background:${pct>=100?'var(--fx-green)':'var(--accent)'};"></div></div>
+            </div>
+          </td>
+          <td style="text-align:right;"><span class="tag ${cls}">${label}</span></td>
+          <td>${dv.repRow.url ? `<a href="${dv.repRow.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">Open</a>` : ''}</td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table></div>`;
+}
+
 function renderPriorityTasksWidget(topTasks){
   if(topTasks.length===0) return `<div class="card" style="color:var(--text-faint); font-size:12.5px;">All caught up — no pending tasks.</div>`;
   return `<div class="card">
@@ -2199,6 +2332,9 @@ function renderDashboard(){
       </div>
     </div>
 
+    <div class="section-title" style="margin-top:0;">Expiring soon</div>
+    ${renderExpiringSoonTable()}
+
     ${renderBriefQuotas()}
 
     <div class="chart-card">
@@ -2219,22 +2355,8 @@ function renderDashboard(){
       </div>
     </div>
 
-    <div class="section-title">Brand totals (all time)</div>
-    <div class="grid grid-cards" style="margin-bottom:26px;">
-      ${DATA.brands.length===0 ? emptyState('No brands yet','Add your first brand to start tracking deals.') :
-        DATA.brands.map(b => {
-          const bt = brandTotals(b.id);
-          return `<div class="card brand-card" data-goto-brand="${b.id}">
-            <div class="label"><span class="swatch" style="background:${b.color}"></span>${escapeHtml(b.name)}</div>
-            <div class="big mono">${money(bt.totalEarned)}</div>
-            <div class="row"><span>Outstanding</span><span class="mono ${bt.outstanding>0?'fx-red':''}">${money(bt.outstanding)}</span></div>
-            <div class="row"><span>Deliverables</span><span class="mono">${bt.count}</span></div>
-            ${bt.receivedCpm > 0 ? `<div class="row" style="margin-top:6px; padding-top:6px; border-top:1px solid var(--border-soft);" title="${money(bt.receivedBase)} base + ${money(bt.receivedCpm)} CPM = ${money(bt.received)} received">
-              <span style="font-size:11px;">CPM bonus received</span><span class="mono fx-green" style="font-size:11px;">${money(bt.receivedCpm)}</span>
-            </div>` : ''}
-          </div>`;
-        }).join('')}
-    </div>
+    <div class="section-title">Brand comparison (all time)</div>
+    ${renderBrandComparisonTable()}
 
     <div class="section-title">Recent content</div>
     ${recent.length===0 ? emptyState('No content logged yet','Add a video and it will show up here.') : renderContentTable(recent)}
@@ -3717,6 +3839,12 @@ function bindGlobalHandlers(){
 
   // dashboard range + chart type
   document.querySelectorAll('[data-range]').forEach(el => el.addEventListener('click', () => { DASH_RANGE = el.dataset.range; renderWithChartEnter(); }));
+  document.querySelectorAll('[data-sort-brand]').forEach(el => el.addEventListener('click', () => {
+    const k = el.dataset.sortBrand;
+    if(BRAND_TABLE_SORT.key === k) BRAND_TABLE_SORT.dir = BRAND_TABLE_SORT.dir==='asc' ? 'desc' : 'asc';
+    else BRAND_TABLE_SORT = { key:k, dir: k==='name' ? 'asc' : 'desc' };
+    render();
+  }));
   document.querySelectorAll('[data-chart-point]').forEach(el => {
     const idx = Number(el.dataset.chartPoint);
     el.addEventListener('mouseenter', (e) => { showChartTooltip(idx, e.clientX, e.clientY); moveChartHoverGuide(el); });
