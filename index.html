@@ -344,15 +344,20 @@
 
   @media (max-width: 820px){
     #root{ flex-direction:column; }
-    .sidebar{ width:100%; height:auto; flex-direction:row; align-items:center; overflow-x:auto; border-right:none; border-bottom:1px solid var(--border-soft); z-index:40; }
+    /* flex-wrap + sidebar-foot's flex-basis:100% below puts it on its own full-width line —
+       previously everything (brand mark, every nav tab, Ask AI, then sidebar-foot) shared one
+       single non-wrapping row scrolled via this element's own overflow-x, which pushed
+       sidebar-foot (Export/Import/Demo/Clear/Move to cloud) hundreds of px off-screen to the
+       right, past where anyone would think to keep scrolling — effectively unreachable. Each
+       row now scrolls independently instead, so sidebar-foot always starts flush left, visible
+       without hunting for it. */
+    .sidebar{ width:100%; height:auto; flex-direction:row; flex-wrap:wrap; align-items:center; overflow-x:visible; border-right:none; border-bottom:1px solid var(--border-soft); z-index:40; }
     .brand-mark{ flex-shrink:0; padding:0 4px; }
     .brand-mark .eyebrow{ display:none; } /* secondary label — redundant once page content is visible, and mobile width is tight */
     .brand-mark h1{ font-size:15px; white-space:nowrap; }
     .ai-toggle-btn{ width:auto; flex-shrink:0; }
-    .nav{ flex-direction:row; }
-    /* was display:none — Export/Import/Demo/Clear data were completely unreachable on mobile.
-       Now folds into the same horizontal scroll row as the nav instead of losing the functionality. */
-    .sidebar-foot{ display:flex; align-items:center; gap:10px; margin-top:0; padding:0 4px; flex-shrink:0; white-space:nowrap; }
+    .nav{ flex-direction:row; flex:1 1 auto; min-width:0; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+    .sidebar-foot{ display:flex; align-items:center; gap:10px; margin-top:0; padding:6px 4px; flex-shrink:0; white-space:nowrap; flex-basis:100%; width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; border-top:1px solid var(--border-soft); }
     .sidebar-foot > div:first-child{ display:none; } /* "V4 — manual tracking build" caption — pure chrome, cut first under space pressure */
     .storage-pill{ margin-top:0; flex-shrink:0; }
     .data-actions{ margin-top:0; flex-wrap:nowrap; gap:4px; flex-shrink:0; }
