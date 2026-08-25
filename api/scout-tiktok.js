@@ -69,10 +69,18 @@ async function scoutBrandAccount(brand, CLIENT_KEY, CLIENT_SECRET, SUPABASE_URL,
     token = refreshed.access_token;
   }
 
-  // Pull recent videos (paginated, cap at 3 pages / ~60 videos per run)
+  // Pull recent videos, paginating until either the brand's own eligibility window is fully
+  // covered or a safety cap is hit — not just a fixed page count. A fixed cap is fine at low
+  // posting volume, but a creator posting near/above roughly (window days × 1.6/day) can push an
+  // older still-tracking video off the fetched pages before its window naturally closes.
+  // flagMissingVideos() can't tell "aged out of the fetch" apart from "actually deleted" — it
+  // would falsely mark a real, still-live video 'missing' (excluding it from Pending) well before
+  // it had its fair shot at hitting. Confirmed this is already close to biting on a real account
+  // (2026-08-25): 47 videos in the last 30 days against a 3-page/60-video cap.
+  const cutoff = Date.now() - Math.max(Number(brand.eligibility_window_days) || 30, 30) * 86400000;
   const videos = [];
   let cursor = null;
-  for (let page = 0; page < 3; page++) {
+  for (let page = 0; page < 5; page++) {
     const body = { max_count: 20 };
     if (cursor) body.cursor = cursor;
     const listRes = await fetch(
@@ -85,11 +93,14 @@ async function scoutBrandAccount(brand, CLIENT_KEY, CLIENT_SECRET, SUPABASE_URL,
     );
     const listData = await listRes.json();
     if (listData.error && listData.error.code !== 'ok') {
-      return { error: `TikTok API error: ${listData.error.message || listData.error.code}` };
+      if (page === 0) return { error: `TikTok API error: ${listData.error.message || listData.error.code}` };
+      break; // already have earlier pages' data — don't discard it over a later-page error
     }
     const pageVideos = listData?.data?.videos || [];
     videos.push(...pageVideos);
-    if (!listData?.data?.has_more) break;
+    const oldestOnPage = pageVideos[pageVideos.length - 1]?.create_time;
+    if (!listData?.data?.has_more) break; // no more videos at all
+    if (oldestOnPage && oldestOnPage * 1000 < cutoff) break; // window fully covered
     cursor = listData.data.cursor;
   }
 

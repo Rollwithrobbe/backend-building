@@ -55,20 +55,37 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
     return { error: 'no instagram_access_token stored for this brand — reconnect Instagram' };
   }
 
-  // 1. Pull recent media, only keeping Reels (that's what carries a view-count/base-pay target)
+  // 1. Pull recent media, paginating until either the brand's own eligibility window is fully
+  // covered or a safety cap is hit — not just a single fixed 50-item page. A single page is fine
+  // at low posting volume, but a creator posting near/above roughly (window days × 1.6/day) can
+  // push an older still-tracking reel off a fixed page before its window naturally closes.
+  // flagMissingVideos() can't tell "aged out of the fetch" apart from "actually deleted" — it
+  // would falsely mark a real, still-live reel 'missing' (excluding it from Pending) well before
+  // it had its fair shot at hitting. Confirmed this is already close to biting on a real account
+  // (2026-08-25): 47 reels in the last 30 days against a single 50-item page.
   // "me" is used instead of the numeric account id — with an Instagram Login user token,
   // the token is already scoped to exactly one account, and "me" is the endpoint form
   // that actually resolves for it (the raw numeric id form returns a "does not exist" error).
-  const mediaRes = await fetch(
+  const cutoff = Date.now() - Math.max(Number(brand.eligibility_window_days) || 30, 30) * 86400000;
+  let mediaItems = [];
+  let nextUrl =
     `https://graph.instagram.com/me/media` +
     `?fields=id,caption,timestamp,permalink,media_type,media_product_type,thumbnail_url,media_url` +
-    `&limit=50&access_token=${encodeURIComponent(token)}`
-  );
-  const mediaData = await mediaRes.json();
-  if (mediaData.error) {
-    return { error: `Instagram API error: ${mediaData.error.message}` };
+    `&limit=50&access_token=${encodeURIComponent(token)}`;
+  for (let page = 0; page < 5 && nextUrl; page++) {
+    const mediaRes = await fetch(nextUrl);
+    const mediaData = await mediaRes.json();
+    if (mediaData.error) {
+      if (page === 0) return { error: `Instagram API error: ${mediaData.error.message}` };
+      break; // already have earlier pages' data — don't discard it over a later-page error
+    }
+    const items = mediaData.data || [];
+    mediaItems.push(...items);
+    const oldestOnPage = items[items.length - 1]?.timestamp;
+    nextUrl = mediaData.paging?.next || null;
+    if (oldestOnPage && new Date(oldestOnPage).getTime() < cutoff) break; // window fully covered
   }
-  const reels = (mediaData.data || []).filter(
+  const reels = mediaItems.filter(
     (m) => m.media_product_type === 'REELS' || m.media_type === 'VIDEO'
   );
   if (reels.length === 0) {

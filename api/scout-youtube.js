@@ -69,21 +69,43 @@ async function scoutBrandChannel(brand, YT_KEY, SUPABASE_URL, sbHeaders) {
     return { error: 'could not resolve channel uploads playlist', chData };
   }
 
-  // 2. Pull recent uploads (50 is YouTube's per-request max without pagination)
-  const plRes = await fetch(
-    `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${uploadsPlaylistId}&maxResults=50&key=${YT_KEY}`
-  );
-  const plData = await plRes.json();
-  const videoIds = (plData.items || []).map((i) => i.snippet?.resourceId?.videoId).filter(Boolean);
+  // 2. Pull recent uploads, paginating until either the brand's own eligibility window is fully
+  // covered or a safety cap is hit — not just a single fixed 50-item page. A single page is fine
+  // at low posting volume, but a creator posting near/above roughly (window days × 1.6/day) can
+  // push an older still-tracking video off a fixed page before its window naturally closes.
+  // flagMissingVideos() can't tell "aged out of the fetch" apart from "actually deleted" — it
+  // would falsely mark a real, still-live video 'missing' (excluding it from Pending) well
+  // before it had its fair shot at hitting. Confirmed this is already close to biting on a real
+  // account (2026-08-25): 47 uploads in the last 30 days against a single 50-item page.
+  const cutoff = Date.now() - Math.max(Number(brand.eligibility_window_days) || 30, 30) * 86400000;
+  let videoIds = [];
+  let pageToken = '';
+  for (let page = 0; page < 5; page++) {
+    const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${uploadsPlaylistId}&maxResults=50&key=${YT_KEY}${pageToken ? `&pageToken=${pageToken}` : ''}`;
+    const plRes = await fetch(url);
+    const plData = await plRes.json();
+    const items = plData.items || [];
+    videoIds.push(...items.map((i) => i.snippet?.resourceId?.videoId).filter(Boolean));
+    const oldestOnPage = items[items.length - 1]?.snippet?.publishedAt;
+    pageToken = plData.nextPageToken;
+    if (!pageToken) break; // no more uploads at all
+    if (oldestOnPage && new Date(oldestOnPage).getTime() < cutoff) break; // window fully covered
+  }
   if (videoIds.length === 0) {
     return { checked: 0, results: [] };
   }
 
-  // 3. Get current view counts for those videos in one batched call
-  const statsRes = await fetch(
-    `https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${videoIds.join(',')}&key=${YT_KEY}`
-  );
-  const statsData = await statsRes.json();
+  // 3. Get current view counts in batched calls (the videos endpoint's id param caps at 50 ids)
+  const statsItems = [];
+  for (let i = 0; i < videoIds.length; i += 50) {
+    const chunk = videoIds.slice(i, i + 50);
+    const statsRes = await fetch(
+      `https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${chunk.join(',')}&key=${YT_KEY}`
+    );
+    const chunkData = await statsRes.json();
+    statsItems.push(...(chunkData.items || []));
+  }
+  const statsData = { items: statsItems };
 
   const results = [];
   for (const v of statsData.items || []) {
