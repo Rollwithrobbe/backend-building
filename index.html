@@ -620,6 +620,7 @@ let AI_OPEN = false;
 let ACTIVE_BRAND_FILTER = null;
 let PUB_FILTER = { brandId:'', platform:'', q:'', datePreset:'all', customStart:'', customEnd:'', viewReq:'all' };
 let CONTENT_FILTER = { datePreset:'all', customStart:'', customEnd:'', status:'', dateField:'created' };
+let CONTENT_VIEW_MODE = 'pipeline'; // 'pipeline' (in progress) | 'published' — a toggle within Content now, not its own nav item
 let PAYMENTS_FILTER = { brandId:'' };
 let DP = null; // { key, month: Date }
 let DASH_RANGE = 'month';
@@ -1075,10 +1076,20 @@ function cpmBonusInRange(start, end, brandId){
     return true;
   }).reduce((s,p) => s + (Number(p.cpmBonus)||0), 0);
 }
+// Content/Published are pure production-status info now — Earned comes exclusively from the
+// automated tracker (see getDeliverables()). This is that brand's own slice of it, found by
+// matching the brand's linked Supabase id (brand.supabaseBrandId) against each tracked video's
+// brand_id — zero if the brand isn't linked to a backend record yet (see the brand modal's
+// "Connected accounts" section).
 function brandTotals(brandId){
-  const items = DATA.content.filter(c => c.brandId === brandId);
-  let contentEarned = 0, pending = 0;
-  items.forEach(c => { const e = contentEarnings(c); contentEarned += e.total; if(!e.earning) pending += e.pendingTotal; });
+  const brand = brandById(brandId);
+  let contentEarned = 0, pending = 0, count = 0;
+  if(brand && brand.supabaseBrandId && TRACKED_CONTENT_DATA){
+    const items = getDeliverables().filter(dv => !dv.excluded && dv.rows[0].brand_id === brand.supabaseBrandId);
+    contentEarned = items.filter(dv=>dv.status==='hit').reduce((s,dv)=>s+dv.payAmount,0);
+    pending = items.filter(dv=>dv.status==='tracking').reduce((s,dv)=>s+dv.payAmount,0);
+    count = items.length;
+  }
   const brandPayments = DATA.payments.filter(p => p.brandId === brandId);
   const received = brandPayments.reduce((s,p)=>s+(Number(p.amount)||0),0);
   const receivedCpm = brandPayments.reduce((s,p)=>s+(Number(p.cpmBonus)||0),0);
@@ -1086,7 +1097,7 @@ function brandTotals(brandId){
   // a CPM bonus is realized the moment it's paid — you don't know the amount until the brand tells
   // you, so unlike base pay it never sits "pending" against a video; it counts straight to Earned
   const totalEarned = contentEarned + receivedCpm;
-  return { count: items.length, contentEarned, totalEarned, pending, received, receivedBase, receivedCpm, outstanding: totalEarned - received };
+  return { count, contentEarned, totalEarned, pending, received, receivedBase, receivedCpm, outstanding: totalEarned - received };
 }
 // A tracked video's payout is whatever was snapshotted onto it when the scouting job first
 // discovered it (r.pay_amount = that brand's base_pay at the time) — not a live join to the
@@ -1145,11 +1156,16 @@ function trackedContentTotals(){
   return { earned, pending };
 }
 function allTotals(){
-  let totalEarned=0, received=0, pending=0;
-  DATA.brands.forEach(b => { const t = brandTotals(b.id); totalEarned += t.totalEarned; received += t.received; pending += t.pending; });
+  // Earned/Pending come from the automated tracker globally (trackedContentTotals — every
+  // tracked video regardless of whether its brand has a manual profile linked yet), NOT summed
+  // per-brand here — brandTotals(id).totalEarned is that one brand's own slice of this same
+  // total, so adding both would double-count every linked brand. Received is unaffected (it's
+  // Payments, which were never part of the automated total) and does need summing per brand.
+  let received = 0;
+  DATA.brands.forEach(b => { received += brandTotals(b.id).received; });
   const tc = trackedContentTotals();
-  totalEarned += tc.earned;
-  pending += tc.pending;
+  const totalEarned = tc.earned;
+  const pending = tc.pending;
   return { totalEarned, received, pending, outstanding: totalEarned - received, contentCount: DATA.content.length, brandCount: DATA.brands.length };
 }
 function brandById(id){ return DATA.brands.find(b=>b.id===id); }
@@ -1377,15 +1393,10 @@ function trackedContentEarnedBetween(start, end, brandName){
   }).reduce((s,d)=> s + d.payAmount, 0);
 }
 function sumEarnedBetween(start, end){
-  let sum = 0;
-  DATA.content.forEach(c => {
-    if(!isEarning(c)) return;
-    const ed = earnedDate(c); if(!ed) return;
-    const d = new Date(ed+'T00:00:00');
-    if(d>=start && d<=end) sum += contentEarnings(c).total;
-  });
-  sum += cpmBonusInRange(start, end); // CPM bonuses count as earned the moment they're paid
-  sum += trackedContentEarnedBetween(start, end); // automated pipeline earnings
+  // Earned is the automated tracker (plus CPM bonuses, which are logged on Payments — a money
+  // fact, not a Content one) — Content/Published no longer contribute anything here.
+  let sum = cpmBonusInRange(start, end);
+  sum += trackedContentEarnedBetween(start, end);
   return sum;
 }
 function sumReceivedBetween(start, end){
@@ -1399,17 +1410,8 @@ function buildSeries(range){
   return buildBuckets(range).map(b => {
     let total = 0;
     const byBrand = {};
-    DATA.content.forEach(c => {
-      if(!isEarning(c)) return;
-      const ed = earnedDate(c); if(!ed) return;
-      const d = new Date(ed+'T00:00:00');
-      if(d<b.start || d>b.end) return;
-      const amt = contentEarnings(c).total;
-      total += amt;
-      const brand = brandById(c.brandId);
-      const key = brand ? brand.name : 'Unassigned';
-      byBrand[key] = (byBrand[key]||0) + amt;
-    });
+    // Content/Published no longer contribute here — Earned is the automated tracker plus CPM
+    // bonuses (a Payments fact), same split as sumEarnedBetween().
     // CPM bonuses count as earned the moment they're paid, attributed to whichever brand paid them
     DATA.brands.forEach(brand => {
       const cpm = cpmBonusInRange(b.start, b.end, brand.id);
@@ -1526,16 +1528,10 @@ function renderChart(series){
   return renderLineChartSvg(series);
 }
 function renderBrandBreakdown(bounds){
-  // Manual brands first, same as always...
+  // Manual brands first, same as always — Content/Published no longer contribute a sum here,
+  // just CPM bonuses (a Payments fact), before the automated tracker folds in below.
   let rows = DATA.brands.map(b => {
-    let sum = 0;
-    DATA.content.filter(c=>c.brandId===b.id).forEach(c => {
-      if(!isEarning(c)) return;
-      const ed = earnedDate(c); if(!ed) return;
-      const d = new Date(ed+'T00:00:00');
-      if(d>=bounds.start && d<=bounds.end) sum += contentEarnings(c).total;
-    });
-    sum += cpmBonusInRange(bounds.start, bounds.end, b.id); // CPM bonuses count as earned the moment they're paid
+    const sum = cpmBonusInRange(bounds.start, bounds.end, b.id);
     return { brand:b, sum };
   });
   // ...then fold in automated Tracked Content earnings by brand name. Supabase brands (PureFi,
@@ -1609,11 +1605,13 @@ function render(){
 }
 
 function renderSidebar(){
+  // Published lives inside Content now (a view toggle, see renderContent) rather than its own
+  // nav item — kept, not deleted, in case a future free/paid tier needs the manual pipeline
+  // without automated tracking; it's just no longer a top-level destination.
   const nav = [
     {id:'dashboard', label:'Dashboard'},
     {id:'trackedContent', label:'Tracked Content'},
     {id:'content', label:'Content'},
-    {id:'published', label:'Published'},
     {id:'tasks', label:'Tasks'},
     {id:'brands', label:'Brands'},
     {id:'payments', label:'Payments'},
@@ -1654,7 +1652,7 @@ function renderView(){
   if(VIEW==='dashboard') return renderDashboard();
   if(VIEW==='trackedContent') return renderTrackedContent();
   if(VIEW==='content') return renderContent();
-  if(VIEW==='published') return renderPublished();
+  if(VIEW==='published'){ VIEW='content'; CONTENT_VIEW_MODE='published'; return renderContent(); } // old bookmark/state — redirect into Content's Published toggle
   if(VIEW==='tasks') return renderTasks();
   if(VIEW==='brands') return renderBrands();
   if(VIEW==='payments') return renderPayments();
@@ -1683,22 +1681,13 @@ let TC_VIEW_MODE = 'table'; // 'table' | 'compare' — see renderCompareView()
 // everything else stays truncated so a hashtag-heavy caption doesn't blow up the row height
 let TC_EXPANDED = new Set();
 
-// Publish hand-off: once ANY platform on a manual Content item goes 'published', that item's
-// job in the manual pipeline is done — the real video now gets discovered and tracked
-// automatically by the scouting job on its own, independent of anything in this dashboard.
-// So instead of moving it to the (still-manual) Published tab, it's removed outright. Called
-// from every place a platform's status can become 'published'. Returns true if it removed the
-// item, so callers know not to also try to re-render a since-deleted row.
-function handOffIfPublished(contentId){
-  const c = DATA.content.find(x => x.id === contentId);
-  if(!c) return false;
-  const nowPublished = (c.platforms||[]).some(p => p.active && p.status === 'published');
-  if(!nowPublished) return false;
-  DATA.content = DATA.content.filter(x => x.id !== contentId);
-  saveData();
-  showToast('Published — now tracked automatically, off the manual list');
-  return true;
-}
+// Retired: this used to delete a Content item the moment any platform went 'published', on the
+// theory that the real video would get picked up by automated tracking from then on. Now that
+// Content/Published are pure production-status info with zero influence on money (see
+// getDeliverables()/brandTotals()), there's no more double-counting risk to guard against —
+// a published item just stays visible in Published as a permanent record instead of vanishing.
+// Left as a no-op (rather than removing every call site) so nothing else needs to change.
+function handOffIfPublished(contentId){ return false; }
 
 async function loadTrackedContent(){
   if(TRACKED_CONTENT_LOADING) return;
@@ -2037,7 +2026,7 @@ function renderDashboard(){
     </div>
 
     <div class="section-title">Recent content</div>
-    ${recent.length===0 ? emptyState('No content logged yet','Add a video and it will show up here.') : renderContentTable(recent, 'mixed')}
+    ${recent.length===0 ? emptyState('No content logged yet','Add a video and it will show up here.') : renderContentTable(recent)}
   `;
 }
 
@@ -2057,10 +2046,24 @@ function isContentPublished(c){
   return (c.platforms||[]).some(p => p.active && p.status==='published');
 }
 function renderContent(){
+  const head = `
+    <div class="page-head">
+      <div><h2>Content</h2><div class="sub">Pure production tracking — what you're making and its status. Doesn't affect Earned/Outstanding; that's the Tracked Content tab now.</div></div>
+      <div class="head-actions">
+        <div class="seg" style="display:inline-flex; border:1px solid var(--border-soft); border-radius:8px; overflow:hidden;">
+          <button class="btn btn-sm ${CONTENT_VIEW_MODE==='pipeline'?'btn-primary':'btn-ghost'}" id="cvPipeline" type="button" style="border-radius:0;">In progress</button>
+          <button class="btn btn-sm ${CONTENT_VIEW_MODE==='published'?'btn-primary':'btn-ghost'}" id="cvPublished" type="button" style="border-radius:0;">Published</button>
+        </div>
+        <button class="btn btn-primary" data-open-modal="content">+ Add content</button>
+      </div>
+    </div>`;
+
+  if(CONTENT_VIEW_MODE==='published') return head + renderPublishedSection();
+
   const dateField = CONTENT_FILTER.dateField === 'scheduled' ? 'scheduled' : 'created';
   const range = presetDateRange(CONTENT_FILTER.datePreset, CONTENT_FILTER.customStart, CONTENT_FILTER.customEnd);
   const filtered = DATA.content.filter(c => {
-    if(isContentPublished(c)) return false; // published content lives only in the Published tab now
+    if(isContentPublished(c)) return false; // published content lives under the Published toggle now
     if(ACTIVE_BRAND_FILTER && c.brandId !== ACTIVE_BRAND_FILTER) return false;
     if(CONTENT_FILTER.status){
       const active = (c.platforms||[]).filter(p=>p.active);
@@ -2088,13 +2091,7 @@ function renderContent(){
     return (b.createdAt||'').localeCompare(a.createdAt||'');
   });
   const pipelineStatuses = STATUSES.filter(s => s!=='published');
-  return `
-    <div class="page-head">
-      <div><h2>Content</h2><div class="sub">Everything not yet published — once a video goes Published it moves to the Published tab automatically. Click a row to edit.</div></div>
-      <div class="head-actions">
-        <button class="btn btn-primary" data-open-modal="content">+ Add content</button>
-      </div>
-    </div>
+  return head + `
     <div class="filter-bar">
       <select id="brandFilter"><option value="">All brands</option>${DATA.brands.map(b=>`<option value="${b.id}" ${ACTIVE_BRAND_FILTER===b.id?'selected':''}>${escapeHtml(b.name)}</option>`).join('')}</select>
       <select id="contentStatusFilter">
@@ -2119,7 +2116,7 @@ function renderContent(){
         <button type="button" class="date-trigger ${CONTENT_FILTER.customEnd?'':'empty'}" data-datepicker="contentfilter:end">${CONTENT_FILTER.customEnd?fmtDate(CONTENT_FILTER.customEnd):'To'}</button>
       ` : ''}
     </div>
-    ${sorted.length===0 ? emptyState('Nothing in the pipeline', DATA.brands.length? 'Add a video to start tracking it, or check the Published tab if you expected something here.' : 'Add a brand first, then log content against it.') : renderContentTable(sorted, 'pipeline')}
+    ${sorted.length===0 ? emptyState('Nothing in the pipeline', DATA.brands.length? 'Add a video to start tracking it, or check the Published toggle if you expected something here.' : 'Add a brand first, then log content against it.') : renderContentTable(sorted)}
   `;
 }
 
@@ -2135,19 +2132,15 @@ function renderStatusSelect(c){
   </select>`;
 }
 
-function renderContentTable(items, mode){
-  const pipeline = mode==='pipeline';
+// Pure production-status table — no $ columns, this is informational only (see renderContent()).
+function renderContentTable(items){
   return `<div class="table-wrap"><table>
     <thead><tr>
-      <th>Title</th><th>Brand</th><th>Platforms</th><th>Status</th>
-      ${pipeline ? '<th>Scheduled</th>' : '<th>Posted</th>'}
-      <th>Earnings</th><th>View req.</th>
-      ${pipeline ? '' : '<th>Paid</th>'}
+      <th>Title</th><th>Brand</th><th>Platforms</th><th>Status</th><th>Scheduled</th><th>View req.</th>
     </tr></thead>
     <tbody>
       ${items.map(c => {
         const brand = brandById(c.brandId);
-        const e = contentEarnings(c);
         const active = (c.platforms||[]).filter(p=>p.active);
         return `<tr class="row-click" data-open-content="${c.id}">
           <td>${escapeHtml(c.title)||'<span style=\"color:var(--text-faint)\">Untitled</span>'}</td>
@@ -2157,12 +2150,8 @@ function renderContentTable(items, mode){
             return `<span class="tag ${meta.tagClass}" title="${meta.label}">${meta.short}</span>`;
           }).join(' ') || '<span style="color:var(--text-faint)">—</span>'}</td>
           <td>${renderStatusSelect(c)}</td>
-          ${pipeline
-            ? `<td class="mono">${c.scheduledDate ? fmtDate(c.scheduledDate) : '<span style="color:var(--text-faint)">—</span>'}</td>`
-            : `<td class="mono">${fmtDate(active.map(p=>p.postDate).filter(Boolean).sort()[0])}</td>`}
-          <td class="mono">${e.earning ? money(e.total) : `<span style="color:var(--text-faint)">${money(e.pendingTotal)} pending</span>`}</td>
+          <td class="mono">${c.scheduledDate ? fmtDate(c.scheduledDate) : '<span style="color:var(--text-faint)">—</span>'}</td>
           <td>${renderViewReqCell(c, true)}</td>
-          ${pipeline ? '' : `<td>${!e.earning ? '<span style="color:var(--text-faint)">—</span>' : (isContentPaid(c) ? '<span class="tag tag-good">Paid</span>' : '<span class="tag tag-neutral">Outstanding</span>')}</td>`}
         </tr>`;
       }).join('')}
     </tbody>
@@ -2218,12 +2207,12 @@ function publishedRows(){
   });
 }
 
-function renderPublished(){
+// Rendered inside Content when the "Published" toggle is active (see renderContent()) — pure
+// record of what's live and where, no $ columns. Stays visible permanently now instead of being
+// handed off/deleted (see handOffIfPublished — retired for the same reason).
+function renderPublishedSection(){
   const rows = publishedRows();
   return `
-    <div class="page-head">
-      <div><h2>Published</h2><div class="sub">One row per deliverable — see and edit which platforms it's live on.</div></div>
-    </div>
     <div class="filter-bar">
       <select id="pubBrand"><option value="">All brands</option>${DATA.brands.map(b=>`<option value="${b.id}" ${PUB_FILTER.brandId===b.id?'selected':''}>${escapeHtml(b.name)}</option>`).join('')}</select>
       <select id="pubPlatform"><option value="">All platforms</option>${PLATFORMS.map(p=>`<option value="${p.id}" ${PUB_FILTER.platform===p.id?'selected':''}>${p.label}</option>`).join('')}</select>
@@ -2251,11 +2240,10 @@ function renderPublished(){
     <div class="hint" style="margin-top:-6px;">Click a platform badge to toggle it — filled means live and published, dashed means not posted there. Toggling one on marks it Published today; toggling off just removes that platform.</div>
     ${rows.length===0 ? emptyState('Nothing published yet', 'Set a platform status to Published in Content and it will show up here.') : `
     <div class="table-wrap" style="overflow-x:auto;"><table>
-      <thead><tr><th style="min-width:170px;">Title</th><th>Brand</th><th>Platforms</th><th>Posted</th><th>Views</th><th>Earnings</th><th>View req.</th><th>Paid</th><th></th></tr></thead>
+      <thead><tr><th style="min-width:170px;">Title</th><th>Brand</th><th>Platforms</th><th>Posted</th><th>Views</th><th>View req.</th><th></th></tr></thead>
       <tbody>
         ${rows.map(c => {
           const brand = brandById(c.brandId);
-          const e = contentEarnings(c);
           const publishedPlatforms = c.platforms.filter(p=>p.active && p.status==='published');
           const totalViews = publishedPlatforms.reduce((s,p)=>s+(Number(p.views)||0), 0);
           const postedDates = publishedPlatforms.map(p=>p.postDate).filter(Boolean).sort();
@@ -2272,9 +2260,7 @@ function renderPublished(){
             </div></td>
             <td class="mono">${postedDates.length ? fmtDate(postedDates[0]) : '—'}</td>
             <td class="mono">${totalViews ? totalViews.toLocaleString() : '—'}</td>
-            <td class="mono">${e.earning ? money(e.total) : `<span style="color:var(--text-faint)">${money(e.pendingTotal)}</span>`}</td>
             <td>${renderViewReqCell(c, false)}</td>
-            <td>${!e.earning ? '<span style="color:var(--text-faint)">—</span>' : (isContentPaid(c) ? '<span class="tag tag-good">Paid</span>' : '<span class="tag tag-neutral">Outstanding</span>')}</td>
             <td><button class="btn btn-ghost btn-sm" data-open-content="${c.id}" type="button">Edit</button></td>
           </tr>`;
         }).join('')}
@@ -2597,7 +2583,6 @@ async function sendAI(question){
     content: DATA.content.map(c => ({
       id:c.id, title:c.title, brand: brandById(c.brandId)?.name || 'Unknown',
       platforms:(c.platforms||[]).filter(p=>p.active).map(p=>({platform:p.id, status:p.status, postDate:p.postDate, views:p.views})),
-      basePay:c.basePay, cpmBonus:c.cpmBonus,
       viewRequirement:c.viewRequirement, viewRequirementMet:c.viewRequirementMet, viewRequirementWindowDays:c.viewRequirementWindowDays,
       viewRequirementExpired: isViewRequirementExpired(c),
       scheduledDate: c.scheduledDate,
@@ -2633,7 +2618,7 @@ async function sendAI(question){
       body: JSON.stringify({
         model: modelToUse,
         max_tokens: 2200,
-        system: "You are a concise assistant embedded in a UGC creator's ops dashboard. Answer using ONLY the JSON data provided about their brands, content, payments, and tasks. Earnings only count once a platform is published and (if set) the view requirement is confirmed hit \u2014 'pending' items haven't cleared that yet. Payments are logged in bulk against a brand (not per video) \u2014 a brand's Outstanding is its total earned minus everything logged for it in payments; paid/outstanding status per video is computed automatically (oldest earned content gets settled first), it is never set directly. Be direct, use short paragraphs or lists, use $ for money. Each brand may include a 'brief' object with defaults it already has on file (basePay, cpmBonus, viewRequirement, platforms, cadence). When adding content for a brand that has a brief, use those defaults automatically instead of asking the user for pay, platform, or view requirement \u2014 only ask if the brand has no brief at all, or if the user's own message says something that conflicts with the brief (e.g. a different rate for this one video).\n\nYou can take actions on the user's behalf, and you can batch many actions into a single reply \u2014 this matters because the user may ask for hundreds of videos at once, and they should never have to confirm one at a time for a bulk request like that. End your reply with exactly one fenced block containing a JSON ARRAY of action objects, even if it's only one:\n```action\n[{...}, {...}]\n```\nOnly emit the block when the request is unambiguous \u2014 if you're missing a required detail (which brand, what amount, what title, how many), ask a plain question instead and wait for their answer. Never invent an id; always copy an 'id' field exactly from the data provided. For any delete action, only act after the user has explicitly confirmed in their own words that they want it deleted \u2014 never delete on the first ask.\n\nWhen the user asks you to log a payment, always ask whether a CPM bonus was included in that amount before logging it, unless they already said so unprompted (e.g. \"got $600, $100 of that was a CPM bonus\"). amount is always the total actually received; cpmBonus (optional, default 0) is just the portion of that total that was a bonus, for their own record-keeping \u2014 it does not add on top of amount.\n\nCRITICAL \u2014 never write more than about 15 individual add_content actions by hand in one reply. If a request needs more videos than that, it always fits one of the two batch actions below instead \u2014 use one of them, never enumerate videos one by one for a bulk request. Writing dozens of individual JSON objects risks the response being cut off mid-way, which silently fails the whole thing.\n\n- add_content_batch: many videos that all share the exact same post date (or are all still unposted):\n{\"type\":\"add_content_batch\",\"brandId\":\"<id>\",\"count\":50,\"titlePrefix\":\"PureFi Video\",\"basePay\":10,\"cpmBonus\":0,\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null}\nThis creates videos titled \"PureFi Video 1\" through \"PureFi Video 50\" (or however many), all otherwise identical.\n\nviewRequirementWindowDays (optional, null/7/30) means: if the view requirement isn't hit within that many days of the post date, it's written off and stops counting as pending money instead of sitting there forever. Use a brand's brief.viewRequirementWindowDays as the default when adding content for that brand, same as its pay rate and view requirement.\n\n- add_content_daily_batch: for any cadence-based bulk request \u2014 'N videos a day for M days', 'backfill 37 videos, 2 a day since a date', 'X per week' converted to a daily count, etc. It spreads a fixed number per day across a date range automatically, incrementing the post date each day:\n{\"type\":\"add_content_daily_batch\",\"brandId\":\"<id>\",\"startDate\":\"YYYY-MM-DD\",\"perDay\":2,\"days\":18,\"basePay\":20,\"cpmBonus\":0,\"platforms\":[\"tiktok\",\"instagram\"],\"status\":\"published\",\"viewRequirement\":300,\"viewRequirementMet\":true,\"viewRequirementWindowDays\":30,\"titlePrefix\":\"Amboras Ongoing\"}\nThis creates perDay*days videos total, dated startDate, startDate+1, startDate+2, ... with perDay videos sharing each date. Only sets a post date on items when status is 'published'. Use this for both backfilling known past history and for scheduling a fixed number of upcoming videos at a cadence.\n\nFor a truly open-ended, indefinite cadence ('ongoing forever until I say stop', no end date at all), a fixed batch isn't the right fit \u2014 tell the user you can add a bounded batch now (ask for a count or an end date), and mention they can also set up a recurring brief directly on the brand's edit screen for indefinite daily quotas, since that's built for exactly that case and isn't something you can configure yourself.\n\nIf a request needs a brand that doesn't exist yet AND a batch of content for it in the same reply, chain them: give the add_brand action a \"ref\" (any short label you pick), then use \"brandRef\" instead of \"brandId\" in the actions that follow it in the same array:\n[{\"type\":\"add_brand\",\"ref\":\"b1\",\"name\":\"New Brand\"},{\"type\":\"add_content_batch\",\"brandRef\":\"b1\",\"count\":20,\"titlePrefix\":\"New Brand Video\",\"basePay\":15,\"platforms\":[\"tiktok\"],\"status\":\"idea\"}]\n\nOther action types and their exact shape:\n- Log a payment received for a brand: {\"type\":\"log_payment\",\"brandId\":\"<id>\",\"amount\":120,\"cpmBonus\":0,\"note\":\"optional\"}\n- Add a new brand: {\"type\":\"add_brand\",\"name\":\"Brand name\",\"status\":\"active\",\"notes\":\"optional\",\"ref\":\"optional label\"}\n- Add a single content item: {\"type\":\"add_content\",\"brandId\":\"<id>\",\"title\":\"Video title\",\"basePay\":20,\"cpmBonus\":0,\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"postDate\":\"YYYY-MM-DD or omit\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null} (platforms are which of tiktok/instagram/youtube/facebook are active for this deliverable)\n- Change a content item's status: {\"type\":\"set_status\",\"id\":\"<content id>\",\"status\":\"published\"}\n- Mark a content item's view requirement as hit or not: {\"type\":\"set_requirement_met\",\"id\":\"<content id>\",\"met\":true}\n- Add a task: {\"type\":\"add_task\",\"title\":\"Task title\",\"brandId\":\"<id or null>\",\"priority\":\"high\",\"daily\":false,\"requiresTimer\":false,\"timerMinutes\":10} (timerMinutes only matters when requiresTimer is true \u2014 default 10, but a fresh account warm-up often needs 30\u201345)\n- Toggle a task done/undone (for daily tasks this only affects today): {\"type\":\"toggle_task\",\"id\":\"<task id>\"}\n- Delete a content item, brand, or task (only after explicit confirmation): {\"type\":\"delete_content\",\"id\":\"<id>\"} or {\"type\":\"delete_brand\",\"id\":\"<id>\"} or {\"type\":\"delete_task\",\"id\":\"<id>\"}\n\nstatus must be one of: idea, scripting, filming, editing, ready, submitted, revision, approved, scheduled, published. \"scheduled\" means the user has a plan for when it will go out but hasn\u2019t posted it yet \u2014 use it, and set \"scheduledDate\" (YYYY-MM-DD) on the content item, whenever the user is batching/planning ahead rather than posting immediately (e.g. \"I filmed the next 10 for Amboras, starting the 21st\"). scheduledDate is the plan, separate from the real post date which only gets set once something is actually Published \u2014 never set both to the same thing unless it really did go live that day.\n\nIf the data can't answer a question, say so plainly.",
+        system: "You are a concise assistant embedded in a UGC creator's ops dashboard. Answer using ONLY the JSON data provided about their brands, content, payments, and tasks. Earnings come entirely from the separate automated tracker (Tracked Content, fed by each brand's connected platform accounts) \u2014 Content and Published are pure production-status information now (what's being made, what's live where) and never affect Earned, Outstanding, or Pending. Payments are logged in bulk against a brand (not per video) \u2014 a brand's Outstanding is its automated-tracked total earned minus everything logged for it in payments. Be direct, use short paragraphs or lists, use $ for money. Each brand may include a 'brief' object with defaults it already has on file (basePay, cpmBonus, viewRequirement, platforms, cadence) \u2014 this sets that brand's automated-tracking rate (and its own recurring-quota cadence), not anything on individual content items, which no longer carry pay fields at all. When adding content for a brand that has a brief, use its platforms as the default instead of asking \u2014 content items take a title, platforms, and status only (plus an optional view requirement, kept purely for the user's own reference, not money).\n\nYou can take actions on the user's behalf, and you can batch many actions into a single reply \u2014 this matters because the user may ask for hundreds of videos at once, and they should never have to confirm one at a time for a bulk request like that. End your reply with exactly one fenced block containing a JSON ARRAY of action objects, even if it's only one:\n```action\n[{...}, {...}]\n```\nOnly emit the block when the request is unambiguous \u2014 if you're missing a required detail (which brand, what amount, what title, how many), ask a plain question instead and wait for their answer. Never invent an id; always copy an 'id' field exactly from the data provided. For any delete action, only act after the user has explicitly confirmed in their own words that they want it deleted \u2014 never delete on the first ask.\n\nWhen the user asks you to log a payment, always ask whether a CPM bonus was included in that amount before logging it, unless they already said so unprompted (e.g. \"got $600, $100 of that was a CPM bonus\"). amount is always the total actually received; cpmBonus (optional, default 0) is just the portion of that total that was a bonus, for their own record-keeping \u2014 it does not add on top of amount.\n\nCRITICAL \u2014 never write more than about 15 individual add_content actions by hand in one reply. If a request needs more videos than that, it always fits one of the two batch actions below instead \u2014 use one of them, never enumerate videos one by one for a bulk request. Writing dozens of individual JSON objects risks the response being cut off mid-way, which silently fails the whole thing.\n\n- add_content_batch: many videos that all share the exact same post date (or are all still unposted):\n{\"type\":\"add_content_batch\",\"brandId\":\"<id>\",\"count\":50,\"titlePrefix\":\"PureFi Video\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null}\nThis creates videos titled \"PureFi Video 1\" through \"PureFi Video 50\" (or however many), all otherwise identical.\n\nviewRequirement/viewRequirementWindowDays are optional and purely informational now (not money) \u2014 a personal reference for whether a video hit whatever number the user cares about, on whatever window. Use a brand's brief.viewRequirement/viewRequirementWindowDays as the default when adding content for that brand if it has one.\n\n- add_content_daily_batch: for any cadence-based bulk request \u2014 'N videos a day for M days', 'backfill 37 videos, 2 a day since a date', 'X per week' converted to a daily count, etc. It spreads a fixed number per day across a date range automatically, incrementing the post date each day:\n{\"type\":\"add_content_daily_batch\",\"brandId\":\"<id>\",\"startDate\":\"YYYY-MM-DD\",\"perDay\":2,\"days\":18,\"platforms\":[\"tiktok\",\"instagram\"],\"status\":\"published\",\"viewRequirement\":300,\"viewRequirementMet\":true,\"viewRequirementWindowDays\":30,\"titlePrefix\":\"Amboras Ongoing\"}\nThis creates perDay*days videos total, dated startDate, startDate+1, startDate+2, ... with perDay videos sharing each date. Only sets a post date on items when status is 'published'. Use this for both backfilling known past history and for scheduling a fixed number of upcoming videos at a cadence.\n\nFor a truly open-ended, indefinite cadence ('ongoing forever until I say stop', no end date at all), a fixed batch isn't the right fit \u2014 tell the user you can add a bounded batch now (ask for a count or an end date), and mention they can also set up a recurring brief directly on the brand's edit screen for indefinite daily quotas, since that's built for exactly that case and isn't something you can configure yourself.\n\nIf a request needs a brand that doesn't exist yet AND a batch of content for it in the same reply, chain them: give the add_brand action a \"ref\" (any short label you pick), then use \"brandRef\" instead of \"brandId\" in the actions that follow it in the same array:\n[{\"type\":\"add_brand\",\"ref\":\"b1\",\"name\":\"New Brand\"},{\"type\":\"add_content_batch\",\"brandRef\":\"b1\",\"count\":20,\"titlePrefix\":\"New Brand Video\",\"platforms\":[\"tiktok\"],\"status\":\"idea\"}]\n\nOther action types and their exact shape:\n- Log a payment received for a brand: {\"type\":\"log_payment\",\"brandId\":\"<id>\",\"amount\":120,\"cpmBonus\":0,\"note\":\"optional\"}\n- Add a new brand: {\"type\":\"add_brand\",\"name\":\"Brand name\",\"status\":\"active\",\"notes\":\"optional\",\"ref\":\"optional label\"}\n- Add a single content item: {\"type\":\"add_content\",\"brandId\":\"<id>\",\"title\":\"Video title\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"postDate\":\"YYYY-MM-DD or omit\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null} (platforms are which of tiktok/instagram/youtube/facebook are active for this deliverable; no pay fields — content no longer carries money, only the brand's own brief does)\n- Change a content item's status: {\"type\":\"set_status\",\"id\":\"<content id>\",\"status\":\"published\"}\n- Mark a content item's view requirement as hit or not: {\"type\":\"set_requirement_met\",\"id\":\"<content id>\",\"met\":true}\n- Add a task: {\"type\":\"add_task\",\"title\":\"Task title\",\"brandId\":\"<id or null>\",\"priority\":\"high\",\"daily\":false,\"requiresTimer\":false,\"timerMinutes\":10} (timerMinutes only matters when requiresTimer is true \u2014 default 10, but a fresh account warm-up often needs 30\u201345)\n- Toggle a task done/undone (for daily tasks this only affects today): {\"type\":\"toggle_task\",\"id\":\"<task id>\"}\n- Delete a content item, brand, or task (only after explicit confirmation): {\"type\":\"delete_content\",\"id\":\"<id>\"} or {\"type\":\"delete_brand\",\"id\":\"<id>\"} or {\"type\":\"delete_task\",\"id\":\"<id>\"}\n\nstatus must be one of: idea, scripting, filming, editing, ready, submitted, revision, approved, scheduled, published. \"scheduled\" means the user has a plan for when it will go out but hasn\u2019t posted it yet \u2014 use it, and set \"scheduledDate\" (YYYY-MM-DD) on the content item, whenever the user is batching/planning ahead rather than posting immediately (e.g. \"I filmed the next 10 for Amboras, starting the 21st\"). scheduledDate is the plan, separate from the real post date which only gets set once something is actually Published \u2014 never set both to the same thing unless it really did go live that day.\n\nIf the data can't answer a question, say so plainly.",
         messages: messages
       })
     });
@@ -3310,11 +3295,7 @@ function renderContentModal(){
       </div>`;
     }).join('')}
 
-    <div class="field-row" style="margin-top:14px;">
-      <div class="field"><label>Base pay ($)</label><input type="number" id="f-basepay" value="${d.basePay}" step="0.01" /></div>
-      <div class="field"><label>CPM bonus ($, manual)</label><input type="number" id="f-cpmbonus" value="${d.cpmBonus}" step="0.01" /></div>
-    </div>
-    <div class="field">
+    <div class="field" style="margin-top:14px;">
       <label>Scheduled date (optional — your plan; separate from the real post date above, in case posting slips)</label>
       <button type="button" class="date-trigger ${d.scheduledDate?'':'empty'}" data-datepicker="scheduled:draft" style="width:100%; text-align:left;">${d.scheduledDate?fmtDate(d.scheduledDate):'Set scheduled date'}</button>
     </div>
@@ -3538,6 +3519,10 @@ function bindGlobalHandlers(){
   if(pubDatePreset) pubDatePreset.addEventListener('change', () => { PUB_FILTER.datePreset = pubDatePreset.value; render(); });
   const pubSearch = document.getElementById('pubSearch');
   if(pubSearch) pubSearch.addEventListener('input', () => { PUB_FILTER.q = pubSearch.value; render(); pubSearch.focus(); pubSearch.setSelectionRange(pubSearch.value.length, pubSearch.value.length); });
+  const cvPipeline = document.getElementById('cvPipeline');
+  if(cvPipeline) cvPipeline.addEventListener('click', () => { CONTENT_VIEW_MODE = 'pipeline'; render(); });
+  const cvPublished = document.getElementById('cvPublished');
+  if(cvPublished) cvPublished.addEventListener('click', () => { CONTENT_VIEW_MODE = 'published'; render(); });
 
   document.querySelectorAll('[data-edit-title]').forEach(el => el.addEventListener('change', () => {
     const c = DATA.content.find(x=>x.id===el.dataset.editTitle); if(c){ c.title = el.value; saveData(); render(); }
@@ -3814,8 +3799,6 @@ function bindGlobalHandlers(){
     const d = MODAL_STATE.draft;
     d.title = document.getElementById('f-title').value.trim();
     d.brandId = document.getElementById('f-brand').value;
-    d.basePay = Number(document.getElementById('f-basepay').value)||0;
-    d.cpmBonus = Number(document.getElementById('f-cpmbonus').value)||0;
     d.viewRequirement = Number(document.getElementById('f-viewreq').value) || null;
     d.viewRequirementWindowDays = Number(document.getElementById('f-viewreqwindow').value) || null;
     if(!d.viewRequirement) d.viewRequirementMet = false;
