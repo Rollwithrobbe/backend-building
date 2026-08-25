@@ -163,6 +163,13 @@ async function processOneMedia(media, brand, token, SUPABASE_URL, sbHeaders) {
   if (row.excluded) {
     return { id: media.id, action: 'skipped', status: 'excluded' };
   }
+  // EXPERIMENTAL (added 2026-08-25, 2-week trial) — daily view-count history, purely for the
+  // trend sparkline in the brand breakdown modal. Fire-and-forget: never blocks or fails the
+  // actual tracking/payout logic below if this errors. Self-contained — to remove, delete this
+  // call, logViewSnapshot() below, the matching block in scout-tiktok.js/scout-youtube.js, drop
+  // the view_snapshots table, and remove loadViewSnapshots()/VIEW_SNAPSHOTS_DATA/
+  // brandPlatformTrend()/the sparkline markup in index.html. Nothing else depends on any of it.
+  logViewSnapshot(row.id, brand.id, 'instagram', viewCount, SUPABASE_URL, sbHeaders);
   if (row.status === 'tracking') {
     let status = 'tracking';
     let earned = false;
@@ -211,6 +218,19 @@ async function mapConcurrent(items, limit, fn) {
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return results;
+}
+
+// EXPERIMENTAL (added 2026-08-25, 2-week trial) — one row per video per day it's checked, for
+// the brand breakdown modal's trend sparkline. See the removal note where this is called for
+// what deleting this feature entirely involves. Deliberately not awaited by its caller and
+// swallows its own errors — this is a nice-to-have for a chart, never something that should be
+// able to fail (or even slow down) the actual tracking/payout logic it sits next to.
+function logViewSnapshot(trackedVideoId, brandId, platform, viewCount, SUPABASE_URL, sbHeaders) {
+  fetch(`${SUPABASE_URL}/rest/v1/view_snapshots`, {
+    method: 'POST',
+    headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify({ tracked_video_id: trackedVideoId, brand_id: brandId, platform, view_count: viewCount }),
+  }).catch(() => {});
 }
 
 async function flagMissingVideos(brand, platform, seenIds, SUPABASE_URL, sbHeaders) {

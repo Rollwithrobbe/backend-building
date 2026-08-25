@@ -1821,6 +1821,39 @@ function brandViewsBreakdownData(brandId, brandName, topN=5){
   const topVideos = [...rows].sort((a,b)=>(Number(b.view_count)||0)-(Number(a.view_count)||0)).slice(0, topN);
   return { platformTotals, topVideos, totalViews: rows.reduce((s,r)=>s+(Number(r.view_count)||0),0) };
 }
+
+// EXPERIMENTAL (added 2026-08-25, 2-week trial) — see VIEW_SNAPSHOTS_DATA's declaration for the
+// full removal note. One scouting run/day means one snapshot per video per day, so summing
+// same-day rows is a safe daily total with no extra dedup needed. Returns oldest-first.
+function brandPlatformTrend(brandId, brandName, platform){
+  if(!VIEW_SNAPSHOTS_DATA) return [];
+  // fallback brands (not yet in this device's DATA.brands) have no local id to match snapshots'
+  // brand_id against directly — resolve it the same way brandComparisonRows() already does,
+  // off any already-loaded tracked_videos row for that brand name.
+  const resolvedId = brandId || TRACKED_CONTENT_DATA?.find(r => r.brands?.name === brandName)?.brand_id;
+  if(!resolvedId) return [];
+  const byDay = {};
+  VIEW_SNAPSHOTS_DATA.forEach(s => {
+    if(s.brand_id !== resolvedId || s.platform !== platform) return;
+    const day = s.checked_at.slice(0,10);
+    byDay[day] = (byDay[day]||0) + (Number(s.view_count)||0);
+  });
+  return Object.keys(byDay).sort().map(day => byDay[day]);
+}
+// A word-sized trend line — no axes, no labels, just shape. Reuses the main earnings chart's
+// smoothPath() so it's the same curve style, just tiny. Returns '' (renders nothing) with fewer
+// than 2 points, which is expected for the first day or so after this feature is added — there's
+// nothing dishonest-looking about a flat/missing line at that point, so no placeholder needed.
+function sparklineSvg(values, color, w=48, h=16){
+  if(values.length < 2) return '';
+  const max = Math.max(...values), min = Math.min(...values);
+  const range = max - min || 1;
+  const stepX = w / (values.length - 1);
+  const pts = values.map((v,i) => ({ x: i*stepX, y: h - ((v-min)/range) * (h-2) - 1 }));
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block; flex-shrink:0;" aria-hidden="true">
+    <path d="${smoothPath(pts)}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+}
 function openBrandBreakdown(brandId, brandName, brandColor){
   MODAL_STATE.type = 'brandBreakdown';
   MODAL_STATE.id = brandId || brandName;
@@ -1841,12 +1874,18 @@ function renderBrandBreakdownModal(){
     <div class="hint" style="margin-bottom:14px;">${data.totalViews.toLocaleString()} total views across ${data.platformTotals.length} platform${data.platformTotals.length===1?'':'s'} — same window as the "Views — 30d" column, so it always adds up to that number.</div>
     ${data.platformTotals.length===0 ? emptyState('Nothing in the last 30 days', 'Once this brand has videos posted within the window, they show up here.') : `
     <div class="card" style="margin-bottom:16px;">
-      ${data.platformTotals.map(p => `
+      ${data.platformTotals.map(p => {
+        // EXPERIMENTAL — see VIEW_SNAPSHOTS_DATA's declaration. sparklineSvg() returns '' until
+        // there are 2+ days of history, so this is invisible (not a placeholder) until then.
+        const trend = sparklineSvg(brandPlatformTrend(d.brandId, d.brandName, p.platform), `var(--${p.platform})`);
+        return `
         <div class="brand-bar-row">
           <div style="width:90px; flex-shrink:0;"><span class="tag tag-${p.platform}">${escapeHtml((p.platform||'').toUpperCase())}</span></div>
           <div class="brand-bar-track"><div class="brand-bar-fill" style="width:${(p.views/maxPlatform*100).toFixed(0)}%; background:var(--${p.platform});"></div></div>
+          ${trend}
           <div class="mono" style="width:80px; text-align:right; font-size:12.5px; flex-shrink:0;">${p.views.toLocaleString()}</div>
-        </div>`).join('')}
+        </div>`;
+      }).join('')}
     </div>
     <div class="hint" style="margin-bottom:8px; font-weight:600; color:var(--text-dim); text-transform:uppercase; font-size:11px; letter-spacing:.06em;">Top ${data.topVideos.length} video${data.topVideos.length===1?'':'s'}</div>
     <div style="display:flex; flex-direction:column; gap:8px;">
@@ -2083,6 +2122,13 @@ const SUPABASE_KEY = 'sb_publishable_qg31XalWLzEM0XPagE63Pw_sebeunEc';
 let TRACKED_CONTENT_DATA = null;
 let TRACKED_CONTENT_LOADING = false;
 let TRACKED_CONTENT_ERROR = null;
+// EXPERIMENTAL (added 2026-08-25, 2-week trial) — daily view-count history, loaded once
+// alongside Tracked Content, purely to draw the trend sparkline in the brand breakdown modal.
+// To remove this feature entirely: delete this variable, loadViewSnapshots() and its one call
+// site, brandPlatformTrend(), sparklineSvg(), the sparkline markup in renderBrandBreakdownModal(),
+// and the matching logViewSnapshot()/call-site pieces in all three api/scout-*.js files, then
+// drop the view_snapshots Supabase table. Nothing else reads this variable or depends on it.
+let VIEW_SNAPSHOTS_DATA = null;
 // Row ids (individual tracked_videos, not deliverables) currently checked for merging into one
 // crossposted deliverable — see the Merge button in renderTrackedContent() and renderMergeReviewModal().
 let MERGE_SELECTED = new Set();
@@ -2118,6 +2164,26 @@ async function loadTrackedContent(){
   }
   TRACKED_CONTENT_LOADING = false;
   renderWithChartEnter();
+  loadViewSnapshots(); // fire-and-forget — see its own comment; never blocks the main dashboard
+}
+
+// EXPERIMENTAL (added 2026-08-25, 2-week trial) — see VIEW_SNAPSHOTS_DATA's declaration for the
+// full removal note. Silently gives up on failure (including "table doesn't exist" if the SQL
+// migration hasn't been run yet) — this is purely a nice-to-have chart, never something that
+// should surface an error to the user or hold up anything else.
+async function loadViewSnapshots(){
+  try{
+    const cutoff = new Date(Date.now() - 14*86400000).toISOString();
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/view_snapshots?select=brand_id,platform,view_count,checked_at&checked_at=gte.${cutoff}&order=checked_at.asc`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+    VIEW_SNAPSHOTS_DATA = await res.json();
+    render();
+  }catch(e){
+    console.warn('loadViewSnapshots failed (the trend sparkline just won\'t show) —', e);
+  }
 }
 
 // Pulls the connection status (YouTube handle, Instagram/TikTok username + whether a token is

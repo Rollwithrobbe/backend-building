@@ -168,6 +168,9 @@ async function processOneVideo(v, brand, SUPABASE_URL, sbHeaders) {
   if (row.excluded) {
     return { id: v.id, action: 'skipped', status: 'excluded' };
   }
+  // EXPERIMENTAL (added 2026-08-25, 2-week trial) — see scout-instagram.js's logViewSnapshot
+  // for the full rationale and the exact removal steps (identical here).
+  logViewSnapshot(row.id, brand.id, 'youtube', viewCount, SUPABASE_URL, sbHeaders);
   if (row.status === 'tracking') {
     let status = 'tracking';
     let earned = false;
@@ -214,6 +217,21 @@ async function mapConcurrent(items, limit, fn) {
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return results;
+}
+
+// EXPERIMENTAL (added 2026-08-25, 2-week trial) — one row per video per day it's checked, for
+// the brand breakdown modal's trend sparkline. Not awaited by its caller and swallows its own
+// errors — a nice-to-have for a chart, never something that should slow down or fail the actual
+// tracking/payout logic it sits next to. To remove this feature entirely: delete this function,
+// its call site above, the matching pieces in scout-instagram.js/scout-tiktok.js, drop the
+// view_snapshots table, and remove loadViewSnapshots()/VIEW_SNAPSHOTS_DATA/brandPlatformTrend()/
+// the sparkline markup in index.html. Nothing else depends on any of it.
+function logViewSnapshot(trackedVideoId, brandId, platform, viewCount, SUPABASE_URL, sbHeaders) {
+  fetch(`${SUPABASE_URL}/rest/v1/view_snapshots`, {
+    method: 'POST',
+    headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify({ tracked_video_id: trackedVideoId, brand_id: brandId, platform, view_count: viewCount }),
+  }).catch(() => {});
 }
 
 async function flagMissingVideos(brand, platform, seenIds, SUPABASE_URL, sbHeaders) {
