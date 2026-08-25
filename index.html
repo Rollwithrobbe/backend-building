@@ -1125,7 +1125,7 @@ function getDeliverables(){
     brand: r.brands, brandName: r.brands?.name || 'Unassigned (automated)',
     excluded: !!r.excluded, status: r.status,
     payAmount: tcAmount(r), earnedAt: r.status==='hit' ? r.posted_at : null,
-    title: r.title, thumbnail: r.thumbnail_url,
+    postedAt: r.posted_at, title: r.title, thumbnail: r.thumbnail_url,
   }));
   Object.entries(byGroup).forEach(([gid, rows]) => {
     const active = rows.filter(r=>!r.excluded);
@@ -1135,12 +1135,15 @@ function getDeliverables(){
     const anyTracking = consider.some(r=>r.status==='tracking');
     const status = hitRow ? 'hit' : anyTracking ? 'tracking' : 'expired';
     const rep = hitRow || consider[0];
+    // earliest of the group's post times — when this piece of content first went out, before
+    // it was crossposted elsewhere (matches clusterForCompare's anchor convention)
+    const postedAt = rows.map(r=>r.posted_at).filter(Boolean).sort()[0] || null;
     deliverables.push({
       key: gid, rows, grouped: true,
       brand: rep.brands, brandName: rep.brands?.name || 'Unassigned (automated)',
       excluded: allExcluded, status,
       payAmount: tcAmount(rep), earnedAt: hitRow ? hitRow.posted_at : null,
-      title: rep.title, thumbnail: rep.thumbnail_url,
+      postedAt, title: rep.title, thumbnail: rep.thumbnail_url,
     });
   });
   return deliverables;
@@ -1869,6 +1872,9 @@ function renderTrackedContent(){
     if(TC_FILTER.q && !(dv.title||'').toLowerCase().includes(TC_FILTER.q.toLowerCase())) return false;
     return true;
   });
+  // newest posted first, not newest discovered — a whole backlog scouted in one run all shares
+  // the same discovered_at, so that order is meaningless; postedAt is when it actually went out
+  deliverables.sort((a,b) => (b.postedAt||'').localeCompare(a.postedAt||''));
 
   const isCompare = TC_VIEW_MODE === 'compare';
   const filterBar = `
@@ -1907,7 +1913,7 @@ function renderTrackedContent(){
     </div>
     ${deliverables.length===0 ? emptyState(allDeliverables.length===0 ? 'Nothing tracked yet' : 'No matches', allDeliverables.length===0 ? 'Connect a brand\'s channel and wait for the next scouting run.' : 'Try clearing a filter.') : `
     <div class="table-wrap" style="overflow-x:auto;"><table>
-      <thead><tr><th></th><th></th><th>Brand</th><th>Platform(s)</th><th>Title</th><th>Views</th><th>Status</th><th>Payout</th><th>Discovered</th><th></th></tr></thead>
+      <thead><tr><th></th><th></th><th>Brand</th><th>Platform(s)</th><th>Title</th><th>Views</th><th>Status</th><th>Payout</th><th>Posted</th><th></th></tr></thead>
       <tbody>
         ${deliverables.map(dv => {
           const rep = dv.rows[0];
@@ -1921,7 +1927,7 @@ function renderTrackedContent(){
             <td class="mono">${dv.grouped ? '<span style="color:var(--text-faint)">see platforms</span>' : `${(rep.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`}</td>
             <td>${dv.excluded ? '<span class="tag tag-neutral">Excluded</span>' : dv.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : dv.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
             <td class="mono">${dv.status==='hit' && !dv.excluded ? money(dv.payAmount) : `<span style="color:var(--text-faint)">${money(dv.payAmount)}${dv.excluded?'':' pending'}</span>`}</td>
-            <td class="mono">${rep.discovered_at ? fmtDate(rep.discovered_at.slice(0,10)) : '—'}</td>
+            <td class="mono">${dv.postedAt ? fmtDate(dv.postedAt.slice(0,10)) : '—'}</td>
             <td style="white-space:nowrap;">
               ${!dv.grouped && rep.url ? `<a href="${rep.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">View</a>` : ''}
               <button class="btn btn-ghost btn-sm" data-edit-tracked-video="${rep.id}" type="button">Edit</button>
