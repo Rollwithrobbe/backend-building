@@ -2241,29 +2241,24 @@ async function loadAllBackendBrands(){
   if(MODAL_STATE.type==='brand') render();
 }
 
-// Platform tag and view count used to be one combined pill ("TIKTOK 986,543 / 300") — fine at
-// low view counts, but the label and the number fight for space and wrap awkwardly once a
-// video's into six or seven figures. Split into two: platformTag (just the platform, linking
-// straight to that platform's actual video so a merge decision or later double-check can be
-// visually confirmed rather than trusted blind) goes in the Platform(s) column, and
-// platformViewsLine (the number, colored to match its tag so it's obvious which platform it
-// belongs to even without re-reading the label) goes in the Views column, stacked in the same
-// row order so the two columns line up.
-function platformTag(row){
-  const style = 'margin:2px 4px 2px 0; display:inline-block; text-decoration:none;';
-  const label = (row.platform||'').toUpperCase();
-  return row.url
-    ? `<a href="${row.url}" target="_blank" rel="noopener" class="tag tag-${row.platform}" style="${style}" title="${escapeHtml(row.title||'')}">${label}</a>`
-    : `<span class="tag tag-${row.platform}" style="${style}">${label}</span>`;
-}
-function platformViewsLine(row){
+// Back to one combined pill per platform ("TIKTOK 1,030 / 300") — splitting the tag and the
+// view count into two separate columns (tried 2026-08-26) made the wrapping worse, not better:
+// the dedicated Views column ended up narrower than a single wide "Platform(s) & Views" column
+// would be, so multi-platform rows wrapped mid-number even more than before. white-space:nowrap
+// on the pill plus giving the column real room (see the table's colgroup/th) is what actually
+// prevents the wrap — not separating the two pieces of information.
+function platformPill(row){
   const req = row.view_requirement_override != null ? Number(row.view_requirement_override) : (row.brands ? Number(row.brands.view_requirement) : null);
-  const label = `${(row.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`;
+  const label = `${(row.platform||'').toUpperCase()} ${(row.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`;
   // Instagram's view_count already folds in Facebook plays when a reel is crossposted there (see
   // scout-instagram.js) — surfaced here as a small aside rather than a separate row/platform,
   // since it was never a separate video to begin with.
-  const fbNote = row.facebook_views_component ? `<div class="hint" style="font-size:9.5px; margin-top:1px;">incl. ${Number(row.facebook_views_component).toLocaleString()} via FB</div>` : '';
-  return `<div class="mono" style="font-size:12.5px; color:var(--${row.platform}); line-height:1.5;">${label}${fbNote}</div>`;
+  const fbNote = row.facebook_views_component ? `<div class="hint" style="font-size:9px; margin:1px 0 2px;">incl. ${Number(row.facebook_views_component).toLocaleString()} via FB</div>` : '';
+  const style = 'margin:2px 4px 2px 0; display:block; text-decoration:none; white-space:nowrap; width:fit-content;';
+  const pill = row.url
+    ? `<a href="${row.url}" target="_blank" rel="noopener" class="tag tag-${row.platform}" style="${style}" title="${escapeHtml(row.title||'')}">${label}</a>`
+    : `<span class="tag tag-${row.platform}" style="${style}">${label}</span>`;
+  return pill + fbNote;
 }
 
 // Long hashtag-heavy captions blow up a row's height if shown in full by default — truncate to
@@ -2441,7 +2436,7 @@ function renderTrackedContent(){
     </div>
     ${deliverables.length===0 ? emptyState(allDeliverables.length===0 ? 'Nothing tracked yet' : 'No matches', allDeliverables.length===0 ? 'Connect a brand\'s channel and wait for the next scouting run.' : 'Try clearing a filter.') : `
     <div class="table-wrap" style="overflow-x:auto;"><table>
-      <thead><tr><th></th><th></th><th>Brand</th><th>Platform(s)</th><th>Title</th><th>Views</th><th>Status</th><th>Payout</th><th>Posted</th><th></th></tr></thead>
+      <thead><tr><th></th><th></th><th>Brand</th><th style="min-width:150px;">Platform(s) &amp; views</th><th>Title</th><th>Status</th><th>Payout</th><th>Posted</th><th></th></tr></thead>
       <tbody>
         ${deliverables.map(dv => {
           const rep = dv.rows[0];
@@ -2451,9 +2446,8 @@ function renderTrackedContent(){
             <td><input type="checkbox" class="checkbox" data-merge-check-ids="${allIds.join(',')}" ${allSelected?'checked':''} title="${dv.grouped ? 'Select this already-merged deliverable to add another platform to it' : 'Select to merge with another platform'}" /></td>
             <td>${dv.thumbnail ? `<img src="${dv.thumbnail}" alt="" style="width:40px; height:40px; object-fit:cover; border-radius:6px; display:block;" />` : `<div style="width:40px; height:40px; border-radius:6px; background:var(--surface);"></div>`}</td>
             <td>${dv.brand ? escapeHtml(dv.brand.name) : '<span style="color:var(--text-faint)">—</span>'}</td>
-            <td>${dv.rows.map(platformTag).join('')}</td>
+            <td>${dv.rows.map(platformPill).join('')}</td>
             <td style="max-width:260px;">${renderTitleCell(dv)}</td>
-            <td>${dv.rows.map(platformViewsLine).join('')}</td>
             <td>${dv.excluded ? '<span class="tag tag-neutral">Excluded</span>' : dv.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : dv.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : dv.status==='missing' ? '<span class="tag tag-danger" title="No longer showing up on the platform — deleted, archived, or made private before it hit its requirement">Missing</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
             <td class="mono">${dv.status==='hit' && !dv.excluded ? money(dv.payAmount) : `<span style="color:var(--text-faint)">${money(dv.payAmount)}${dv.excluded?'':' pending'}</span>`}</td>
             <td class="mono">${dv.postedAt ? fmtDate(dv.postedAt.slice(0,10)) : '—'}</td>
