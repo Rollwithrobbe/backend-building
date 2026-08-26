@@ -3097,6 +3097,23 @@ function renderPublishedSection(){
 }
 
 /* ---------------- brands ---------------- */
+// Quick one-click flip from the Brands table itself, without opening the edit modal — for when
+// a contract ends and pending/in-progress videos won't be paid regardless of hitting their view
+// requirement, so there's no point keeping the scouting jobs spending API calls checking them.
+// Writes the same `status` field the edit modal's dropdown already did (so nothing new to sync),
+// just surfaced faster. The three scout-*.js jobs filter this brand out of their next run the
+// moment it's 'paused' — no separate "stop tracking" flag or table needed. Flipping back to
+// active picks tracking back up on the next scheduled run, same as if it had never stopped.
+function toggleBrandStatus(brandId){
+  const b = DATA.brands.find(x=>x.id===brandId);
+  if(!b) return;
+  b.status = b.status==='active' ? 'paused' : 'active';
+  saveData();
+  showToast(b.status==='active'
+    ? `${b.name} marked active — tracking resumes on the next scouting run`
+    : `${b.name} marked inactive — tracking stops on the next scouting run`);
+  render();
+}
 function renderBrands(){
   return `
     <div class="page-head">
@@ -3115,11 +3132,14 @@ function renderBrands(){
             : '';
           return `<tr class="row-click" data-open-brand="${b.id}">
             <td><span class="swatch" style="background:${b.color}"></span>${escapeHtml(b.name)}${trialBadge}</td>
-            <td>${b.status==='active' ? '<span class="tag tag-good">Active</span>' : '<span class="tag tag-neutral">Paused</span>'}</td>
+            <td>${b.status==='active' ? '<span class="tag tag-good">Active</span>' : '<span class="tag tag-neutral">Inactive</span>'}</td>
             <td class="mono">${t.count}</td>
             <td class="mono">${money(t.totalEarned)}</td>
             <td class="mono" style="color:${t.outstanding>0?'var(--warn)':'var(--text-dim)'}">${money(t.outstanding)}</td>
-            <td><button class="btn btn-ghost btn-sm" data-edit-brand="${b.id}">Edit</button></td>
+            <td style="white-space:nowrap;">
+              <button class="btn btn-ghost btn-sm" data-toggle-brand-status="${b.id}" title="${b.status==='active' ? 'Stops automated view tracking for this brand — use when a contract ends' : 'Resumes automated view tracking for this brand'}">${b.status==='active' ? 'Set inactive' : 'Set active'}</button>
+              <button class="btn btn-ghost btn-sm" data-edit-brand="${b.id}">Edit</button>
+            </td>
           </tr>`;
         }).join('')}
       </tbody>
@@ -4015,7 +4035,7 @@ function renderBrandModal(){
     <div class="field"><label>Name</label><input type="text" id="f-name" value="${escapeHtml(d.name)}" placeholder="e.g. PureFi" /></div>
     <div class="field-row">
       <div class="field"><label>Status</label>
-        <select id="f-status"><option value="active" ${d.status==='active'?'selected':''}>Active</option><option value="paused" ${d.status==='paused'?'selected':''}>Paused</option></select>
+        <select id="f-status"><option value="active" ${d.status==='active'?'selected':''}>Active</option><option value="paused" ${d.status==='paused'?'selected':''}>Inactive — stops automated tracking</option></select>
       </div>
       <div class="field"><label>Color</label>
         <input type="color" id="f-color" value="${d.color}" />
@@ -4291,6 +4311,7 @@ function bindGlobalHandlers(){
   }));
   document.querySelectorAll('[data-open-content]').forEach(el => el.addEventListener('click', () => openModal('content', el.dataset.openContent)));
   document.querySelectorAll('[data-open-brand], [data-edit-brand]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); openModal('brand', el.dataset.openBrand || el.dataset.editBrand); }));
+  document.querySelectorAll('[data-toggle-brand-status]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); toggleBrandStatus(el.dataset.toggleBrandStatus); }));
   document.querySelectorAll('[data-del-payment]').forEach(el => el.addEventListener('click', () => { DATA.payments = DATA.payments.filter(p=>p.id!==el.dataset.delPayment); saveData(); render(); }));
   document.querySelectorAll('[data-edit-task]').forEach(el => el.addEventListener('click', () => openModal('task', el.dataset.editTask)));
   document.querySelectorAll('[data-edit-tracked-video]').forEach(el => el.addEventListener('click', () => openModal('trackedVideo', el.dataset.editTrackedVideo)));

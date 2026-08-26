@@ -26,8 +26,14 @@ export default async function handler(req, res) {
   const sbHeaders = { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` };
 
   try {
+    // or=(status.neq.paused,status.is.null) rather than a plain status=eq.active — in SQL, a NULL
+    // never satisfies <>, so a plain neq.paused would silently exclude any brand with no status
+    // set at all (a legacy row, or one written by something other than the dashboard's own edit
+    // flow) instead of defaulting it to tracked. This treats "no status" as active, same as the
+    // dashboard itself does everywhere else (`status || 'active'`); only an *explicit* "paused"
+    // (set via the Brands tab's inactive toggle, e.g. contract ended) actually stops tracking.
     const brandsRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/brands?select=*&instagram_business_account_id=not.is.null`,
+      `${SUPABASE_URL}/rest/v1/brands?select=*&instagram_business_account_id=not.is.null&or=(status.neq.paused,status.is.null)`,
       { headers: sbHeaders }
     );
     const brands = await brandsRes.json();

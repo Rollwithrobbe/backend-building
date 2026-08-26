@@ -34,8 +34,11 @@ export default async function handler(req, res) {
 
   try {
     // Every brand that has a YouTube channel connected gets scouted independently.
+    // or=(status.neq.paused,status.is.null) — see the identical comment in scout-instagram.js for
+    // why not a plain status=eq.active (NULL never satisfies <> in SQL, which would silently drop
+    // any brand with no status set instead of defaulting it to tracked).
     const brandsRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/brands?select=*&youtube_channel_handle=not.is.null`,
+      `${SUPABASE_URL}/rest/v1/brands?select=*&youtube_channel_handle=not.is.null&or=(status.neq.paused,status.is.null)`,
       { headers: sbHeaders }
     );
     const brands = await brandsRes.json();
