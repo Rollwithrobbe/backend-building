@@ -42,19 +42,41 @@ export default async function handler(req, res) {
       return res.status(200).json({ message: 'no brands with a TikTok account connected yet' });
     }
 
+    // Self-imposed rate-limit failsafe (added 2026-08-26, matching the one built for
+    // scout-instagram.js after that platform tripped a real Meta throttle). TikTok's documented
+    // limit is generous relative to how little this job actually calls it (600 requests/minute
+    // per endpoint — a full run across every brand is normally a few dozen calls, total), so a
+    // header-driven guard like Instagram's isn't needed for real headroom. This is a simple,
+    // conservative call-count ceiling instead — cheap insurance against a future bug (a runaway
+    // pagination loop, an accidental multi-trigger) rather than a response to any actual TikTok
+    // throttling seen so far. Shared across every brand in this run, same reasoning as Instagram's.
+    const callGuard = { count: 0, stop: false, reason: null };
     const perBrand = [];
     for (const brand of brands) {
-      const outcome = await scoutBrandAccount(brand, CLIENT_KEY, CLIENT_SECRET, SUPABASE_URL, sbHeaders);
+      if (callGuard.stop) {
+        perBrand.push({ brand: brand.name, tiktok: brand.tiktok_username, skipped: callGuard.reason });
+        continue;
+      }
+      const outcome = await scoutBrandAccount(brand, callGuard, CLIENT_KEY, CLIENT_SECRET, SUPABASE_URL, sbHeaders);
       perBrand.push({ brand: brand.name, tiktok: brand.tiktok_username, ...outcome });
     }
 
-    return res.status(200).json({ brandsScanned: brands.length, perBrand });
+    return res.status(200).json({ brandsScanned: brands.length, perBrand, apiCallsThisRun: callGuard.count });
   } catch (err) {
     return res.status(500).json({ error: String(err) });
   }
 }
 
-async function scoutBrandAccount(brand, CLIENT_KEY, CLIENT_SECRET, SUPABASE_URL, sbHeaders) {
+const SAFE_CALL_CEILING = 200; // well under TikTok's documented 600/min — see the comment above
+function tickCallGuard(guard) {
+  guard.count++;
+  if (guard.count >= SAFE_CALL_CEILING && !guard.stop) {
+    guard.stop = true;
+    guard.reason = `Hit the self-imposed ${SAFE_CALL_CEILING}-call ceiling for this run — stopped early as a precaution; whatever's left picks up on the next scheduled run.`;
+  }
+}
+
+async function scoutBrandAccount(brand, callGuard, CLIENT_KEY, CLIENT_SECRET, SUPABASE_URL, sbHeaders) {
   let token = brand.tiktok_access_token;
   if (!token) {
     return { error: 'no tiktok_access_token stored for this brand — reconnect TikTok' };
@@ -64,6 +86,7 @@ async function scoutBrandAccount(brand, CLIENT_KEY, CLIENT_SECRET, SUPABASE_URL,
   // TikTok access tokens only last ~24h, refresh tokens last much longer.
   const expiresAt = brand.tiktok_token_expires_at ? new Date(brand.tiktok_token_expires_at).getTime() : 0;
   if (Date.now() > expiresAt - 60 * 60 * 1000) {
+    tickCallGuard(callGuard);
     const refreshed = await refreshToken(brand, CLIENT_KEY, CLIENT_SECRET, SUPABASE_URL, sbHeaders);
     if (refreshed.error) return refreshed;
     token = refreshed.access_token;
@@ -80,9 +103,10 @@ async function scoutBrandAccount(brand, CLIENT_KEY, CLIENT_SECRET, SUPABASE_URL,
   const cutoff = Date.now() - Math.max(Number(brand.eligibility_window_days) || 30, 30) * 86400000;
   const videos = [];
   let cursor = null;
-  for (let page = 0; page < 5; page++) {
+  for (let page = 0; page < 5 && !callGuard.stop; page++) {
     const body = { max_count: 20 };
     if (cursor) body.cursor = cursor;
+    tickCallGuard(callGuard);
     const listRes = await fetch(
       'https://open.tiktokapis.com/v2/video/list/?fields=id,title,view_count,create_time,share_url,cover_image_url',
       {
@@ -119,8 +143,15 @@ async function scoutBrandAccount(brand, CLIENT_KEY, CLIENT_SECRET, SUPABASE_URL,
   // requirement — flag it distinctly instead of freezing it silently forever pretending it
   // might still resolve. Self-heals: if it reappears in a later fetch, the normal update path
   // above finds the existing row and overwrites this status.
-  const seenIds = new Set(videos.map((v) => v.id));
-  const missingCount = await flagMissingVideos(brand, 'tiktok', seenIds, SUPABASE_URL, sbHeaders);
+  //
+  // Skipped if the call guard tripped mid-fetch — seenIds would only be a partial picture, and
+  // comparing "still tracking" against a partial fetch would falsely flag real, still-live
+  // videos this run simply never got to as 'missing'.
+  let missingCount = null;
+  if (!callGuard.stop) {
+    const seenIds = new Set(videos.map((v) => v.id));
+    missingCount = await flagMissingVideos(brand, 'tiktok', seenIds, SUPABASE_URL, sbHeaders);
+  }
 
   return { checked: results.length, results, flaggedMissing: missingCount };
 }

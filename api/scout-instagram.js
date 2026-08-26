@@ -36,19 +36,57 @@ export default async function handler(req, res) {
       return res.status(200).json({ message: 'no brands with an Instagram account connected yet' });
     }
 
+    // One guard shared across every brand in this run — X-App-Usage reflects the whole app's
+    // usage, not any one brand's account, so a threshold crossed scouting brand 1 applies just
+    // as much to brand 2. See makeUsageGuard()/igFetch() for how this actually works.
+    const guard = makeUsageGuard();
     const perBrand = [];
     for (const brand of brands) {
-      const outcome = await scoutBrandAccount(brand, SUPABASE_URL, sbHeaders);
+      if (guard.stop) {
+        perBrand.push({ brand: brand.name, instagram: brand.instagram_username, skipped: guard.reason });
+        continue;
+      }
+      const outcome = await scoutBrandAccount(brand, guard, SUPABASE_URL, sbHeaders);
       perBrand.push({ brand: brand.name, instagram: brand.instagram_username, ...outcome });
     }
 
-    return res.status(200).json({ brandsScanned: brands.length, perBrand });
+    return res.status(200).json({ brandsScanned: brands.length, perBrand, usage: { peakPct: guard.pct, stoppedEarly: guard.stop } });
   } catch (err) {
     return res.status(500).json({ error: String(err) });
   }
 }
 
-async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
+// Self-imposed rate-limit failsafe (added 2026-08-26, after a burst of manual testing tripped a
+// real Meta "API access blocked" penalty). Meta returns real-time usage in the X-App-Usage
+// response header on every Graph API call — {call_count, total_time, total_cputime}, each a
+// percentage of the rolling-hour budget. Reading that directly, instead of hardcoding a guessed
+// number, is deliberate: Meta's actual limit is a formula based on account impressions (not a
+// flat "200/hour"), so a static constant would either be wrong or need constant upkeep. This
+// stops ALL further Instagram calls in this run — cron-triggered or manually curled — the moment
+// any dimension crosses SAFE_USAGE_PCT, leaving real headroom instead of riding the limit to the
+// edge. Whatever didn't get checked this run picks up on the next scheduled run.
+const SAFE_USAGE_PCT = 75;
+function makeUsageGuard() {
+  return { stop: false, pct: 0, reason: null };
+}
+async function igFetch(url, guard) {
+  const res = await fetch(url);
+  const usageHeader = res.headers.get('x-app-usage');
+  if (usageHeader) {
+    try {
+      const usage = JSON.parse(usageHeader);
+      const pct = Math.max(Number(usage.call_count) || 0, Number(usage.total_time) || 0, Number(usage.total_cputime) || 0);
+      if (pct > guard.pct) guard.pct = pct;
+      if (pct >= SAFE_USAGE_PCT && !guard.stop) {
+        guard.stop = true;
+        guard.reason = `Instagram usage hit ${pct}% of its hourly budget — stopped early to stay well under the limit; whatever's left picks up on the next scheduled run.`;
+      }
+    } catch (e) { /* header present but unparsable — ignore, not worth failing the run over */ }
+  }
+  return res;
+}
+
+async function scoutBrandAccount(brand, guard, SUPABASE_URL, sbHeaders) {
   const igId = brand.instagram_business_account_id;
   const token = brand.instagram_access_token;
   if (!token) {
@@ -72,8 +110,8 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
     `https://graph.instagram.com/me/media` +
     `?fields=id,caption,timestamp,permalink,media_type,media_product_type,thumbnail_url,media_url` +
     `&limit=50&access_token=${encodeURIComponent(token)}`;
-  for (let page = 0; page < 5 && nextUrl; page++) {
-    const mediaRes = await fetch(nextUrl);
+  for (let page = 0; page < 5 && nextUrl && !guard.stop; page++) {
+    const mediaRes = await igFetch(nextUrl, guard);
     const mediaData = await mediaRes.json();
     if (mediaData.error) {
       if (page === 0) return { error: `Instagram API error: ${mediaData.error.message}` };
@@ -99,7 +137,7 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
   // timeout. mapConcurrent runs a bounded pool instead (8 in flight at once here), which cut the
   // same 49-reel run to a few seconds. 8 is conservative against Meta's per-token rate limiting,
   // not tuned for max throughput.
-  const results = await mapConcurrent(reels, 8, (media) => processOneMedia(media, brand, token, SUPABASE_URL, sbHeaders));
+  const results = await mapConcurrent(reels, 8, (media) => processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeaders));
 
   // Anything Supabase still has as 'tracking' for this brand+platform that didn't show up in
   // this fetch has vanished from Instagram (deleted, or archived — archived posts drop out of
@@ -107,18 +145,28 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
   // of freezing it silently forever pretending it might still resolve. Self-heals: if it
   // reappears in a later fetch (e.g. unarchived), the normal update path above finds the
   // existing row and overwrites this status.
-  const seenIds = new Set(reels.map((m) => m.id));
-  const missingCount = await flagMissingVideos(brand, 'instagram', seenIds, SUPABASE_URL, sbHeaders);
+  //
+  // Skipped entirely if the usage guard tripped mid-sweep: seenIds would only be a partial
+  // picture at that point, and comparing "still tracking" against a partial fetch would falsely
+  // flag real, still-live videos this run simply never got to as 'missing'.
+  let missingCount = null;
+  if (!guard.stop) {
+    const seenIds = new Set(reels.map((m) => m.id));
+    missingCount = await flagMissingVideos(brand, 'instagram', seenIds, SUPABASE_URL, sbHeaders);
+  }
 
-  return { checked: results.length, results, flaggedMissing: missingCount };
+  return { checked: results.length, results, flaggedMissing: missingCount, usagePeakPct: guard.pct, stoppedEarly: guard.stop };
 }
 
 // Everything one reel needs, start to finish — reads its view count, then either inserts it
 // (first time seen) or patches its existing row. Pulled out of scoutBrandAccount's loop so it
 // can be run concurrently across reels instead of one at a time (see mapConcurrent above it).
-async function processOneMedia(media, brand, token, SUPABASE_URL, sbHeaders) {
+async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeaders) {
+  if (guard.stop) {
+    return { id: media.id, action: 'skipped', reason: 'rate guard tripped — see run-level usagePeakPct/stoppedEarly' };
+  }
   const debug = [];
-  const views = await fetchViews(media.id, token, debug);
+  const views = await fetchViews(media.id, token, guard, debug);
   if (views === null) {
     return { id: media.id, action: 'skipped', reason: 'could not read view count', debug: debug[0] };
   }
@@ -274,9 +322,10 @@ async function flagMissingVideos(brand, platform, seenIds, SUPABASE_URL, sbHeade
 // view requirement. A reel that was never crossposted to Facebook throws when facebook_views is
 // requested (IGApiException, "not crossposted to facebook") — that's expected and just means
 // there's nothing to add, not a real failure.
-async function fetchMetric(mediaId, metric, token) {
-  const res = await fetch(
-    `https://graph.instagram.com/${mediaId}/insights?metric=${metric}&access_token=${encodeURIComponent(token)}`
+async function fetchMetric(mediaId, metric, token, guard) {
+  const res = await igFetch(
+    `https://graph.instagram.com/${mediaId}/insights?metric=${metric}&access_token=${encodeURIComponent(token)}`,
+    guard
   );
   return res.json();
 }
@@ -286,14 +335,15 @@ async function fetchMetric(mediaId, metric, token) {
 // separately too (null when the reel isn't crossposted), purely so the UI can show "incl. X via
 // Facebook" as a small aside on the Instagram row — it was never a separate video, so it never
 // gets a separate platform tag or its own merge target, just this annotation.
-async function fetchViews(mediaId, token, debug) {
+async function fetchViews(mediaId, token, guard, debug) {
+  if (guard.stop) return null;
   // 'views' is the metric that actually succeeds in practice (plays/video_views are legacy
   // fallbacks for older API versions) and facebook_views is independent of it either way, so
   // fire both together instead of waiting on 'views' first and only then asking about Facebook —
   // that turns 2 sequential round trips into 1 in the common case.
   const [viewsData, fbData] = await Promise.all([
-    fetchMetric(mediaId, 'views', token),
-    fetchMetric(mediaId, 'facebook_views', token),
+    fetchMetric(mediaId, 'views', token, guard),
+    fetchMetric(mediaId, 'facebook_views', token, guard),
   ]);
   const errors = [];
   let native = viewsData?.data?.[0]?.values?.[0]?.value;
@@ -301,7 +351,8 @@ async function fetchViews(mediaId, token, debug) {
     if (viewsData.error) errors.push(`views: ${viewsData.error.message}`);
     // fall back sequentially only in the rare case 'views' itself didn't work
     for (const metric of ['plays', 'video_views']) {
-      const data = await fetchMetric(mediaId, metric, token);
+      if (guard.stop) break;
+      const data = await fetchMetric(mediaId, metric, token, guard);
       const value = data?.data?.[0]?.values?.[0]?.value;
       if (typeof value === 'number') { native = value; break; }
       if (data.error) errors.push(`${metric}: ${data.error.message}`);

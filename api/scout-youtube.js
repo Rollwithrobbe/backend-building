@@ -44,22 +44,44 @@ export default async function handler(req, res) {
       return res.status(200).json({ message: 'no brands with a youtube_channel_handle set yet' });
     }
 
+    // Self-imposed rate-limit failsafe (added 2026-08-26, matching the one built for
+    // scout-instagram.js after that platform tripped a real Meta throttle). YouTube's default
+    // quota is 10,000 units/day and nearly every call this job makes costs 1 unit, so a full run
+    // across every brand is normally well under 1% of the daily budget — a header-driven guard
+    // like Instagram's isn't needed for real headroom. This is a simple, conservative call-count
+    // ceiling instead — cheap insurance against a future bug (a runaway pagination loop, an
+    // accidental multi-trigger) rather than a response to any actual YouTube throttling seen.
+    const callGuard = { count: 0, stop: false, reason: null };
     const perBrand = [];
     for (const brand of brands) {
-      const outcome = await scoutBrandChannel(brand, YT_KEY, SUPABASE_URL, sbHeaders);
+      if (callGuard.stop) {
+        perBrand.push({ brand: brand.name, channel: brand.youtube_channel_handle, skipped: callGuard.reason });
+        continue;
+      }
+      const outcome = await scoutBrandChannel(brand, callGuard, YT_KEY, SUPABASE_URL, sbHeaders);
       perBrand.push({ brand: brand.name, channel: brand.youtube_channel_handle, ...outcome });
     }
 
-    return res.status(200).json({ brandsScanned: brands.length, perBrand });
+    return res.status(200).json({ brandsScanned: brands.length, perBrand, apiCallsThisRun: callGuard.count });
   } catch (err) {
     return res.status(500).json({ error: String(err) });
   }
 }
 
-async function scoutBrandChannel(brand, YT_KEY, SUPABASE_URL, sbHeaders) {
+const SAFE_CALL_CEILING = 500; // ~5% of the 10,000/day default quota, in one run — see comment above
+function tickCallGuard(guard) {
+  guard.count++;
+  if (guard.count >= SAFE_CALL_CEILING && !guard.stop) {
+    guard.stop = true;
+    guard.reason = `Hit the self-imposed ${SAFE_CALL_CEILING}-call ceiling for this run — stopped early as a precaution; whatever's left picks up on the next scheduled run.`;
+  }
+}
+
+async function scoutBrandChannel(brand, callGuard, YT_KEY, SUPABASE_URL, sbHeaders) {
   const handle = brand.youtube_channel_handle;
 
   // 1. Resolve the channel handle to its "uploads" playlist
+  tickCallGuard(callGuard);
   const chRes = await fetch(
     `https://www.googleapis.com/youtube/v3/channels?part=contentDetails&forHandle=${encodeURIComponent(handle)}&key=${YT_KEY}`
   );
@@ -80,7 +102,8 @@ async function scoutBrandChannel(brand, YT_KEY, SUPABASE_URL, sbHeaders) {
   const cutoff = Date.now() - Math.max(Number(brand.eligibility_window_days) || 30, 30) * 86400000;
   let videoIds = [];
   let pageToken = '';
-  for (let page = 0; page < 5; page++) {
+  for (let page = 0; page < 5 && !callGuard.stop; page++) {
+    tickCallGuard(callGuard);
     const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${uploadsPlaylistId}&maxResults=50&key=${YT_KEY}${pageToken ? `&pageToken=${pageToken}` : ''}`;
     const plRes = await fetch(url);
     const plData = await plRes.json();
@@ -97,8 +120,9 @@ async function scoutBrandChannel(brand, YT_KEY, SUPABASE_URL, sbHeaders) {
 
   // 3. Get current view counts in batched calls (the videos endpoint's id param caps at 50 ids)
   const statsItems = [];
-  for (let i = 0; i < videoIds.length; i += 50) {
+  for (let i = 0; i < videoIds.length && !callGuard.stop; i += 50) {
     const chunk = videoIds.slice(i, i + 50);
+    tickCallGuard(callGuard);
     const statsRes = await fetch(
       `https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${chunk.join(',')}&key=${YT_KEY}`
     );
@@ -112,6 +136,14 @@ async function scoutBrandChannel(brand, YT_KEY, SUPABASE_URL, sbHeaders) {
   // full rationale (measured there: 49 items sequentially took 47s; a brand with a full page
   // per platform × several brands in one cron run risks the function's own execution timeout).
   const results = await mapConcurrent(statsData.items || [], 8, (v) => processOneVideo(v, brand, SUPABASE_URL, sbHeaders));
+
+  // Skipped if the call guard tripped mid-fetch (rare given the generous ceiling, but the video
+  // pagination loop above may not have run to completion) — seenIds would only be a partial
+  // picture, and comparing "still tracking" against a partial fetch would falsely flag real,
+  // still-live videos this run simply never got to as 'missing'.
+  if (callGuard.stop) {
+    return { checked: results.length, results, flaggedMissing: null, skippedMissingCheck: true };
+  }
 
   // Anything Supabase still has as 'tracking' for this brand+platform that didn't show up in
   // this fetch has vanished from YouTube (deleted, or set private/unlisted so it stops
