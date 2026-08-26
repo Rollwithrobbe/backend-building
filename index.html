@@ -336,17 +336,25 @@
     background:rgba(28,27,35,0.92); backdrop-filter:blur(16px) saturate(150%); -webkit-backdrop-filter:blur(16px) saturate(150%);
     border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow-elevated);
   }
-  .alerts-head{ padding:10px 14px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim); border-bottom:1px solid var(--border-soft); }
+  .alerts-head{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border-soft); }
+  .alerts-head span{ font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim); }
+  .alerts-clear-btn{ background:none; border:none; padding:0; font-size:10.5px; font-weight:600; color:var(--text-faint); cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
+  .alerts-clear-btn:hover{ color:var(--text-dim); }
   .alerts-list{ display:flex; flex-direction:column; }
   .alert-item{ display:flex; gap:10px; padding:11px 14px; border-bottom:1px solid var(--border-soft); }
   .alert-item:last-child{ border-bottom:none; }
-  .alert-item[data-alert-goto-video], .alert-item[data-alert-nav]{ cursor:pointer; transition:background 100ms ease-out; }
-  .alert-item[data-alert-goto-video]:hover, .alert-item[data-alert-nav]:hover{ background:var(--surface); }
+  .alert-item[data-alert-goto-video]{ cursor:pointer; transition:background 100ms ease-out; }
+  .alert-item[data-alert-goto-video]:hover{ background:var(--surface); }
   .alert-icon{ font-size:15px; flex-shrink:0; line-height:1.4; }
   .alert-body{ min-width:0; }
   .alert-title{ font-size:12.5px; font-weight:600; color:var(--text); line-height:1.4; }
   .alert-detail{ font-size:11.5px; color:var(--text-dim); margin-top:2px; line-height:1.4; overflow:hidden; text-overflow:ellipsis; }
   .alert-hit .alert-title{ color:var(--fx-green); }
+  /* Already-seen notifications stay in the list (only Clear notifications removes them) but fade
+     back so unread ones keep standing out — same dim treatment regardless of hit/stale type. */
+  .alert-item.alert-read{ opacity:.45; }
+  .alert-item.alert-read:hover{ opacity:.75; }
+  .alert-item.alert-read.alert-hit .alert-title{ color:var(--text); }
 
   /* ---- date picker popover ---- */
   .dp-popover{
@@ -1342,77 +1350,119 @@ function getDeliverables(){
 // ---- Alerts (bell icon) ----
 // Two kinds, both derived purely from data already loaded — no new table, no new scouting-job
 // writes:
-// 1. "New hits" — deliverables that flipped to 'hit' since the last time the bell was opened.
-//    Grouped into one entry rather than one per video, because there's no stored "detected at"
-//    timestamp per video to split them by calendar day (only posted_at, which can be long before
-//    it actually crossed the requirement) — this is honestly "found since you last checked", not
-//    a strict daily digest. Tracked via a set of already-surfaced deliverable keys in
-//    localStorage (per-browser, not synced — same as CLOUD_MODE), not a timestamp, so it's exact
-//    regardless of how long between opens.
+// 1. "Hits" — one persisted entry per deliverable, created the first time it's noticed to have
+//    hit its requirement. Permanent once created (a hit is a fact that never un-happens) — the
+//    only way it leaves the list is the user pressing Clear notifications. No stored "detected at"
+//    timestamp per video exists (only posted_at, which can be long before it actually crossed the
+//    requirement), so ts is "first noticed by this browser", not the true hit moment.
 // 2. "Stale coverage" — still-'tracking' rows whose last_checked_at is more than ~1 daily-cron-
 //    cycle-plus-buffer old. The scouting job is supposed to touch every video in its window on
 //    every run; one that hasn't updated in 40+ hours either had a run fail, got cut short by the
 //    rate-limit guard, or fell outside the pagination page cap at high posting volume — any of
-//    which is worth a look. Self-resolving: the moment it's actually checked again, it drops off.
-function getSeenHitIds(){
-  try{ return new Set(JSON.parse(localStorage.getItem('rwr-alerts-seen-hit-ids') || '[]')); }
-  catch(e){ return new Set(); }
+//    which is worth a look. Unlike hits, this is a *live* condition, not a fact — the entry is
+//    removed the moment the row is actually checked again, regardless of read state; an old
+//    warning about a since-resolved problem isn't useful history to keep around.
+//
+// Both kinds live in one persisted log (localStorage, per-browser, not synced — same as
+// CLOUD_MODE) so a notification survives closing the panel instead of vanishing the instant it's
+// seen: it dims (read:true) the next time the panel opens, but stays visible until the user
+// explicitly clears it. This is what makes "N notifications, some grayed out, some not" possible.
+function getAlertsLog(){
+  try{ return JSON.parse(localStorage.getItem('rwr-alerts-log') || '[]'); }
+  catch(e){ return []; }
 }
-function markHitIdsSeen(idSet){
-  try{ localStorage.setItem('rwr-alerts-seen-hit-ids', JSON.stringify(Array.from(idSet))); }
-  catch(e){ /* localStorage unavailable — alerts just won't remember what's been seen; harmless */ }
+function saveAlertsLog(log){
+  try{ localStorage.setItem('rwr-alerts-log', JSON.stringify(log)); }
+  catch(e){ /* localStorage unavailable — alerts just won't persist; harmless, same graceful fallback as before */ }
 }
-function computeAlerts(){
+function markAllAlertsRead(){
+  const log = getAlertsLog();
+  let changed = false;
+  log.forEach(e => { if(!e.read){ e.read = true; changed = true; } });
+  if(changed) saveAlertsLog(log);
+}
+// Marks every current entry cleared+read rather than deleting them outright. A real delete would
+// work for stale entries (they're re-derived from a live "is it still stale" check, so losing the
+// record just means it can resurface if still true) but NOT for hits — those are re-derived from
+// "is this deliverable's status still 'hit'", which stays true forever, so an emptied array would
+// just get every hit rediscovered as brand-new and unread on the very next render. The cleared
+// flag is what syncAlertsLog checks (via byId, built from the full stored array) to know "already
+// notified about this, don't do it again" — permanently, for as long as the record exists.
+function clearAlertsLog(){
+  const log = getAlertsLog();
+  log.forEach(e => { e.cleared = true; e.read = true; });
+  saveAlertsLog(log);
+}
+// Same tiered schedule the scout jobs actually run on (added 2026-08-26, alongside tracking
+// windows extending up to 180 days — see isDueForCheck() in the scout-*.js files) — daily for
+// the first 30 days, weekly to day 90, monthly after. A video legitimately due weekly can go
+// 7 days between checks and monthly up to 30; flagging every one of those on the old flat
+// 40-hour rule would just be constant noise once a brief's window goes past 30 days.
+function expectedCheckIntervalDays(daysSincePosted){
+  if(daysSincePosted <= 30) return 1;
+  if(daysSincePosted <= 90) return 7;
+  return 30;
+}
+// Reconciles the persisted log against current data — adds newly-noticed hits/stale rows, drops
+// stale entries whose underlying row got checked again, then returns the (possibly unchanged)
+// log sorted newest first. Cheap to call on every render (renderAlertsBell already did the
+// equivalent full-rescan every render before this), and only actually writes to localStorage when
+// something changed.
+function syncAlertsLog(){
   if(!TRACKED_CONTENT_DATA) return [];
   const now = Date.now();
-  const dvs = getDeliverables();
-  const seenHitIds = getSeenHitIds();
-  const alerts = [];
+  const log = getAlertsLog();
+  const byId = new Map(log.map(e => [e.id, e]));
+  let changed = false;
 
-  const newHits = dvs.filter(dv => !dv.excluded && dv.status==='hit' && !seenHitIds.has(dv.key));
-  if(newHits.length){
-    const total = newHits.reduce((s,dv)=>s+dv.payAmount,0);
-    const names = [...new Set(newHits.map(dv=>dv.brandName))];
-    alerts.push({
-      id: 'new-hits', type:'hit', ts: now,
-      title: `${newHits.length} new video${newHits.length===1?'':'s'} hit ${newHits.length===1?'its':'their'} requirement`,
-      detail: `+${money(total)} earned · ${names.slice(0,3).join(', ')}${names.length>3?` +${names.length-3} more`:''}`,
-      // exactly one new hit → jump straight to that video; more than one → no single video to
-      // point at, so this instead takes you to Tracked Content (see the click handler)
-      videoId: newHits.length===1 ? newHits[0].rows[0].id : null,
-      navTarget: newHits.length>1 ? 'trackedContent' : null,
-    });
-  }
+  getDeliverables().forEach(dv => {
+    if(dv.excluded || dv.status !== 'hit') return;
+    const id = 'hit-' + dv.key;
+    if(byId.has(id)) return;
+    const entry = {
+      id, type:'hit', ts:now, read:false, cleared:false, videoId: dv.rows[0].id,
+      title: (dv.title || 'Untitled').slice(0,60),
+      detail: `+${money(dv.payAmount)} earned · ${dv.brandName}`,
+    };
+    log.push(entry); byId.set(id, entry); changed = true;
+  });
 
-  // Same tiered schedule the scout jobs actually run on (added 2026-08-26, alongside tracking
-  // windows extending up to 180 days — see isDueForCheck() in the scout-*.js files) — daily for
-  // the first 30 days, weekly to day 90, monthly after. A video legitimately due weekly can go
-  // 7 days between checks and monthly up to 30; flagging every one of those on the old flat
-  // 40-hour rule would just be constant noise once a brief's window goes past 30 days.
-  function expectedCheckIntervalDays(daysSincePosted){
-    if(daysSincePosted <= 30) return 1;
-    if(daysSincePosted <= 90) return 7;
-    return 30;
-  }
+  const currentStaleIds = new Set();
   TRACKED_CONTENT_DATA.forEach(r => {
     if(r.excluded || r.status!=='tracking' || !r.last_checked_at || !r.posted_at) return;
     const checkedAt = new Date(r.last_checked_at).getTime();
     const daysSincePosted = (now - new Date(r.posted_at).getTime()) / 86400000;
     const expectedDays = expectedCheckIntervalDays(daysSincePosted);
     if(now - checkedAt < (expectedDays + 1) * 86400000) return; // +1 day buffer for normal cron timing variance
+    const id = 'stale-' + r.id;
+    currentStaleIds.add(id);
+    if(byId.has(id)) return;
     const daysStale = Math.floor((now-checkedAt)/86400000);
-    alerts.push({
-      id: 'stale-'+r.id, type:'stale', ts: checkedAt, videoId: r.id,
+    const entry = {
+      id, type:'stale', ts:checkedAt, read:false, cleared:false, videoId: r.id,
       title: `Hasn't been checked in ${daysStale}d`,
-      detail: `${escapeHtml(r.brands?.name||'Unassigned')} · ${(r.platform||'').toUpperCase()} · ${escapeHtml((r.title||'Untitled').slice(0,50))}`,
-    });
+      detail: `${r.brands?.name||'Unassigned'} · ${(r.platform||'').toUpperCase()} · ${(r.title||'Untitled').slice(0,50)}`,
+    };
+    log.push(entry); byId.set(id, entry); changed = true;
   });
+  for(let i=log.length-1; i>=0; i--){
+    if(log[i].type==='stale' && !currentStaleIds.has(log[i].id)){ log.splice(i,1); changed = true; }
+  }
 
-  return alerts.sort((a,b)=>b.ts-a.ts).slice(0,30);
+  // No cap here on purpose — this runs on every render (see renderAlertsBell), and truncating
+  // would drop entries out of byId, which would then look "un-logged" on the very next sync and
+  // get re-added as unread, forever churning. Hit entries are a small, meaningful, permanent
+  // record (money earned) a user wouldn't want silently discarded anyway; Clear notifications is
+  // the one intended way this list ever shrinks.
+  log.sort((a,b) => b.ts - a.ts);
+  if(changed) saveAlertsLog(log);
+  return log;
 }
 // Frozen the moment the panel opens (see openAlertsPanel) so the list doesn't shift out from
-// under you mid-read as "seen" state updates — the bell's badge count, computed fresh from
-// computeAlerts() on every render, is what actually reflects live state.
+// under you mid-read as "read" state updates — the bell's badge count, computed fresh from
+// syncAlertsLog() on every render, is what actually reflects live state. Captured *before*
+// markAllAlertsRead runs, so anything brand-new still renders un-dimmed on this one opening —
+// it only shows up gray starting the *next* time the panel is opened.
 let ALERTS_SNAPSHOT = null;
 // The bell renders inside a narrow 220px sidebar — a CSS-anchored dropdown (position:absolute,
 // right:0) had nowhere near enough room to lay its 300px width out and clipped off the left edge
@@ -1423,11 +1473,8 @@ let ALERTS_SNAPSHOT = null;
 let ALERTS_ANCHOR_RECT = null;
 function openAlertsPanel(anchorEl){
   ALERTS_ANCHOR_RECT = anchorEl.getBoundingClientRect();
-  ALERTS_SNAPSHOT = computeAlerts();
-  const dvs = getDeliverables();
-  const seen = getSeenHitIds();
-  dvs.forEach(dv => { if(!dv.excluded && dv.status==='hit') seen.add(dv.key); });
-  markHitIdsSeen(seen);
+  ALERTS_SNAPSHOT = syncAlertsLog().filter(a => !a.cleared);
+  markAllAlertsRead();
   ALERTS_OPEN = true;
   render();
 }
@@ -1444,7 +1491,9 @@ function closeAlertsPanel(){
 // descendants in most browsers, so a fixed popover nested inside one gets trapped and clipped by
 // that ancestor's own bounds/scroll instead of floating freely over the real viewport.
 function renderAlertsBell(){
-  const count = computeAlerts().length;
+  // Badge is unread count only — a read (grayed, but not yet cleared) notification stays in the
+  // list but stops demanding attention, same as any other app's bell.
+  const count = syncAlertsLog().filter(a => !a.read && !a.cleared).length;
   return `
   <div class="alerts-bell-wrap">
     <button class="alerts-bell" data-alerts-bell type="button" aria-label="Alerts" title="Alerts">
@@ -1459,15 +1508,18 @@ function renderAlertsPanel(){
   const top = Math.max(8, Math.min(rect.bottom + 8, window.innerHeight - 120));
   const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
   return `<div class="alerts-popover" style="top:${top}px; left:${left}px;">
-    <div class="alerts-head">Alerts</div>
+    <div class="alerts-head">
+      <span>Alerts</span>
+      ${alerts.length ? `<button type="button" data-clear-alerts class="alerts-clear-btn">Clear notifications</button>` : ''}
+    </div>
     ${alerts.length===0 ? `<div class="empty" style="padding:20px 10px;">All caught up — nothing needs your attention.</div>` : `
     <div class="alerts-list">
       ${alerts.map(a => `
-        <div class="alert-item alert-${a.type}" ${a.videoId?`data-alert-goto-video="${a.videoId}"`:a.navTarget?`data-alert-nav="${a.navTarget}"`:''}>
+        <div class="alert-item alert-${a.type} ${a.read?'alert-read':''}" data-alert-goto-video="${a.videoId}">
           <div class="alert-icon">${a.type==='hit' ? '🎉' : '⚠️'}</div>
           <div class="alert-body">
             <div class="alert-title">${escapeHtml(a.title)}</div>
-            <div class="alert-detail">${a.detail}</div>
+            <div class="alert-detail">${escapeHtml(a.detail)}</div>
           </div>
         </div>`).join('')}
     </div>`}
@@ -2590,9 +2642,9 @@ function clampTrackedTitles(){
   });
 }
 // Finds which deliverable (possibly a merged group) a specific tracked_videos row id belongs to
-// — an alert only ever knows a single row's id (see computeAlerts' newHits/stale-coverage
-// entries), but Tracked Content's table renders one row per *deliverable*, keyed by dv.key
-// (group_id for a merged crosspost, the row's own id otherwise).
+// — an alert only ever knows a single row's id (see syncAlertsLog's hit/stale entries), but
+// Tracked Content's table renders one row per *deliverable*, keyed by dv.key (group_id for a
+// merged crosspost, the row's own id otherwise).
 function findDeliverableKeyForRowId(rowId){
   const dv = getDeliverables().find(d => d.rows.some(r => r.id === rowId));
   return dv ? dv.key : null;
@@ -4427,11 +4479,10 @@ function bindGlobalHandlers(){
     // so the click that just opened it doesn't immediately close it again
     document.querySelectorAll('.alerts-popover').forEach(pop => pop.addEventListener('click', e => e.stopPropagation()));
     setTimeout(() => document.addEventListener('click', () => { if(ALERTS_OPEN) closeAlertsPanel(); }, { once:true }), 0);
-    // Clicking an alert should actually take you somewhere, not just sit there as text. A
-    // single-video hit or a stale-coverage warning jumps to Tracked Content with that exact row
-    // scrolled into view and briefly flashed (not the edit modal — you're here to see *which*
-    // video, not to edit it), and a multi-video hit digest (nothing single to point at) goes to
-    // Tracked Content plain, same as before.
+    // Clicking an alert should actually take you somewhere, not just sit there as text — every
+    // entry (hit or stale) always points at one specific video now, so it jumps to Tracked
+    // Content with that exact row scrolled into view and briefly flashed (not the edit modal —
+    // you're here to see *which* video, not to edit it).
     document.querySelectorAll('[data-close-alerts]').forEach(el => el.addEventListener('click', closeAlertsPanel));
     document.querySelectorAll('[data-alert-goto-video]').forEach(el => el.addEventListener('click', () => {
       ALERTS_OPEN = false; ALERTS_SNAPSHOT = null; ALERTS_ANCHOR_RECT = null;
@@ -4441,9 +4492,13 @@ function bindGlobalHandlers(){
       HIGHLIGHT_DV_KEY = key;
       goToView('trackedContent');
     }));
-    document.querySelectorAll('[data-alert-nav]').forEach(el => el.addEventListener('click', () => {
-      ALERTS_OPEN = false; ALERTS_SNAPSHOT = null; ALERTS_ANCHOR_RECT = null;
-      goToView(el.dataset.alertNav);
+    // Wipes the whole notification log (both dimmed/read and, if any snuck in since the panel
+    // opened, unread) — the only way an entry ever leaves the list short of this.
+    document.querySelectorAll('[data-clear-alerts]').forEach(el => el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      clearAlertsLog();
+      ALERTS_SNAPSHOT = [];
+      render();
     }));
   }
 
