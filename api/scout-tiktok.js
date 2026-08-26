@@ -187,7 +187,11 @@ async function processOneVideo(video, brand, SUPABASE_URL, sbHeaders) {
     await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
       method: 'PATCH',
       headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned }),
+      // thumbnail_url included here too (not just at discovery) — TikTok's video list already
+      // returns cover_image_url on every single fetch regardless of status, so every video's
+      // thumbnail backfills itself the next time it's touched by a scouting run instead of
+      // staying permanently blank just because it existed before thumbnail capture was added.
+      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned, thumbnail_url: video.cover_image_url || null }),
     });
     return { id: video.id, action: 'updated', views: viewCount, status };
   }
@@ -198,7 +202,7 @@ async function processOneVideo(video, brand, SUPABASE_URL, sbHeaders) {
   await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
     method: 'PATCH',
     headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString() }),
+    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), thumbnail_url: video.cover_image_url || null }),
   });
   return { id: video.id, action: 'updated (views only)', views: viewCount, status: row.status };
 }

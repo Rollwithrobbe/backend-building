@@ -185,7 +185,12 @@ async function processOneMedia(media, brand, token, SUPABASE_URL, sbHeaders) {
     await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
       method: 'PATCH',
       headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned }),
+      // thumbnail_url included here too (not just at discovery) — Instagram's media list
+      // already returns it on every single fetch regardless of status, so there's no reason
+      // this row's banner should stay permanently blank just because it existed before
+      // thumbnail capture was added. Every video's thumbnail backfills itself the next time
+      // it's touched by a scouting run — no separate migration needed.
+      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned, thumbnail_url: media.thumbnail_url || media.media_url || null }),
     });
     return { id: media.id, action: 'updated', views: viewCount, status };
   }
@@ -197,7 +202,7 @@ async function processOneMedia(media, brand, token, SUPABASE_URL, sbHeaders) {
   await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
     method: 'PATCH',
     headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString() }),
+    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), thumbnail_url: media.thumbnail_url || media.media_url || null }),
   });
   return { id: media.id, action: 'updated (views only)', views: viewCount, status: row.status };
 }

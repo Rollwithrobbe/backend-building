@@ -189,7 +189,11 @@ async function processOneVideo(v, brand, SUPABASE_URL, sbHeaders) {
     await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
       method: 'PATCH',
       headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned }),
+      // thumbnail_url included here too (not just at discovery) — the stats call already
+      // returns snippet.thumbnails on every single fetch regardless of status, so every video's
+      // thumbnail backfills itself the next time it's touched by a scouting run instead of
+      // staying permanently blank just because it existed before thumbnail capture was added.
+      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned, thumbnail_url: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.default?.url || null }),
     });
     return { id: v.id, action: 'updated', views: viewCount, status };
   }
@@ -200,7 +204,7 @@ async function processOneVideo(v, brand, SUPABASE_URL, sbHeaders) {
   await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
     method: 'PATCH',
     headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString() }),
+    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), thumbnail_url: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.default?.url || null }),
   });
   return { id: v.id, action: 'updated (views only)', views: viewCount, status: row.status };
 }
