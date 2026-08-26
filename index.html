@@ -315,8 +315,11 @@
     background:var(--danger); color:#fff; font-size:9.5px; font-weight:700; line-height:16px; text-align:center;
     font-family:'IBM Plex Mono',monospace;
   }
+  /* position:fixed with top/left set inline (see renderAlertsPanel) — the bell lives inside a
+     220px sidebar, nowhere near wide enough to lay out a 300px CSS-anchored dropdown without it
+     clipping off the edge of the screen. Same fixed+clamped-to-viewport approach as .dp-popover. */
   .alerts-popover{
-    position:absolute; top:calc(100% + 8px); right:0; z-index:200; width:300px; max-height:70vh; overflow-y:auto;
+    position:fixed; z-index:200; width:300px; max-height:70vh; overflow-y:auto;
     background:rgba(28,27,35,0.92); backdrop-filter:blur(16px) saturate(150%); -webkit-backdrop-filter:blur(16px) saturate(150%);
     border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow-elevated);
   }
@@ -1381,7 +1384,15 @@ function computeAlerts(){
 // under you mid-read as "seen" state updates — the bell's badge count, computed fresh from
 // computeAlerts() on every render, is what actually reflects live state.
 let ALERTS_SNAPSHOT = null;
-function openAlertsPanel(){
+// The bell renders inside a narrow 220px sidebar — a CSS-anchored dropdown (position:absolute,
+// right:0) had nowhere near enough room to lay its 300px width out and clipped off the left edge
+// of the screen. Same fix as the date picker popover: capture the actual clicked bell's
+// on-screen rect at open time and render the popover position:fixed, with its coordinates
+// clamped to the viewport in renderAlertsPanel() — works regardless of which container it's
+// nested in or how narrow that container is.
+let ALERTS_ANCHOR_RECT = null;
+function openAlertsPanel(anchorEl){
+  ALERTS_ANCHOR_RECT = anchorEl.getBoundingClientRect();
   ALERTS_SNAPSHOT = computeAlerts();
   const dvs = getDeliverables();
   const seen = getSeenHitIds();
@@ -1393,6 +1404,7 @@ function openAlertsPanel(){
 function closeAlertsPanel(){
   ALERTS_OPEN = false;
   ALERTS_SNAPSHOT = null;
+  ALERTS_ANCHOR_RECT = null;
   render();
 }
 function renderAlertsBell(){
@@ -1402,12 +1414,16 @@ function renderAlertsBell(){
     <button class="alerts-bell" data-alerts-bell type="button" aria-label="Alerts" title="Alerts">
       🔔${count>0 ? `<span class="alerts-badge">${count>9?'9+':count}</span>` : ''}
     </button>
-    ${ALERTS_OPEN ? renderAlertsPanel() : ''}
-  </div>`;
+  </div>
+  ${ALERTS_OPEN && ALERTS_ANCHOR_RECT ? renderAlertsPanel() : ''}`;
 }
 function renderAlertsPanel(){
   const alerts = ALERTS_SNAPSHOT || [];
-  return `<div class="alerts-popover">
+  const rect = ALERTS_ANCHOR_RECT;
+  const width = 300;
+  const top = Math.max(8, Math.min(rect.bottom + 8, window.innerHeight - 120));
+  const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+  return `<div class="alerts-popover" style="top:${top}px; left:${left}px;">
     <div class="alerts-head">Alerts</div>
     ${alerts.length===0 ? `<div class="empty" style="padding:20px 10px;">All caught up — nothing needs your attention.</div>` : `
     <div class="alerts-list">
@@ -4300,7 +4316,7 @@ function bindGlobalHandlers(){
   // get a working click handler, so this binds every instance found instead.
   document.querySelectorAll('[data-alerts-bell]').forEach(el => el.addEventListener('click', (e) => {
     e.stopPropagation();
-    if(ALERTS_OPEN) closeAlertsPanel(); else openAlertsPanel();
+    if(ALERTS_OPEN) closeAlertsPanel(); else openAlertsPanel(el);
   }));
   if(ALERTS_OPEN){
     // same click-outside-closes pattern as the date picker popover above — deferred by one tick
