@@ -327,8 +327,8 @@
   .alerts-list{ display:flex; flex-direction:column; }
   .alert-item{ display:flex; gap:10px; padding:11px 14px; border-bottom:1px solid var(--border-soft); }
   .alert-item:last-child{ border-bottom:none; }
-  .alert-item[data-edit-tracked-video]{ cursor:pointer; transition:background 100ms ease-out; }
-  .alert-item[data-edit-tracked-video]:hover{ background:var(--surface); }
+  .alert-item[data-edit-tracked-video], .alert-item[data-alert-nav]{ cursor:pointer; transition:background 100ms ease-out; }
+  .alert-item[data-edit-tracked-video]:hover, .alert-item[data-alert-nav]:hover{ background:var(--surface); }
   .alert-icon{ font-size:15px; flex-shrink:0; line-height:1.4; }
   .alert-body{ min-width:0; }
   .alert-title{ font-size:12.5px; font-weight:600; color:var(--text); line-height:1.4; }
@@ -1362,6 +1362,10 @@ function computeAlerts(){
       id: 'new-hits', type:'hit', ts: now,
       title: `${newHits.length} new video${newHits.length===1?'':'s'} hit ${newHits.length===1?'its':'their'} requirement`,
       detail: `+${money(total)} earned · ${names.slice(0,3).join(', ')}${names.length>3?` +${names.length-3} more`:''}`,
+      // exactly one new hit → jump straight to that video; more than one → no single video to
+      // point at, so this instead takes you to Tracked Content (see the click handler)
+      videoId: newHits.length===1 ? newHits[0].rows[0].id : null,
+      navTarget: newHits.length>1 ? 'trackedContent' : null,
     });
   }
 
@@ -1407,6 +1411,12 @@ function closeAlertsPanel(){
   ALERTS_ANCHOR_RECT = null;
   render();
 }
+// Renders only the button — the popover itself is rendered separately, at the top level of
+// render()'s template (see the ALERTS_OPEN line there), specifically so it's never a *descendant*
+// of .sidebar/.mobile-topbar. Both of those have backdrop-filter, which — like the date picker
+// popover already had to work around — creates a new containing block for position:fixed
+// descendants in most browsers, so a fixed popover nested inside one gets trapped and clipped by
+// that ancestor's own bounds/scroll instead of floating freely over the real viewport.
 function renderAlertsBell(){
   const count = computeAlerts().length;
   return `
@@ -1414,8 +1424,7 @@ function renderAlertsBell(){
     <button class="alerts-bell" data-alerts-bell type="button" aria-label="Alerts" title="Alerts">
       🔔${count>0 ? `<span class="alerts-badge">${count>9?'9+':count}</span>` : ''}
     </button>
-  </div>
-  ${ALERTS_OPEN && ALERTS_ANCHOR_RECT ? renderAlertsPanel() : ''}`;
+  </div>`;
 }
 function renderAlertsPanel(){
   const alerts = ALERTS_SNAPSHOT || [];
@@ -1428,7 +1437,7 @@ function renderAlertsPanel(){
     ${alerts.length===0 ? `<div class="empty" style="padding:20px 10px;">All caught up — nothing needs your attention.</div>` : `
     <div class="alerts-list">
       ${alerts.map(a => `
-        <div class="alert-item alert-${a.type}" ${a.videoId?`data-edit-tracked-video="${a.videoId}"`:''}>
+        <div class="alert-item alert-${a.type}" ${a.videoId?`data-edit-tracked-video="${a.videoId}" data-close-alerts`:a.navTarget?`data-alert-nav="${a.navTarget}"`:''}>
           <div class="alert-icon">${a.type==='hit' ? '🎉' : '⚠️'}</div>
           <div class="alert-body">
             <div class="alert-title">${escapeHtml(a.title)}</div>
@@ -2170,6 +2179,7 @@ function render(){
       <div class="main">${renderView()}</div>
       ${renderModals()}
       ${renderAIDrawer()}
+      ${ALERTS_OPEN && ALERTS_ANCHOR_RECT ? renderAlertsPanel() : ''}
       ${DP ? renderDatePickerPopover() : ''}
       ${CONFIRM_STATE ? renderConfirm() : ''}
       ${TIMER_DONE_POPUP ? renderTimerDonePopup() : ''}
@@ -2454,20 +2464,34 @@ function clusterForCompare(brandName){
   });
   return clusters;
 }
+// Every brand's clusters at once, each tagged with which brand it came from — this is what
+// the Compare view shows by default (nothing picked in the brand dropdown), since "which
+// brands have unmerged crossposts worth checking" is exactly the thing you'd otherwise have to
+// click through every brand one at a time to discover. The dropdown narrows this down to one
+// brand; it was never required to see anything here to begin with.
+function clusterForCompareAll(){
+  if(!TRACKED_CONTENT_DATA) return [];
+  const names = [...new Set(
+    TRACKED_CONTENT_DATA.filter(r => !r.group_id && !r.excluded && r.posted_at).map(r => r.brands?.name || 'Unassigned (automated)')
+  )];
+  return names.flatMap(name => clusterForCompare(name).map(c => ({ ...c, brandName: name })));
+}
 function renderCompareView(brandName, searchQ){
-  if(!brandName){
-    return `<div class="table-wrap"><div class="empty">Pick a brand above to compare its platforms side by side.</div></div>`;
-  }
-  let clusters = clusterForCompare(brandName);
+  let clusters = brandName ? clusterForCompare(brandName).map(c => ({...c, brandName})) : clusterForCompareAll();
   if(searchQ) clusters = clusters.filter(c => c.rows.some(r => (r.title||'').toLowerCase().includes(searchQ.toLowerCase())));
   if(clusters.length===0){
-    return `<div class="table-wrap"><div class="empty">Nothing unmerged for ${escapeHtml(brandName)} right now — everything's already linked or there's no overlap yet.</div></div>`;
+    return `<div class="table-wrap"><div class="empty">${brandName ? `Nothing unmerged for ${escapeHtml(brandName)} right now — everything's already linked or there's no overlap yet.` : `Nothing unmerged right now, across any brand — everything's already linked or there's no overlap yet.`}</div></div>`;
   }
+  // only re-sorted (newest-first) for the all-brands view, which interleaves multiple brands'
+  // otherwise-independent cluster lists and needs a consistent global order to be scannable —
+  // the single-brand view's existing oldest-first order is untouched
+  if(!brandName) clusters = [...clusters].sort((a,b) => new Date(b.anchorTime) - new Date(a.anchorTime));
   const platforms = [...new Set(clusters.flatMap(c=>Object.keys(c.byPlatform)))].sort();
   return `<div class="table-wrap" style="overflow-x:auto;"><table>
-    <thead><tr><th>Posted</th>${platforms.map(p=>`<th>${p.toUpperCase()}</th>`).join('')}<th></th></tr></thead>
+    <thead><tr>${brandName?'':'<th>Brand</th>'}<th>Posted</th>${platforms.map(p=>`<th>${p.toUpperCase()}</th>`).join('')}<th></th></tr></thead>
     <tbody>
       ${clusters.map(c => `<tr>
+        ${brandName?'':`<td style="white-space:nowrap;">${escapeHtml(c.brandName)}</td>`}
         <td class="mono" style="white-space:nowrap;">${fmtDateTime(c.anchorTime)}</td>
         ${platforms.map(p => {
           const r = c.byPlatform[p];
@@ -2557,7 +2581,7 @@ function renderTrackedContent(){
   const isCompare = TC_VIEW_MODE === 'compare';
   const filterBar = `
     <div class="filter-bar">
-      <select id="tcBrand"><option value="">${isCompare ? 'Pick a brand…' : 'All brands'}</option>${brandNames.map(n=>`<option value="${escapeHtml(n)}" ${TC_FILTER.brand===n?'selected':''}>${escapeHtml(n)}</option>`).join('')}</select>
+      <select id="tcBrand"><option value="">All brands</option>${brandNames.map(n=>`<option value="${escapeHtml(n)}" ${TC_FILTER.brand===n?'selected':''}>${escapeHtml(n)}</option>`).join('')}</select>
       ${!isCompare ? `
       <select id="tcPlatform"><option value="">All platforms</option>${platformsPresent.map(p=>`<option value="${p}" ${TC_FILTER.platform===p?'selected':''}>${p.toUpperCase()}</option>`).join('')}</select>
       <select id="tcStatus">
@@ -4323,6 +4347,16 @@ function bindGlobalHandlers(){
     // so the click that just opened it doesn't immediately close it again
     document.querySelectorAll('.alerts-popover').forEach(pop => pop.addEventListener('click', e => e.stopPropagation()));
     setTimeout(() => document.addEventListener('click', () => { if(ALERTS_OPEN) closeAlertsPanel(); }, { once:true }), 0);
+    // Clicking an alert should actually take you somewhere, not just sit there as text — a
+    // single-video hit or a stale-coverage warning deep-links straight to that video (the
+    // [data-edit-tracked-video] open is handled by the existing global binding elsewhere; this
+    // just also closes the panel so it doesn't linger behind the modal), and a multi-video hit
+    // digest (nothing single to point at) goes to Tracked Content instead.
+    document.querySelectorAll('[data-close-alerts]').forEach(el => el.addEventListener('click', closeAlertsPanel));
+    document.querySelectorAll('[data-alert-nav]').forEach(el => el.addEventListener('click', () => {
+      ALERTS_OPEN = false; ALERTS_SNAPSHOT = null; ALERTS_ANCHOR_RECT = null;
+      goToView(el.dataset.alertNav);
+    }));
   }
 
   const cancel = document.getElementById('cancelModal');
