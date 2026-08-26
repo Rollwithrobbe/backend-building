@@ -43,12 +43,18 @@
        scanning surface (Tracked Content, Compare Platforms) where you need to tell TikTok from
        Instagram from YouTube at a glance across dozens of rows, so they need to actually
        pre-attentively separate instead of all reading as "muted brown-grey" */
+    /* tied to each platform's real brand hue (muted for the dark theme, not lifted straight
+       off their logos) instead of the previous set, which put Instagram and YouTube both in
+       the same muted orange-brown family — indistinguishable at a glance in exactly the
+       scanning context (Tracked Content, Compare) where telling them apart matters most.
+       TikTok → its cyan accent · Instagram → its pink/magenta · YouTube → its red · Facebook →
+       its blue. Four different hue families now, not two pairs that collide. */
     --tiktok: #4a8a94;
     --tiktok-bg: #172427;
-    --instagram: #b8654a;
-    --instagram-bg: #2a1e1a;
-    --youtube: #a8562f;
-    --youtube-bg: #271c14;
+    --instagram: #c1527a;
+    --instagram-bg: #2a1c22;
+    --youtube: #c1503f;
+    --youtube-bg: #2a1a16;
     --facebook: #4f7fb0;
     --facebook-bg: #1b232b;
     --radius: 10px;
@@ -282,7 +288,19 @@
   }
   .platform-block .pf input:hover{ border-color:var(--border-soft); }
   .platform-block .pf input:focus{ border-color:var(--accent-dim); outline:none; box-shadow:0 0 0 2px var(--accent-dim); }
-  .checkbox{ width:15px; height:15px; accent-color:var(--accent); }
+  /* accent-color alone left the *unchecked* box plain native white on iOS/mobile Safari — it
+     only reliably restyles the checked state on that platform, so a fully custom checkbox
+     (both states drawn by us) instead of relying on native rendering for either one. */
+  .checkbox{
+    appearance:none; -webkit-appearance:none; width:16px; height:16px; flex-shrink:0;
+    border:1.5px solid var(--border); border-radius:4px; background:var(--surface-2);
+    cursor:pointer; position:relative; transition:background 100ms ease-out, border-color 100ms ease-out;
+  }
+  .checkbox:checked{ background:var(--accent); border-color:var(--accent); }
+  .checkbox:checked::after{
+    content:''; position:absolute; left:4px; top:1px; width:4px; height:8px;
+    border:solid var(--accent-text); border-width:0 2px 2px 0; transform:rotate(45deg);
+  }
 
   /* ---- date picker popover ---- */
   .dp-popover{
@@ -2223,16 +2241,29 @@ async function loadAllBackendBrands(){
   if(MODAL_STATE.type==='brand') render();
 }
 
-// One platform's pill inside a merged deliverable's row — its own view count/requirement,
-// linking straight to that platform's actual video so a merge decision (or a later double-check)
-// can be visually confirmed rather than trusted blind.
-function platformPill(row){
-  const req = row.view_requirement_override != null ? Number(row.view_requirement_override) : (row.brands ? Number(row.brands.view_requirement) : null);
-  const label = `${(row.platform||'').toUpperCase()} ${(row.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`;
+// Platform tag and view count used to be one combined pill ("TIKTOK 986,543 / 300") — fine at
+// low view counts, but the label and the number fight for space and wrap awkwardly once a
+// video's into six or seven figures. Split into two: platformTag (just the platform, linking
+// straight to that platform's actual video so a merge decision or later double-check can be
+// visually confirmed rather than trusted blind) goes in the Platform(s) column, and
+// platformViewsLine (the number, colored to match its tag so it's obvious which platform it
+// belongs to even without re-reading the label) goes in the Views column, stacked in the same
+// row order so the two columns line up.
+function platformTag(row){
   const style = 'margin:2px 4px 2px 0; display:inline-block; text-decoration:none;';
+  const label = (row.platform||'').toUpperCase();
   return row.url
     ? `<a href="${row.url}" target="_blank" rel="noopener" class="tag tag-${row.platform}" style="${style}" title="${escapeHtml(row.title||'')}">${label}</a>`
     : `<span class="tag tag-${row.platform}" style="${style}">${label}</span>`;
+}
+function platformViewsLine(row){
+  const req = row.view_requirement_override != null ? Number(row.view_requirement_override) : (row.brands ? Number(row.brands.view_requirement) : null);
+  const label = `${(row.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`;
+  // Instagram's view_count already folds in Facebook plays when a reel is crossposted there (see
+  // scout-instagram.js) — surfaced here as a small aside rather than a separate row/platform,
+  // since it was never a separate video to begin with.
+  const fbNote = row.facebook_views_component ? `<div class="hint" style="font-size:9.5px; margin-top:1px;">incl. ${Number(row.facebook_views_component).toLocaleString()} via FB</div>` : '';
+  return `<div class="mono" style="font-size:12.5px; color:var(--${row.platform}); line-height:1.5;">${label}${fbNote}</div>`;
 }
 
 // Long hashtag-heavy captions blow up a row's height if shown in full by default — truncate to
@@ -2414,14 +2445,15 @@ function renderTrackedContent(){
       <tbody>
         ${deliverables.map(dv => {
           const rep = dv.rows[0];
-          const req = rep.view_requirement_override != null ? Number(rep.view_requirement_override) : (dv.brand ? Number(dv.brand.view_requirement) : null);
+          const allIds = dv.rows.map(r=>r.id);
+          const allSelected = allIds.every(id => MERGE_SELECTED.has(id));
           return `<tr ${dv.excluded?'style="opacity:.5;"':''}>
-            <td>${!dv.grouped ? `<input type="checkbox" class="checkbox" data-merge-check="${rep.id}" ${MERGE_SELECTED.has(rep.id)?'checked':''} />` : ''}</td>
+            <td><input type="checkbox" class="checkbox" data-merge-check-ids="${allIds.join(',')}" ${allSelected?'checked':''} title="${dv.grouped ? 'Select this already-merged deliverable to add another platform to it' : 'Select to merge with another platform'}" /></td>
             <td>${dv.thumbnail ? `<img src="${dv.thumbnail}" alt="" style="width:40px; height:40px; object-fit:cover; border-radius:6px; display:block;" />` : `<div style="width:40px; height:40px; border-radius:6px; background:var(--surface);"></div>`}</td>
             <td>${dv.brand ? escapeHtml(dv.brand.name) : '<span style="color:var(--text-faint)">—</span>'}</td>
-            <td>${dv.grouped ? dv.rows.map(platformPill).join('') : `<span class="tag tag-${rep.platform}">${(rep.platform||'').toUpperCase()}</span>`}</td>
+            <td>${dv.rows.map(platformTag).join('')}</td>
             <td style="max-width:260px;">${renderTitleCell(dv)}</td>
-            <td class="mono">${dv.grouped ? '<span style="color:var(--text-faint)">see platforms</span>' : `${(rep.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`}</td>
+            <td>${dv.rows.map(platformViewsLine).join('')}</td>
             <td>${dv.excluded ? '<span class="tag tag-neutral">Excluded</span>' : dv.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : dv.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : dv.status==='missing' ? '<span class="tag tag-danger" title="No longer showing up on the platform — deleted, archived, or made private before it hit its requirement">Missing</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
             <td class="mono">${dv.status==='hit' && !dv.excluded ? money(dv.payAmount) : `<span style="color:var(--text-faint)">${money(dv.payAmount)}${dv.excluded?'':' pending'}</span>`}</td>
             <td class="mono">${dv.postedAt ? fmtDate(dv.postedAt.slice(0,10)) : '—'}</td>
@@ -3955,9 +3987,13 @@ function bindGlobalHandlers(){
   document.querySelectorAll('[data-del-payment]').forEach(el => el.addEventListener('click', () => { DATA.payments = DATA.payments.filter(p=>p.id!==el.dataset.delPayment); saveData(); render(); }));
   document.querySelectorAll('[data-edit-task]').forEach(el => el.addEventListener('click', () => openModal('task', el.dataset.editTask)));
   document.querySelectorAll('[data-edit-tracked-video]').forEach(el => el.addEventListener('click', () => openModal('trackedVideo', el.dataset.editTrackedVideo)));
-  document.querySelectorAll('[data-merge-check]').forEach(el => el.addEventListener('change', () => {
-    const id = el.dataset.mergeCheck;
-    if(el.checked) MERGE_SELECTED.add(id); else MERGE_SELECTED.delete(id);
+  // Checking an already-merged deliverable's box selects every row already in that group as one
+  // unit (they're already inseparably one piece of content) — this is what lets you tick an
+  // existing merged pair plus a new standalone row and extend the group to a 3rd platform,
+  // instead of only ever being able to merge from scratch.
+  document.querySelectorAll('[data-merge-check-ids]').forEach(el => el.addEventListener('change', () => {
+    const ids = el.dataset.mergeCheckIds.split(',');
+    if(el.checked) ids.forEach(id => MERGE_SELECTED.add(id)); else ids.forEach(id => MERGE_SELECTED.delete(id));
     render();
   }));
   const openMergeReview = document.getElementById('openMergeReview');
@@ -4471,7 +4507,14 @@ function bindGlobalHandlers(){
   const confirmMerge = document.getElementById('confirmMerge');
   if(confirmMerge) confirmMerge.addEventListener('click', async () => {
     const rowIds = MODAL_STATE.draft.rowIds;
-    const groupId = newUuid();
+    // Reuse an existing group_id if the selection includes an already-merged deliverable — this
+    // is what actually happens when you "add a 3rd platform" to an existing merge: the new
+    // platform's row adopts the existing group rather than everyone getting a fresh id. If rows
+    // from two different existing groups both got selected, this is still well-defined — it
+    // collapses both into one, which is a real, valid operation (combine two merged deliverables
+    // into one), not an error case.
+    const existingGroupId = TRACKED_CONTENT_DATA.filter(r => rowIds.includes(r.id)).map(r => r.group_id).find(Boolean);
+    const groupId = existingGroupId || newUuid();
     confirmMerge.disabled = true; confirmMerge.textContent = 'Merging…';
     try{
       const res = await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=in.(${rowIds.map(id=>`"${id}"`).join(',')})`, {

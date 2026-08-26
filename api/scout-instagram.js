@@ -118,10 +118,11 @@ async function scoutBrandAccount(brand, SUPABASE_URL, sbHeaders) {
 // can be run concurrently across reels instead of one at a time (see mapConcurrent above it).
 async function processOneMedia(media, brand, token, SUPABASE_URL, sbHeaders) {
   const debug = [];
-  const viewCount = await fetchViews(media.id, token, debug);
-  if (viewCount === null) {
+  const views = await fetchViews(media.id, token, debug);
+  if (views === null) {
     return { id: media.id, action: 'skipped', reason: 'could not read view count', debug: debug[0] };
   }
+  const { total: viewCount, facebookComponent } = views;
 
   const existingRes = await fetch(
     `${SUPABASE_URL}/rest/v1/tracked_videos?platform=eq.instagram&external_video_id=eq.${media.id}&select=*`,
@@ -154,6 +155,9 @@ async function processOneMedia(media, brand, token, SUPABASE_URL, sbHeaders) {
         // reels don't always return thumbnail_url reliably — media_url is the fallback,
         // itself a working still image for that case
         thumbnail_url: media.thumbnail_url || media.media_url || null,
+        // null unless this reel is crossposted to Facebook — see fetchViews. Not a separate
+        // platform/row, just a small "incl. X via FB" aside on this same Instagram row.
+        facebook_views_component: facebookComponent,
       }),
     });
     return { id: media.id, action: 'discovered', views: viewCount, status: alreadyHit ? 'hit' : 'tracking' };
@@ -190,7 +194,7 @@ async function processOneMedia(media, brand, token, SUPABASE_URL, sbHeaders) {
       // this row's banner should stay permanently blank just because it existed before
       // thumbnail capture was added. Every video's thumbnail backfills itself the next time
       // it's touched by a scouting run — no separate migration needed.
-      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned, thumbnail_url: media.thumbnail_url || media.media_url || null }),
+      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned, thumbnail_url: media.thumbnail_url || media.media_url || null, facebook_views_component: facebookComponent }),
     });
     return { id: media.id, action: 'updated', views: viewCount, status };
   }
@@ -202,7 +206,7 @@ async function processOneMedia(media, brand, token, SUPABASE_URL, sbHeaders) {
   await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
     method: 'PATCH',
     headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), thumbnail_url: media.thumbnail_url || media.media_url || null }),
+    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), thumbnail_url: media.thumbnail_url || media.media_url || null, facebook_views_component: facebookComponent }),
   });
   return { id: media.id, action: 'updated (views only)', views: viewCount, status: row.status };
 }
@@ -276,6 +280,12 @@ async function fetchMetric(mediaId, metric, token) {
   );
   return res.json();
 }
+// Returns { total, facebookComponent } — total is native + facebook_views combined (what
+// actually gets compared against the brand's requirement and stored as view_count, matching
+// what Instagram's own app shows on the post). facebookComponent is that Facebook portion kept
+// separately too (null when the reel isn't crossposted), purely so the UI can show "incl. X via
+// Facebook" as a small aside on the Instagram row — it was never a separate video, so it never
+// gets a separate platform tag or its own merge target, just this annotation.
 async function fetchViews(mediaId, token, debug) {
   // 'views' is the metric that actually succeeds in practice (plays/video_views are legacy
   // fallbacks for older API versions) and facebook_views is independent of it either way, so
@@ -302,5 +312,6 @@ async function fetchViews(mediaId, token, debug) {
     return null;
   }
   const fbValue = fbData?.data?.[0]?.values?.[0]?.value;
-  return native + (typeof fbValue === 'number' ? fbValue : 0);
+  const facebookComponent = typeof fbValue === 'number' ? fbValue : null;
+  return { total: native + (facebookComponent || 0), facebookComponent };
 }
