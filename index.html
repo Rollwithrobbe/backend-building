@@ -302,6 +302,36 @@
     border:solid var(--accent-text); border-width:0 2px 2px 0; transform:rotate(45deg);
   }
 
+  /* ---- alerts bell ---- */
+  .alerts-bell-wrap{ position:relative; flex-shrink:0; }
+  .alerts-bell{
+    position:relative; width:32px; height:32px; flex-shrink:0; display:flex; align-items:center; justify-content:center;
+    background:transparent; border:1px solid var(--border); border-radius:var(--radius-sm); cursor:pointer;
+    font-size:14px; transition:background 100ms ease-out, border-color 150ms ease;
+  }
+  .alerts-bell:hover{ background:var(--surface); border-color:var(--accent-dim); }
+  .alerts-badge{
+    position:absolute; top:-5px; right:-5px; min-width:16px; height:16px; padding:0 3px; border-radius:8px;
+    background:var(--danger); color:#fff; font-size:9.5px; font-weight:700; line-height:16px; text-align:center;
+    font-family:'IBM Plex Mono',monospace;
+  }
+  .alerts-popover{
+    position:absolute; top:calc(100% + 8px); right:0; z-index:200; width:300px; max-height:70vh; overflow-y:auto;
+    background:rgba(28,27,35,0.92); backdrop-filter:blur(16px) saturate(150%); -webkit-backdrop-filter:blur(16px) saturate(150%);
+    border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow-elevated);
+  }
+  .alerts-head{ padding:10px 14px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim); border-bottom:1px solid var(--border-soft); }
+  .alerts-list{ display:flex; flex-direction:column; }
+  .alert-item{ display:flex; gap:10px; padding:11px 14px; border-bottom:1px solid var(--border-soft); }
+  .alert-item:last-child{ border-bottom:none; }
+  .alert-item[data-edit-tracked-video]{ cursor:pointer; transition:background 100ms ease-out; }
+  .alert-item[data-edit-tracked-video]:hover{ background:var(--surface); }
+  .alert-icon{ font-size:15px; flex-shrink:0; line-height:1.4; }
+  .alert-body{ min-width:0; }
+  .alert-title{ font-size:12.5px; font-weight:600; color:var(--text); line-height:1.4; }
+  .alert-detail{ font-size:11.5px; color:var(--text-dim); margin-top:2px; line-height:1.4; overflow:hidden; text-overflow:ellipsis; }
+  .alert-hit .alert-title{ color:var(--fx-green); }
+
   /* ---- date picker popover ---- */
   .dp-popover{
     position:fixed; z-index:200; background:rgba(28,27,35,0.88);
@@ -447,7 +477,7 @@
       background:rgba(28,27,35,0.92); backdrop-filter:blur(24px) saturate(160%); -webkit-backdrop-filter:blur(24px) saturate(160%);
       border-bottom:1px solid var(--border-soft); padding:12px 16px;
     }
-    .mobile-topbar h1{ font-size:15px; font-weight:800; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .mobile-topbar h1{ font-size:15px; font-weight:800; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
     .mobile-topbar h1 span{ color:var(--accent); }
 
     .sidebar{
@@ -721,6 +751,11 @@ let DATA = { brands: [], content: [], payments: [], tasks: [] };
 let SAVE_TIMER = null;
 let VIEW = 'dashboard';
 let MOBILE_NAV_OPEN = false; // mobile only — the hamburger button toggles the sidebar into a slide-in drawer instead of the old horizontal-scroll nav row
+let ALERTS_OPEN = false;
+// When "newly hit" alerts stop showing again — per-browser, not synced, same as CLOUD_MODE.
+// null (never opened the bell before) defaults to a 7-day lookback so the very first open isn't
+// an empty screen, but also isn't your entire lifetime of hits either.
+let ALERTS_LAST_SEEN = (typeof localStorage !== 'undefined' && localStorage.getItem('rwr-alerts-last-seen')) || null;
 let AI_LOG = [];
 let AI_SETTINGS = { apiKey:'', model:'claude-sonnet-5' };
 let AI_SETTINGS_OPEN = false;
@@ -1286,6 +1321,108 @@ function getDeliverables(){
   });
   return deliverables;
 }
+// ---- Alerts (bell icon) ----
+// Two kinds, both derived purely from data already loaded — no new table, no new scouting-job
+// writes:
+// 1. "New hits" — deliverables that flipped to 'hit' since the last time the bell was opened.
+//    Grouped into one entry rather than one per video, because there's no stored "detected at"
+//    timestamp per video to split them by calendar day (only posted_at, which can be long before
+//    it actually crossed the requirement) — this is honestly "found since you last checked", not
+//    a strict daily digest. Tracked via a set of already-surfaced deliverable keys in
+//    localStorage (per-browser, not synced — same as CLOUD_MODE), not a timestamp, so it's exact
+//    regardless of how long between opens.
+// 2. "Stale coverage" — still-'tracking' rows whose last_checked_at is more than ~1 daily-cron-
+//    cycle-plus-buffer old. The scouting job is supposed to touch every video in its window on
+//    every run; one that hasn't updated in 40+ hours either had a run fail, got cut short by the
+//    rate-limit guard, or fell outside the pagination page cap at high posting volume — any of
+//    which is worth a look. Self-resolving: the moment it's actually checked again, it drops off.
+function getSeenHitIds(){
+  try{ return new Set(JSON.parse(localStorage.getItem('rwr-alerts-seen-hit-ids') || '[]')); }
+  catch(e){ return new Set(); }
+}
+function markHitIdsSeen(idSet){
+  try{ localStorage.setItem('rwr-alerts-seen-hit-ids', JSON.stringify(Array.from(idSet))); }
+  catch(e){ /* localStorage unavailable — alerts just won't remember what's been seen; harmless */ }
+}
+function computeAlerts(){
+  if(!TRACKED_CONTENT_DATA) return [];
+  const now = Date.now();
+  const dvs = getDeliverables();
+  const seenHitIds = getSeenHitIds();
+  const alerts = [];
+
+  const newHits = dvs.filter(dv => !dv.excluded && dv.status==='hit' && !seenHitIds.has(dv.key));
+  if(newHits.length){
+    const total = newHits.reduce((s,dv)=>s+dv.payAmount,0);
+    const names = [...new Set(newHits.map(dv=>dv.brandName))];
+    alerts.push({
+      id: 'new-hits', type:'hit', ts: now,
+      title: `${newHits.length} new video${newHits.length===1?'':'s'} hit ${newHits.length===1?'its':'their'} requirement`,
+      detail: `+${money(total)} earned · ${names.slice(0,3).join(', ')}${names.length>3?` +${names.length-3} more`:''}`,
+    });
+  }
+
+  const staleThreshold = now - 40*3600000;
+  TRACKED_CONTENT_DATA.forEach(r => {
+    if(r.excluded || r.status!=='tracking' || !r.last_checked_at) return;
+    const checkedAt = new Date(r.last_checked_at).getTime();
+    if(checkedAt >= staleThreshold) return;
+    const daysStale = Math.floor((now-checkedAt)/86400000);
+    alerts.push({
+      id: 'stale-'+r.id, type:'stale', ts: checkedAt, videoId: r.id,
+      title: `Hasn't been checked in ${daysStale}d`,
+      detail: `${escapeHtml(r.brands?.name||'Unassigned')} · ${(r.platform||'').toUpperCase()} · ${escapeHtml((r.title||'Untitled').slice(0,50))}`,
+    });
+  });
+
+  return alerts.sort((a,b)=>b.ts-a.ts).slice(0,30);
+}
+// Frozen the moment the panel opens (see openAlertsPanel) so the list doesn't shift out from
+// under you mid-read as "seen" state updates — the bell's badge count, computed fresh from
+// computeAlerts() on every render, is what actually reflects live state.
+let ALERTS_SNAPSHOT = null;
+function openAlertsPanel(){
+  ALERTS_SNAPSHOT = computeAlerts();
+  const dvs = getDeliverables();
+  const seen = getSeenHitIds();
+  dvs.forEach(dv => { if(!dv.excluded && dv.status==='hit') seen.add(dv.key); });
+  markHitIdsSeen(seen);
+  ALERTS_OPEN = true;
+  render();
+}
+function closeAlertsPanel(){
+  ALERTS_OPEN = false;
+  ALERTS_SNAPSHOT = null;
+  render();
+}
+function renderAlertsBell(){
+  const count = computeAlerts().length;
+  return `
+  <div class="alerts-bell-wrap">
+    <button class="alerts-bell" data-alerts-bell type="button" aria-label="Alerts" title="Alerts">
+      🔔${count>0 ? `<span class="alerts-badge">${count>9?'9+':count}</span>` : ''}
+    </button>
+    ${ALERTS_OPEN ? renderAlertsPanel() : ''}
+  </div>`;
+}
+function renderAlertsPanel(){
+  const alerts = ALERTS_SNAPSHOT || [];
+  return `<div class="alerts-popover">
+    <div class="alerts-head">Alerts</div>
+    ${alerts.length===0 ? `<div class="empty" style="padding:20px 10px;">All caught up — nothing needs your attention.</div>` : `
+    <div class="alerts-list">
+      ${alerts.map(a => `
+        <div class="alert-item alert-${a.type}" ${a.videoId?`data-edit-tracked-video="${a.videoId}"`:''}>
+          <div class="alert-icon">${a.type==='hit' ? '🎉' : '⚠️'}</div>
+          <div class="alert-body">
+            <div class="alert-title">${escapeHtml(a.title)}</div>
+            <div class="alert-detail">${a.detail}</div>
+          </div>
+        </div>`).join('')}
+    </div>`}
+  </div>`;
+}
+
 function trackedContentTotals(){
   // automated-pipeline earnings (Supabase, fed by the scouting job) — folded into the main
   // dashboard totals below. Returns zeros until the first load resolves (see loadTrackedContent),
@@ -2085,16 +2222,20 @@ function renderMobileTopbar(){
     <button class="mobile-nav-toggle ${MOBILE_NAV_OPEN?'open':''}" id="mobileNavToggle" type="button" aria-label="${MOBILE_NAV_OPEN?'Close menu':'Open menu'}" aria-expanded="${MOBILE_NAV_OPEN}">
       <span></span><span></span><span></span>
     </button>
-    <h1>${escapeHtml(label)}</h1>
+    <h1 style="flex:1;">${escapeHtml(label)}</h1>
+    ${renderAlertsBell()}
   </div>`;
 }
 
 function renderSidebar(){
   return `
   <div class="sidebar ${MOBILE_NAV_OPEN ? 'mobile-open' : ''}">
-    <div class="brand-mark">
-      <div class="eyebrow">UGC Ops</div>
-      <h1>Roll with <span>Robbe</span></h1>
+    <div class="brand-mark" style="display:flex; align-items:flex-start; justify-content:space-between; gap:8px;">
+      <div>
+        <div class="eyebrow">UGC Ops</div>
+        <h1>Roll with <span>Robbe</span></h1>
+      </div>
+      ${renderAlertsBell()}
     </div>
     <div class="nav">
       ${NAV_ITEMS.map(n => `<button class="nav-btn ${VIEW===n.id?'active':''}" data-nav="${n.id}"><span class="dot"></span>${n.label}</button>`).join('')}
@@ -4152,6 +4293,20 @@ function bindGlobalHandlers(){
     const done = document.querySelector('[data-dp-close]');
     if(done) done.addEventListener('click', () => { DP=null; render(); });
     setTimeout(() => document.addEventListener('click', () => { if(DP){ DP=null; render(); } }, { once:true }), 0);
+  }
+
+  // Rendered in both the desktop sidebar and the mobile topbar (only one is visually present at
+  // a time, but both exist in the DOM) — a plain id would collide and only one copy would ever
+  // get a working click handler, so this binds every instance found instead.
+  document.querySelectorAll('[data-alerts-bell]').forEach(el => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if(ALERTS_OPEN) closeAlertsPanel(); else openAlertsPanel();
+  }));
+  if(ALERTS_OPEN){
+    // same click-outside-closes pattern as the date picker popover above — deferred by one tick
+    // so the click that just opened it doesn't immediately close it again
+    document.querySelectorAll('.alerts-popover').forEach(pop => pop.addEventListener('click', e => e.stopPropagation()));
+    setTimeout(() => document.addEventListener('click', () => { if(ALERTS_OPEN) closeAlertsPanel(); }, { once:true }), 0);
   }
 
   const cancel = document.getElementById('cancelModal');
