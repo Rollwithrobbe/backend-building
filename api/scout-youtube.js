@@ -187,7 +187,10 @@ async function processOneVideo(v, brand, SUPABASE_URL, sbHeaders) {
   const existing = await existingRes.json();
 
   if (existing.length === 0) {
-    const eligibleUntil = new Date(Date.now() + brand.eligibility_window_days * 86400000).toISOString();
+    // Anchor the window to when the video was actually POSTED, not to whenever this scout run
+    // happens to discover it — see scout-instagram.js's identical comment for the full rationale.
+    const anchor = v.snippet?.publishedAt ? new Date(v.snippet.publishedAt).getTime() : Date.now();
+    const eligibleUntil = new Date(anchor + brand.eligibility_window_days * 86400000).toISOString();
     const alreadyHit = viewCount >= brand.view_requirement;
     await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos`, {
       method: 'POST',

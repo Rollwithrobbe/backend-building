@@ -106,6 +106,13 @@
   .brand-mark h1{ font-size:17px; font-weight:800; color:var(--text); }
   .brand-mark h1 span{ color:var(--accent); }
 
+  /* Desktop-only alerts bell — top-right of the whole dashboard, not tucked into the sidebar.
+     Rendered as a top-level sibling in render() (not nested in .sidebar), so it's immune to the
+     backdrop-filter containing-block clipping issue by construction, same reasoning as the
+     popover itself. Hidden under the mobile breakpoint, where .mobile-topbar carries its own
+     bell instance instead (see the max-width:820px block below). */
+  .alerts-bell-desktop{ position:fixed; top:12px; right:24px; z-index:95; }
+
   .nav{ display:flex; flex-direction:column; gap:2px; }
   .nav-btn{
     display:flex; align-items:center; gap:9px; padding:9px 10px; border-radius:var(--radius-sm);
@@ -499,6 +506,7 @@
        width:100% styling class. File System Access API isn't available on mobile browsers
        anyway, so these three never have anything to do here. */
     #btnEnableBackup, #btnBackupStatus, #btnBackupReconnect{ display:none; }
+    .alerts-bell-desktop{ display:none; }
     .main{ padding:18px; }
     .ai-drawer{ width:100vw; max-width:100vw; }
     .two-col{ grid-template-columns:1fr; }
@@ -1956,7 +1964,7 @@ function brandComparisonRows(){
     rows.push({
       id: b.id, name: b.name, color: b.color,
       count: items.length, hitRate: hitCount/items.length*100, views30d, viewsAllTime,
-      avgPayout: hitCount ? bt.contentEarned/hitCount : 0, earned: bt.totalEarned,
+      avgPayout: hitCount ? bt.contentEarned/hitCount : 0, earned: bt.totalEarned, outstanding: bt.outstanding,
     });
   });
   let fallbackIdx = 0;
@@ -1973,7 +1981,9 @@ function brandComparisonRows(){
     rows.push({
       id: null, name, color: BRAND_TABLE_FALLBACK_COLORS[fallbackIdx++ % BRAND_TABLE_FALLBACK_COLORS.length],
       count: items.length, hitRate: hitCount/items.length*100, views30d, viewsAllTime,
-      avgPayout: hitCount ? earned/hitCount : 0, earned,
+      // no local brand link means no local payment record can exist for this name, so nothing's
+      // ever been marked "received" — outstanding is simply everything earned so far.
+      avgPayout: hitCount ? earned/hitCount : 0, earned, outstanding: earned,
     });
   });
   return rows;
@@ -1999,6 +2009,7 @@ function renderBrandComparisonTable(){
       ${col('viewsAllTime','Views — all time','right','Total raw views across every platform, ever. Only as complete as tracking allows — a video that aged out of its brief\'s window stops being checked, so this is its view count as of its last real check, not necessarily its true current count.')}
       ${col('avgPayout','Avg payout','right','All time, per video that actually hit')}
       ${col('earned','Earned (all time)','right')}
+      ${col('outstanding','Outstanding','right','Earned but not yet marked received in Payments')}
     </tr></thead>
     <tbody>
       ${sorted.map(r => `<tr class="row-click" data-open-brand-breakdown data-brand-id="${r.id||''}" data-brand-name="${escapeHtml(r.name)}" data-brand-color="${r.color}">
@@ -2014,6 +2025,7 @@ function renderBrandComparisonTable(){
         <td class="mono" style="text-align:right;">${Math.round(r.viewsAllTime).toLocaleString()}</td>
         <td class="mono" style="text-align:right;">${money(r.avgPayout)}</td>
         <td class="mono fx-green" style="text-align:right;">${money(r.earned)}</td>
+        <td class="mono ${r.outstanding>0?'fx-red':''}" style="text-align:right;">${money(r.outstanding)}</td>
       </tr>`).join('')}
     </tbody>
   </table></div>`;
@@ -2206,6 +2218,7 @@ function render(){
       ${renderSidebar()}
       <div class="mobile-nav-scrim ${MOBILE_NAV_OPEN ? 'visible' : ''}" id="mobileNavScrim"></div>
       <div class="main">${renderView()}</div>
+      <div class="alerts-bell-desktop">${renderAlertsBell()}</div>
       ${renderModals()}
       ${renderAIDrawer()}
       ${ALERTS_OPEN && ALERTS_ANCHOR_RECT ? renderAlertsPanel() : ''}
@@ -2285,12 +2298,9 @@ function renderMobileTopbar(){
 function renderSidebar(){
   return `
   <div class="sidebar ${MOBILE_NAV_OPEN ? 'mobile-open' : ''}">
-    <div class="brand-mark" style="display:flex; align-items:flex-start; justify-content:space-between; gap:8px;">
-      <div>
-        <div class="eyebrow">UGC Ops</div>
-        <h1>Roll with <span>Robbe</span></h1>
-      </div>
-      ${renderAlertsBell()}
+    <div class="brand-mark">
+      <div class="eyebrow">UGC Ops</div>
+      <h1>Roll with <span>Robbe</span></h1>
     </div>
     <div class="nav">
       ${NAV_ITEMS.map(n => `<button class="nav-btn ${VIEW===n.id?'active':''}" data-nav="${n.id}"><span class="dot"></span>${n.label}</button>`).join('')}

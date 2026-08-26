@@ -211,7 +211,13 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
   const existing = await existingRes.json();
 
   if (existing.length === 0) {
-    const eligibleUntil = new Date(Date.now() + brand.eligibility_window_days * 86400000).toISOString();
+    // Anchor the window to when the video was actually POSTED, not to whenever this scout run
+    // happens to discover it — a backlogged video (brand just connected, pagination catching up)
+    // would otherwise get a silent bonus window measured from discovery day instead of the date
+    // the brief actually promises, and rank as artificially "safe" in Expiring Soon. Fall back to
+    // discovery time only if the platform genuinely gave us no timestamp.
+    const anchor = media.timestamp ? new Date(media.timestamp).getTime() : Date.now();
+    const eligibleUntil = new Date(anchor + brand.eligibility_window_days * 86400000).toISOString();
     const alreadyHit = viewCount >= brand.view_requirement;
     await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos`, {
       method: 'POST',
