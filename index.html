@@ -1369,11 +1369,22 @@ function computeAlerts(){
     });
   }
 
-  const staleThreshold = now - 40*3600000;
+  // Same tiered schedule the scout jobs actually run on (added 2026-08-26, alongside tracking
+  // windows extending up to 180 days — see isDueForCheck() in the scout-*.js files) — daily for
+  // the first 30 days, weekly to day 90, monthly after. A video legitimately due weekly can go
+  // 7 days between checks and monthly up to 30; flagging every one of those on the old flat
+  // 40-hour rule would just be constant noise once a brief's window goes past 30 days.
+  function expectedCheckIntervalDays(daysSincePosted){
+    if(daysSincePosted <= 30) return 1;
+    if(daysSincePosted <= 90) return 7;
+    return 30;
+  }
   TRACKED_CONTENT_DATA.forEach(r => {
-    if(r.excluded || r.status!=='tracking' || !r.last_checked_at) return;
+    if(r.excluded || r.status!=='tracking' || !r.last_checked_at || !r.posted_at) return;
     const checkedAt = new Date(r.last_checked_at).getTime();
-    if(checkedAt >= staleThreshold) return;
+    const daysSincePosted = (now - new Date(r.posted_at).getTime()) / 86400000;
+    const expectedDays = expectedCheckIntervalDays(daysSincePosted);
+    if(now - checkedAt < (expectedDays + 1) * 86400000) return; // +1 day buffer for normal cron timing variance
     const daysStale = Math.floor((now-checkedAt)/86400000);
     alerts.push({
       id: 'stale-'+r.id, type:'stale', ts: checkedAt, videoId: r.id,
@@ -1915,6 +1926,20 @@ function sumViews30d(predicate){
     return s + (Number(r.view_count)||0);
   }, 0);
 }
+// Same total-raw-views-across-every-platform logic as sumViews30d, just with no cutoff — a
+// lifetime figure rather than a rolling window. Note this is only as complete as tracking
+// windows allow: a video that already aged out of its brief's window stops being checked (see
+// isDueForCheck() in the scout jobs) and its view_count is whatever it was on its last real
+// check, not its true current count — same honest limitation the whole tracking system already
+// has, just visible here at the brand-total level too.
+function sumViewsAllTime(predicate){
+  if(!TRACKED_CONTENT_DATA) return 0;
+  return TRACKED_CONTENT_DATA.reduce((s,r) => {
+    if(r.excluded) return s;
+    if(!predicate(r)) return s;
+    return s + (Number(r.view_count)||0);
+  }, 0);
+}
 function brandComparisonRows(){
   if(!TRACKED_CONTENT_DATA) return [];
   const rows = [];
@@ -1927,9 +1952,10 @@ function brandComparisonRows(){
     const bt = brandTotals(b.id);
     const hitCount = items.filter(dv=>dv.status==='hit').length;
     const views30d = sumViews30d(r => r.brand_id === b.supabaseBrandId);
+    const viewsAllTime = sumViewsAllTime(r => r.brand_id === b.supabaseBrandId);
     rows.push({
       id: b.id, name: b.name, color: b.color,
-      count: items.length, hitRate: hitCount/items.length*100, views30d,
+      count: items.length, hitRate: hitCount/items.length*100, views30d, viewsAllTime,
       avgPayout: hitCount ? bt.contentEarned/hitCount : 0, earned: bt.totalEarned,
     });
   });
@@ -1943,9 +1969,10 @@ function brandComparisonRows(){
     const hitCount = items.filter(dv=>dv.status==='hit').length;
     const earned = items.filter(dv=>dv.status==='hit').reduce((s,dv)=>s+dv.payAmount,0);
     const views30d = sumViews30d(r => r.brands?.name === name);
+    const viewsAllTime = sumViewsAllTime(r => r.brands?.name === name);
     rows.push({
       id: null, name, color: BRAND_TABLE_FALLBACK_COLORS[fallbackIdx++ % BRAND_TABLE_FALLBACK_COLORS.length],
-      count: items.length, hitRate: hitCount/items.length*100, views30d,
+      count: items.length, hitRate: hitCount/items.length*100, views30d, viewsAllTime,
       avgPayout: hitCount ? earned/hitCount : 0, earned,
     });
   });
@@ -1969,6 +1996,7 @@ function renderBrandComparisonTable(){
       ${col('count','Deliverables','right','All time')}
       ${col('hitRate','Hit rate','right','All time')}
       ${col('views30d','Views — 30d','right','Total raw views across every platform posted in the last 30 days (not per-video — a crosspost counts on each platform it reached). Rolls forward live: a video drops out of this the day it turns 31 days old.')}
+      ${col('viewsAllTime','Views — all time','right','Total raw views across every platform, ever. Only as complete as tracking allows — a video that aged out of its brief\'s window stops being checked, so this is its view count as of its last real check, not necessarily its true current count.')}
       ${col('avgPayout','Avg payout','right','All time, per video that actually hit')}
       ${col('earned','Earned (all time)','right')}
     </tr></thead>
@@ -1983,6 +2011,7 @@ function renderBrandComparisonTable(){
           </div>
         </td>
         <td class="mono" style="text-align:right;">${Math.round(r.views30d).toLocaleString()}</td>
+        <td class="mono" style="text-align:right;">${Math.round(r.viewsAllTime).toLocaleString()}</td>
         <td class="mono" style="text-align:right;">${money(r.avgPayout)}</td>
         <td class="mono fx-green" style="text-align:right;">${money(r.earned)}</td>
       </tr>`).join('')}
@@ -3841,7 +3870,13 @@ function renderBrandConnections(d){
     <div class="field-row">
       <div class="field"><label>Base pay per video ($)</label><input type="number" id="f-rateBasePay" value="${c.base_pay ?? 0}" step="0.01" /></div>
       <div class="field"><label>Minimum view requirement</label><input type="number" id="f-rateViewReq" value="${c.view_requirement || ''}" placeholder="0 = no minimum" min="0" /></div>
-      <div class="field"><label>Window (days)</label><input type="number" id="f-rateWindow" value="${c.eligibility_window_days || ''}" placeholder="e.g. 30" min="0" /></div>
+      <div class="field"><label>Tracking window</label>
+        <select id="f-rateWindow">
+          ${[7,14,30,60,90,180].map(d => `<option value="${d}" ${(Number(c.eligibility_window_days)===d || (!c.eligibility_window_days && d===30))?'selected':''}>${d} days${d===180?' (6 months)':''}</option>`).join('')}
+          ${c.eligibility_window_days && ![7,14,30,60,90,180].includes(Number(c.eligibility_window_days)) ? `<option value="${c.eligibility_window_days}" selected>${c.eligibility_window_days} days (current)</option>` : ''}
+        </select>
+        <div class="hint" style="margin-top:4px;">How long a video keeps getting checked after posting. Past day 30 it's not checked daily anymore — weekly to day 90, then monthly — so a longer window costs very little extra.</div>
+      </div>
     </div>
     <div style="margin-bottom:12px;">
       <button class="btn btn-ghost btn-sm" id="saveTrackingRate" type="button">Save rate</button>
@@ -3939,13 +3974,11 @@ function renderBrandModal(){
         <div class="field"><label>Minimum view requirement (optional — applied to every auto-created video)</label><input type="number" id="f-briefViewReq" value="${brief && brief.viewRequirement ? brief.viewRequirement : ''}" placeholder="e.g. 1000 — leave blank for none" /></div>
         <div class="field"><label>Requirement window</label>
           <select id="f-briefViewReqWindow">
-            <option value="" ${!brief || !brief.viewRequirementWindowDays ? 'selected' : ''}>No expiry — track forever</option>
-            <option value="7" ${brief && brief.viewRequirementWindowDays==7 ? 'selected' : ''}>7 days</option>
-            <option value="30" ${brief && brief.viewRequirementWindowDays==30 ? 'selected' : ''}>30 days</option>
+            ${[7,14,30,60,90,180].map(d => `<option value="${d}" ${(brief && Number(brief.viewRequirementWindowDays)===d) || (!brief?.viewRequirementWindowDays && d===30) ? 'selected' : ''}>${d} days${d===180?' (6 months)':''}</option>`).join('')}
           </select>
         </div>
       </div>
-      <div class="hint" style="margin-top:-6px;">If a video misses its view requirement within this window, it drops out of Pending instead of sitting there forever — leave it on "No expiry" for brands that pay out regardless of how long it takes.</div>
+      <div class="hint" style="margin-top:-6px;">If a video misses its view requirement within this window, it drops out of Pending instead of sitting there forever. This is the same window the automated scouting job actually tracks against — up to day 30 it's checked daily, then weekly to day 90, then monthly out to 180, so a longer window costs very little extra. (There's no true "track forever" anymore — even a brand that pays out no matter how long it takes still needs a cutoff on our end, 180 days max.)</div>
       <div class="field"><label>Daily warm-up tasks (off by default — turn these on when you're ready)</label>
         <div style="display:flex; gap:16px; padding:4px 0;">
           <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:500; color:var(--text);"><input type="checkbox" class="checkbox" id="f-briefWarmupTT" ${brief && brief.warmupTikTok ? 'checked' : ''}/> TikTok — 10 min</label>
@@ -4422,7 +4455,7 @@ function bindGlobalHandlers(){
         basePay: Number(document.getElementById('f-briefBasePay').value)||0,
         cpmBonus: Number(document.getElementById('f-briefCpmBonus').value)||0,
         viewRequirement: Number(document.getElementById('f-briefViewReq').value) || null,
-        viewRequirementWindowDays: Number(document.getElementById('f-briefViewReqWindow').value) || null,
+        viewRequirementWindowDays: Number(document.getElementById('f-briefViewReqWindow').value) || 30,
         trialStartDate: kind==='trial' ? ((d.brief && d.brief.trialStartDate) || todayISO()) : null,
         trialDurationDays: kind==='trial' ? (Number(document.getElementById('f-briefTrialDays').value) || 30) : null,
         platforms,
@@ -4537,7 +4570,7 @@ function bindGlobalHandlers(){
     const d = MODAL_STATE.draft;
     const basePay = Number(document.getElementById('f-rateBasePay').value) || 0;
     const viewReq = Number(document.getElementById('f-rateViewReq').value) || 0;
-    const windowDays = Number(document.getElementById('f-rateWindow').value) || 0;
+    const windowDays = Number(document.getElementById('f-rateWindow').value) || 30;
     saveTrackingRate.disabled = true; saveTrackingRate.textContent = 'Saving…';
     try{
       await fetch(`${SUPABASE_URL}/rest/v1/brands?id=eq.${encodeURIComponent(d.supabaseBrandId)}`, {

@@ -102,7 +102,9 @@ async function scoutBrandChannel(brand, callGuard, YT_KEY, SUPABASE_URL, sbHeade
   const cutoff = Date.now() - Math.max(Number(brand.eligibility_window_days) || 30, 30) * 86400000;
   let videoIds = [];
   let pageToken = '';
-  for (let page = 0; page < 5 && !callGuard.stop; page++) {
+  // Raised from 5 to 10 pages (2026-08-26) — see scout-instagram.js's identical comment for the
+  // full reasoning.
+  for (let page = 0; page < 10 && !callGuard.stop; page++) {
     tickCallGuard(callGuard);
     const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${uploadsPlaylistId}&maxResults=50&key=${YT_KEY}${pageToken ? `&pageToken=${pageToken}` : ''}`;
     const plRes = await fetch(url);
@@ -159,8 +161,24 @@ async function scoutBrandChannel(brand, callGuard, YT_KEY, SUPABASE_URL, sbHeade
 // Everything one video needs, start to finish — either inserts it (first time seen) or patches
 // its existing row. Pulled out of the loop above so it can run concurrently across videos
 // instead of one at a time (see mapConcurrent below it).
+// Tiered check frequency (added 2026-08-26, for tracking windows that now go up to 180 days) —
+// see the identical function in scout-instagram.js for the full rationale. Duplicated here
+// rather than shared since each scout job is a standalone serverless function, same pattern as
+// mapConcurrent/flagMissingVideos already being duplicated across all three.
+function isDueForCheck(daysSincePosted){
+  if (daysSincePosted <= 30) return true;
+  if (daysSincePosted <= 90) return Math.floor(daysSincePosted - 30) % 7 === 0;
+  return Math.floor(daysSincePosted - 90) % 30 === 0;
+}
+
 async function processOneVideo(v, brand, SUPABASE_URL, sbHeaders) {
   const viewCount = parseInt(v.statistics?.viewCount || '0', 10);
+  if (v.snippet?.publishedAt) {
+    const daysSincePosted = (Date.now() - new Date(v.snippet.publishedAt).getTime()) / 86400000;
+    if (!isDueForCheck(daysSincePosted)) {
+      return { id: v.id, action: 'skipped (not due yet)', daysSincePosted: Math.floor(daysSincePosted) };
+    }
+  }
 
   const existingRes = await fetch(
     `${SUPABASE_URL}/rest/v1/tracked_videos?platform=eq.youtube&external_video_id=eq.${v.id}&select=*`,

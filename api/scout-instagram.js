@@ -110,7 +110,14 @@ async function scoutBrandAccount(brand, guard, SUPABASE_URL, sbHeaders) {
     `https://graph.instagram.com/me/media` +
     `?fields=id,caption,timestamp,permalink,media_type,media_product_type,thumbnail_url,media_url` +
     `&limit=50&access_token=${encodeURIComponent(token)}`;
-  for (let page = 0; page < 5 && nextUrl && !guard.stop; page++) {
+  // Raised from 5 to 10 pages (2026-08-26, alongside tracking windows extending up to 180 days)
+  // — the tiered check frequency reduces how often an OLD video gets re-checked, but this loop
+  // is just building the candidate list, so it still needs to see far enough back to know that
+  // old video exists at all. 10 pages × 50 covers 500 media at any posting pace; a single brand
+  // sustaining far beyond ~2-3/day for the full 180 days would still eventually outrun this and
+  // need a bigger change (e.g. paginating across multiple runs) — not a real concern at today's
+  // actual pace, worth revisiting if that changes.
+  for (let page = 0; page < 10 && nextUrl && !guard.stop; page++) {
     const mediaRes = await igFetch(nextUrl, guard);
     const mediaData = await mediaRes.json();
     if (mediaData.error) {
@@ -158,12 +165,37 @@ async function scoutBrandAccount(brand, guard, SUPABASE_URL, sbHeaders) {
   return { checked: results.length, results, flaggedMissing: missingCount, usagePeakPct: guard.pct, stoppedEarly: guard.stop };
 }
 
+// Tiered check frequency (added 2026-08-26, for tracking windows that now go up to 180 days) —
+// daily for the first 30 days, weekly from day 31-90, monthly from day 91 onward. Anchored to
+// each tier's own start (day 30, day 90) rather than day 0, so a video's very first day in a new
+// tier is always itself a check — nothing waits a full cycle before its first reduced-frequency
+// check. Purely a function of how old the video is vs now, no stored state needed — videos
+// posted on different days naturally land their weekly/monthly checks on different calendar
+// days without any random/hash bookkeeping to make that happen. A window shorter than a tier
+// boundary (e.g. eligibility_window_days=30) never actually reaches the reduced tiers in
+// practice, since the video ages out of the fetch entirely at 30 days regardless.
+function isDueForCheck(daysSincePosted){
+  if (daysSincePosted <= 30) return true;
+  if (daysSincePosted <= 90) return Math.floor(daysSincePosted - 30) % 7 === 0;
+  return Math.floor(daysSincePosted - 90) % 30 === 0;
+}
+
 // Everything one reel needs, start to finish — reads its view count, then either inserts it
 // (first time seen) or patches its existing row. Pulled out of scoutBrandAccount's loop so it
 // can be run concurrently across reels instead of one at a time (see mapConcurrent above it).
 async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeaders) {
   if (guard.stop) {
     return { id: media.id, action: 'skipped', reason: 'rate guard tripped — see run-level usagePeakPct/stoppedEarly' };
+  }
+  if (media.timestamp) {
+    const daysSincePosted = (Date.now() - new Date(media.timestamp).getTime()) / 86400000;
+    if (!isDueForCheck(daysSincePosted)) {
+      // not due yet under the tiered schedule — skip before even touching Supabase or Meta's
+      // API for this one. Still counted in the caller's seenIds (built from the raw fetched
+      // list, not from these results), so flagMissingVideos() never mistakes "not due" for
+      // "vanished" — this is a real skip, not a sign anything's wrong.
+      return { id: media.id, action: 'skipped (not due yet)', daysSincePosted: Math.floor(daysSincePosted) };
+    }
   }
   const debug = [];
   const views = await fetchViews(media.id, token, guard, debug);

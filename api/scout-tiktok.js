@@ -103,7 +103,9 @@ async function scoutBrandAccount(brand, callGuard, CLIENT_KEY, CLIENT_SECRET, SU
   const cutoff = Date.now() - Math.max(Number(brand.eligibility_window_days) || 30, 30) * 86400000;
   const videos = [];
   let cursor = null;
-  for (let page = 0; page < 5 && !callGuard.stop; page++) {
+  // Raised from 5 to 10 pages (2026-08-26) — see scout-instagram.js's identical comment for the
+  // full reasoning.
+  for (let page = 0; page < 10 && !callGuard.stop; page++) {
     const body = { max_count: 20 };
     if (cursor) body.cursor = cursor;
     tickCallGuard(callGuard);
@@ -159,10 +161,26 @@ async function scoutBrandAccount(brand, callGuard, CLIENT_KEY, CLIENT_SECRET, SU
 // Everything one video needs, start to finish — either inserts it (first time seen) or patches
 // its existing row. Pulled out of scoutBrandAccount's loop so it can run concurrently across
 // videos instead of one at a time (see mapConcurrent below it).
+// Tiered check frequency (added 2026-08-26, for tracking windows that now go up to 180 days) —
+// see the identical function in scout-instagram.js for the full rationale. Duplicated here
+// rather than shared since each scout job is a standalone serverless function, same pattern as
+// mapConcurrent/flagMissingVideos already being duplicated across all three.
+function isDueForCheck(daysSincePosted){
+  if (daysSincePosted <= 30) return true;
+  if (daysSincePosted <= 90) return Math.floor(daysSincePosted - 30) % 7 === 0;
+  return Math.floor(daysSincePosted - 90) % 30 === 0;
+}
+
 async function processOneVideo(video, brand, SUPABASE_URL, sbHeaders) {
   const viewCount = video.view_count;
   if (typeof viewCount !== 'number') {
     return { id: video.id, action: 'skipped', reason: 'no view count returned' };
+  }
+  if (video.create_time) {
+    const daysSincePosted = (Date.now() - video.create_time * 1000) / 86400000;
+    if (!isDueForCheck(daysSincePosted)) {
+      return { id: video.id, action: 'skipped (not due yet)', daysSincePosted: Math.floor(daysSincePosted) };
+    }
   }
 
   const existingRes = await fetch(
