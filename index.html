@@ -212,6 +212,12 @@
   tr.row-click:hover td{ background:var(--surface-2); }
   tr.row-click:active td{ background:var(--border-soft); }
 
+  /* Brief landing flash for a row jumped to from an alert (see applyRowHighlight) — fades from
+     the accent color back to nothing so the row that was actually meant is unambiguous even in
+     a long table, without needing a persistent marker left behind. */
+  @keyframes rowFlash{ 0%{ background:rgba(201,161,90,0.32); } 100%{ background:transparent; } }
+  tr.row-flash td{ animation:rowFlash 2.1s ease-out; }
+
   .tag{ display:inline-flex; align-items:center; gap:5px; padding:3px 8px; border-radius:5px; font-size:11px; font-weight:600; white-space:nowrap; }
   .tag-tiktok{ background:var(--tiktok-bg); color:var(--tiktok); }
   .tag-instagram{ background:var(--instagram-bg); color:var(--instagram); }
@@ -334,8 +340,8 @@
   .alerts-list{ display:flex; flex-direction:column; }
   .alert-item{ display:flex; gap:10px; padding:11px 14px; border-bottom:1px solid var(--border-soft); }
   .alert-item:last-child{ border-bottom:none; }
-  .alert-item[data-edit-tracked-video], .alert-item[data-alert-nav]{ cursor:pointer; transition:background 100ms ease-out; }
-  .alert-item[data-edit-tracked-video]:hover, .alert-item[data-alert-nav]:hover{ background:var(--surface); }
+  .alert-item[data-alert-goto-video], .alert-item[data-alert-nav]{ cursor:pointer; transition:background 100ms ease-out; }
+  .alert-item[data-alert-goto-video]:hover, .alert-item[data-alert-nav]:hover{ background:var(--surface); }
   .alert-icon{ font-size:15px; flex-shrink:0; line-height:1.4; }
   .alert-body{ min-width:0; }
   .alert-title{ font-size:12.5px; font-weight:600; color:var(--text); line-height:1.4; }
@@ -526,6 +532,7 @@
     .overlay-enter{ animation:overlayFadeIn 120ms ease both; }
     .modal-enter{ animation:overlayFadeIn 120ms ease both; transform:none; }
     .timer-done-modal{ animation:none; }
+    tr.row-flash td{ animation:none; background:rgba(201,161,90,0.32); }
   }
 </style>
 </head>
@@ -1456,7 +1463,7 @@ function renderAlertsPanel(){
     ${alerts.length===0 ? `<div class="empty" style="padding:20px 10px;">All caught up — nothing needs your attention.</div>` : `
     <div class="alerts-list">
       ${alerts.map(a => `
-        <div class="alert-item alert-${a.type}" ${a.videoId?`data-edit-tracked-video="${a.videoId}" data-close-alerts`:a.navTarget?`data-alert-nav="${a.navTarget}"`:''}>
+        <div class="alert-item alert-${a.type}" ${a.videoId?`data-alert-goto-video="${a.videoId}"`:a.navTarget?`data-alert-nav="${a.navTarget}"`:''}>
           <div class="alert-icon">${a.type==='hit' ? '🎉' : '⚠️'}</div>
           <div class="alert-body">
             <div class="alert-title">${escapeHtml(a.title)}</div>
@@ -2228,6 +2235,7 @@ function render(){
     `;
     bindGlobalHandlers();
     if(VIEW==='trackedContent' && TC_VIEW_MODE==='table') clampTrackedTitles();
+    if(VIEW==='trackedContent' && TC_VIEW_MODE==='table' && HIGHLIGHT_DV_KEY) applyRowHighlight();
   }catch(err){
     // if any part of the render throws, the DOM update above never happens and the UI silently
     // shows stale data with no indication anything went wrong — surface it instead so it's debuggable
@@ -2364,6 +2372,10 @@ let VIEW_SNAPSHOTS_DATA = null;
 let MERGE_SELECTED = new Set();
 let TC_FILTER = { brand:'', platform:'', status:'', q:'' };
 let TC_VIEW_MODE = 'table'; // 'table' | 'compare' — see renderCompareView()
+// Deliverable key to scroll-to-and-flash the next time Tracked Content's table renders — set by
+// an alert's "go to this video" click (see [data-alert-goto-video] below), consumed once by
+// applyRowHighlight() so it only flashes on the landing render, not every render after.
+let HIGHLIGHT_DV_KEY = null;
 // deliverable keys (group_id or row id) whose long caption/title is currently shown in full —
 // everything else stays truncated so a hashtag-heavy caption doesn't blow up the row height
 let TC_EXPANDED = new Set();
@@ -2577,6 +2589,31 @@ function clampTrackedTitles(){
     }
   });
 }
+// Finds which deliverable (possibly a merged group) a specific tracked_videos row id belongs to
+// — an alert only ever knows a single row's id (see computeAlerts' newHits/stale-coverage
+// entries), but Tracked Content's table renders one row per *deliverable*, keyed by dv.key
+// (group_id for a merged crosspost, the row's own id otherwise).
+function findDeliverableKeyForRowId(rowId){
+  const dv = getDeliverables().find(d => d.rows.some(r => r.id === rowId));
+  return dv ? dv.key : null;
+}
+// Scrolls the deliverable flagged by HIGHLIGHT_DV_KEY into view and briefly flashes it, then
+// forgets the key so it only plays once on the landing render — not on every render after (e.g.
+// sorting the table, or a later automatic refresh). Mutates the DOM directly rather than going
+// through render() again for the same reason the mobile nav drawer does: a class added post-paint
+// can actually transition, where anything baked into innerHTML on the render that creates the
+// node cannot.
+function applyRowHighlight(){
+  const key = HIGHLIGHT_DV_KEY;
+  HIGHLIGHT_DV_KEY = null;
+  const row = document.querySelector(`tr[data-dv-key="${CSS.escape(String(key))}"]`);
+  if(!row) return;
+  row.scrollIntoView({ block:'center', behavior:'smooth' });
+  requestAnimationFrame(() => {
+    row.classList.add('row-flash');
+    setTimeout(() => row.classList.remove('row-flash'), 2200);
+  });
+}
 
 function renderTrackedContent(){
   const head = `
@@ -2662,7 +2699,7 @@ function renderTrackedContent(){
           const rep = dv.rows[0];
           const allIds = dv.rows.map(r=>r.id);
           const allSelected = allIds.every(id => MERGE_SELECTED.has(id));
-          return `<tr ${dv.excluded?'style="opacity:.5;"':''}>
+          return `<tr data-dv-key="${escapeHtml(String(dv.key))}" ${dv.excluded?'style="opacity:.5;"':''}>
             <td><input type="checkbox" class="checkbox" data-merge-check-ids="${allIds.join(',')}" ${allSelected?'checked':''} title="${dv.grouped ? 'Select this already-merged deliverable to add another platform to it' : 'Select to merge with another platform'}" /></td>
             <td>${dv.thumbnail ? `<img src="${dv.thumbnail}" alt="" style="width:40px; height:40px; object-fit:cover; border-radius:6px; display:block;" />` : `<div style="width:40px; height:40px; border-radius:6px; background:var(--surface);"></div>`}</td>
             <td>${dv.brand ? escapeHtml(dv.brand.name) : '<span style="color:var(--text-faint)">—</span>'}</td>
@@ -4390,12 +4427,20 @@ function bindGlobalHandlers(){
     // so the click that just opened it doesn't immediately close it again
     document.querySelectorAll('.alerts-popover').forEach(pop => pop.addEventListener('click', e => e.stopPropagation()));
     setTimeout(() => document.addEventListener('click', () => { if(ALERTS_OPEN) closeAlertsPanel(); }, { once:true }), 0);
-    // Clicking an alert should actually take you somewhere, not just sit there as text — a
-    // single-video hit or a stale-coverage warning deep-links straight to that video (the
-    // [data-edit-tracked-video] open is handled by the existing global binding elsewhere; this
-    // just also closes the panel so it doesn't linger behind the modal), and a multi-video hit
-    // digest (nothing single to point at) goes to Tracked Content instead.
+    // Clicking an alert should actually take you somewhere, not just sit there as text. A
+    // single-video hit or a stale-coverage warning jumps to Tracked Content with that exact row
+    // scrolled into view and briefly flashed (not the edit modal — you're here to see *which*
+    // video, not to edit it), and a multi-video hit digest (nothing single to point at) goes to
+    // Tracked Content plain, same as before.
     document.querySelectorAll('[data-close-alerts]').forEach(el => el.addEventListener('click', closeAlertsPanel));
+    document.querySelectorAll('[data-alert-goto-video]').forEach(el => el.addEventListener('click', () => {
+      ALERTS_OPEN = false; ALERTS_SNAPSHOT = null; ALERTS_ANCHOR_RECT = null;
+      const key = findDeliverableKeyForRowId(el.dataset.alertGotoVideo);
+      TC_FILTER = { brand:'', platform:'', status:'', q:'' };
+      TC_VIEW_MODE = 'table';
+      HIGHLIGHT_DV_KEY = key;
+      goToView('trackedContent');
+    }));
     document.querySelectorAll('[data-alert-nav]').forEach(el => el.addEventListener('click', () => {
       ALERTS_OPEN = false; ALERTS_SNAPSHOT = null; ALERTS_ANCHOR_RECT = null;
       goToView(el.dataset.alertNav);
