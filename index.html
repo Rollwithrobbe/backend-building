@@ -1252,12 +1252,18 @@ function getDeliverables(){
     // earliest of the group's post times — when this piece of content first went out, before
     // it was crossposted elsewhere (matches clusterForCompare's anchor convention)
     const postedAt = rows.map(r=>r.posted_at).filter(Boolean).sort()[0] || null;
+    // Prefer the representative row's own thumbnail (keeps today's behavior in the normal case),
+    // but fall back to any other platform in the group that has one. Without this, a merged
+    // deliverable went completely blank whenever rep happened to be the one platform currently
+    // missing its thumbnail (e.g. Instagram mid-API-block) — even though TikTok or YouTube's
+    // thumbnail for the same piece of content was sitting right there in the same group.
+    const thumbnail = rep.thumbnail_url || rows.map(r=>r.thumbnail_url).find(Boolean) || null;
     deliverables.push({
       key: gid, rows, grouped: true,
       brand: rep.brands, brandName: rep.brands?.name || 'Unassigned (automated)',
       excluded: allExcluded, status,
       payAmount: tcAmount(rep), earnedAt: hitRow ? hitRow.posted_at : null,
-      postedAt, title: rep.title, thumbnail: rep.thumbnail_url,
+      postedAt, title: rep.title, thumbnail,
     });
   });
   return deliverables;
