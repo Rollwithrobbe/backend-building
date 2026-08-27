@@ -4,8 +4,20 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Roll with Robbe — Ops V4</title>
+<script>
+  // Applied synchronously, before the stylesheet below ever paints — reading this after first
+  // paint (e.g. from the main app script further down) would show a flash of the default
+  // (Midnight Gold) theme before flipping to whatever's actually saved. 'midnight' itself needs
+  // no attribute at all — it's what :root already defines with nothing overriding it.
+  (function(){
+    try{
+      var t = localStorage.getItem('rwr-theme');
+      if(t && t !== 'midnight') document.documentElement.setAttribute('data-theme', t);
+    }catch(e){ /* localStorage unavailable — just stays on the default theme, harmless */ }
+  })();
+</script>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Archivo+Expanded:wght@600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Archivo+Expanded:wght@600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap');
 
   :root{
     --bg: #16151c;
@@ -70,7 +82,68 @@
     /* mobile nav drawer slides in from the LEFT edge, so its cast falls rightward onto the
        page it's covering — mirror of --shadow-elevated-left */
     --shadow-elevated-right: 0 0 0 1px rgba(0,0,0,.3), 2px 0 6px rgba(0,0,0,.2), 16px 0 40px rgba(0,0,0,.35);
+    /* the RGB triplet behind every frosted-glass surface (sidebar, modals, popovers, mobile
+       topbar) — split out from a flat rgba() so a theme can swap the base tone (dark charcoal vs
+       white) while keeping each surface's own hand-tuned alpha/blur untouched. See THEME_KEY. */
+    --glass-rgb: 28,27,35;
   }
+
+  /* ---- Theme: Riptide ----
+     Second selectable theme (see THEME_KEY / renderSettings' Theme tab) — white base, Storm
+     Green for ink, Vivid Cyan as the single accent, built from the exact swatch brief: white
+     dominant, the other two colors doing the work across tabs/cards/charts. Semantic colors
+     (danger/good/warn/etc.) are re-deepened for contrast on white rather than reused verbatim —
+     the dark theme's versions are calibrated to pop against near-black, which reads as washed-out
+     on a white surface. Platform brand colors keep the same hue family, just deepened the same
+     way, so TikTok/Instagram/YouTube/Facebook stay identifiable switching between themes.
+     Headings switch to Space Grotesk here (see the @import above) — body/mono stay Inter/IBM Plex
+     Mono, both already neutral enough to carry either theme without their own override. */
+  [data-theme="riptide"]{
+    --bg: #ffffff;
+    --bg-raised: #f5f9fa;
+    --surface: #eaf1f2;
+    --surface-2: #dce7e9;
+    --border: #c7d6d9;
+    --border-soft: #dce7e9;
+    --text: #0f282f;
+    --text-dim: #4a6169;
+    --text-faint: #8ca3a8;
+    --accent: #02eff0;
+    --accent-dim: #7ff2f2;
+    --accent-text: #0f282f;
+    --danger: #c1443d;
+    --danger-bg: #fbeae9;
+    --good: #2f8f5b;
+    --good-bg: #e7f5ec;
+    --warn: #b07a1f;
+    --warn-bg: #fbf1df;
+    --low: #3e76a8;
+    --low-bg: #e7f0f7;
+    --purple: #7c5fa6;
+    --purple-bg: #f0ebf7;
+    --orange: #b06a2e;
+    --orange-bg: #faeee2;
+    --teal: #2e8e82;
+    --teal-bg: #e5f4f2;
+    --accent-bg: #e0fcfc;
+    --fx-green-bg: #e7f5ec;
+    --fx-green: #2f8f5b;
+    --fx-red: #c1443d;
+    --tiktok: #2f7a85;
+    --tiktok-bg: #e3f0f1;
+    --instagram: #a83f63;
+    --instagram-bg: #f7e7ec;
+    --youtube: #a83f2f;
+    --youtube-bg: #f7e9e6;
+    --facebook: #3d689a;
+    --facebook-bg: #e6eef6;
+    --glass-rgb: 255,255,255;
+    --brand-gradient: linear-gradient(135deg, #0f282f 0%, #02eff0 100%);
+  }
+  [data-theme="riptide"] h1,[data-theme="riptide"] h2,[data-theme="riptide"] h3,[data-theme="riptide"] h4{ font-family:'Space Grotesk',sans-serif; }
+  /* the one flat-fill exception — everywhere else reads --accent through var(), this is the one
+     deliberate spot the provided brand gradient actually shows up rather than sitting unused */
+  [data-theme="riptide"] .btn-primary{ background:var(--brand-gradient); border-color:transparent; }
   *{ box-sizing:border-box; }
   html,body{ margin:0; padding:0; }
   body{
@@ -95,7 +168,7 @@
 
   /* ---- layout ---- */
   .sidebar{
-    width:220px; flex-shrink:0; background:rgba(28,27,35,0.72);
+    width:220px; flex-shrink:0; background:rgba(var(--glass-rgb),0.72);
     backdrop-filter:blur(24px) saturate(160%); -webkit-backdrop-filter:blur(24px) saturate(160%);
     border-right:1px solid var(--border-soft);
     padding:20px 14px; display:flex; flex-direction:column; gap:16px;
@@ -265,7 +338,7 @@
   .overlay{ position:fixed; inset:0; background:rgba(10,9,13,.7); display:none; align-items:flex-start; justify-content:center; padding:5vh 16px; overflow-y:auto; z-index:50; }
   .overlay.open{ display:flex; }
   .modal{
-    background:rgba(28,27,35,0.86); backdrop-filter:blur(20px) saturate(150%); -webkit-backdrop-filter:blur(20px) saturate(150%);
+    background:rgba(var(--glass-rgb),0.86); backdrop-filter:blur(20px) saturate(150%); -webkit-backdrop-filter:blur(20px) saturate(150%);
     border:1px solid var(--border); border-top-color:rgba(255,255,255,0.06); border-radius:var(--radius); width:100%; max-width:560px; padding:22px; margin-bottom:5vh;
     box-shadow:var(--shadow-elevated);
   }
@@ -333,7 +406,7 @@
      clipping off the edge of the screen. Same fixed+clamped-to-viewport approach as .dp-popover. */
   .alerts-popover{
     position:fixed; z-index:200; width:300px; max-height:70vh; overflow-y:auto;
-    background:rgba(28,27,35,0.92); backdrop-filter:blur(16px) saturate(150%); -webkit-backdrop-filter:blur(16px) saturate(150%);
+    background:rgba(var(--glass-rgb),0.92); backdrop-filter:blur(16px) saturate(150%); -webkit-backdrop-filter:blur(16px) saturate(150%);
     border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow-elevated);
   }
   .alerts-head{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border-soft); }
@@ -360,7 +433,7 @@
 
   /* ---- date picker popover ---- */
   .dp-popover{
-    position:fixed; z-index:200; background:rgba(28,27,35,0.88);
+    position:fixed; z-index:200; background:rgba(var(--glass-rgb),0.88);
     backdrop-filter:blur(16px) saturate(150%); -webkit-backdrop-filter:blur(16px) saturate(150%);
     border:1px solid var(--border); border-radius:var(--radius); padding:10px; width:232px; box-shadow:var(--shadow-elevated);
   }
@@ -381,7 +454,7 @@
   /* ---- AI drawer ---- */
   .ai-drawer{
     position:fixed; top:0; right:0; width:400px; max-width:92vw; height:100vh;
-    background:rgba(28,27,35,0.80); backdrop-filter:blur(22px) saturate(150%); -webkit-backdrop-filter:blur(22px) saturate(150%);
+    background:rgba(var(--glass-rgb),0.80); backdrop-filter:blur(22px) saturate(150%); -webkit-backdrop-filter:blur(22px) saturate(150%);
     border-left:1px solid var(--border); z-index:80;
     display:flex; flex-direction:column; box-shadow:var(--shadow-elevated-left);
     transform:translateX(100%); will-change:transform;
@@ -441,7 +514,7 @@
 
   .chart-tooltip{
     position:fixed; z-index:250; pointer-events:none; opacity:0; transition:opacity .1s ease;
-    background:rgba(28,27,35,0.90); backdrop-filter:blur(14px) saturate(150%); -webkit-backdrop-filter:blur(14px) saturate(150%);
+    background:rgba(var(--glass-rgb),0.90); backdrop-filter:blur(14px) saturate(150%); -webkit-backdrop-filter:blur(14px) saturate(150%);
     border:1px solid var(--border); border-radius:var(--radius-sm);
     padding:9px 12px; font-size:12px; line-height:1.6; box-shadow:0 10px 26px rgba(0,0,0,.4); max-width:230px;
   }
@@ -500,7 +573,7 @@
        what a drawer wants, so only position/transform/z-index change here. */
     .mobile-topbar{
       display:flex; align-items:center; gap:12px; position:sticky; top:0; z-index:110;
-      background:rgba(28,27,35,0.92); backdrop-filter:blur(24px) saturate(160%); -webkit-backdrop-filter:blur(24px) saturate(160%);
+      background:rgba(var(--glass-rgb),0.92); backdrop-filter:blur(24px) saturate(160%); -webkit-backdrop-filter:blur(24px) saturate(160%);
       border-bottom:1px solid var(--border-soft); padding:12px 16px;
     }
     .mobile-topbar h1{ font-size:15px; font-weight:800; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
@@ -568,6 +641,24 @@ const AI_SETTINGS_KEY = 'rwr-ai-settings-v1'; // separate from STORAGE_KEY on pu
 // the primary source once this flips on. See migrateToCloud() for the one-time switch-over.
 const CLOUD_MODE_KEY = 'rwr-cloud-mode-v1';
 let CLOUD_MODE = (typeof localStorage !== 'undefined' && localStorage.getItem(CLOUD_MODE_KEY) === '1');
+// Per-device display preference (not synced to Supabase — nothing about which colors you're
+// looking at needs to follow you across devices) — see the inline <script> at the very top of
+// <head> for how this gets applied before first paint, and renderSettings()'s Theme tab for the
+// picker UI. 'midnight' needs no data-theme attribute at all; it's what :root already is.
+const THEME_KEY = 'rwr-theme';
+const THEMES = [
+  { id:'midnight', name:'Midnight Gold', desc:'The original look — dark charcoal with a warm gold accent.', swatches:['#16151c','#1c1b23','#c9a15a','#f0eee8'] },
+  { id:'riptide', name:'Riptide', desc:'White base, Storm Green ink, Vivid Cyan accent. Colors only for now — typography and layout on top of this are still being tuned.', swatches:['#ffffff','#0f282f','#02eff0','#eaf1f2'] },
+];
+let CURRENT_THEME = 'midnight';
+try{ CURRENT_THEME = localStorage.getItem(THEME_KEY) || 'midnight'; }catch(e){ /* localStorage unavailable — just stays on the default */ }
+function setTheme(themeId){
+  CURRENT_THEME = themeId;
+  try{ localStorage.setItem(THEME_KEY, themeId); }catch(e){}
+  if(themeId === 'midnight') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', themeId);
+  render();
+}
 const AI_MODELS = [
   { id:'claude-sonnet-5', label:'Claude Sonnet 5 (recommended)' },
   { id:'claude-opus-4-8', label:'Claude Opus 4.8 (more capable, slower/pricier)' },
@@ -2408,6 +2499,7 @@ const NAV_ITEMS = [
   {id:'tasks', label:'Tasks'},
   {id:'brands', label:'Brands'},
   {id:'payments', label:'Payments'},
+  {id:'settings', label:'Settings'},
 ];
 
 // Slim sticky bar shown only on mobile (see the max-width:820px media query) — a hamburger
@@ -2466,7 +2558,30 @@ function renderView(){
   if(VIEW==='tasks') return renderTasks();
   if(VIEW==='brands') return renderBrands();
   if(VIEW==='payments') return renderPayments();
+  if(VIEW==='settings') return renderSettings();
   return '';
+}
+
+function renderSettings(){
+  return `
+    <div class="page-head">
+      <div><h2>Settings</h2><div class="sub">Dashboard preferences — stored on this device only, not synced to the cloud.</div></div>
+    </div>
+    <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim); margin-bottom:12px;">Theme</div>
+    <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:16px;">
+      ${THEMES.map(t => {
+        const active = CURRENT_THEME===t.id;
+        return `<div class="table-wrap" style="padding:16px; ${active?'border-color:var(--accent);':''}">
+          <div style="display:flex; gap:3px; margin-bottom:14px; border-radius:8px; overflow:hidden; height:32px;">
+            ${t.swatches.map(c => `<div style="flex:1; background:${c};"></div>`).join('')}
+          </div>
+          <div style="font-weight:700; font-size:14px; margin-bottom:4px;">${escapeHtml(t.name)}</div>
+          <div class="hint" style="margin-bottom:14px; min-height:36px;">${escapeHtml(t.desc)}</div>
+          <button class="btn ${active?'btn-primary':'btn-ghost'} btn-sm full" data-select-theme="${t.id}" type="button" ${active?'disabled':''}>${active?'Selected ✓':'Use this theme'}</button>
+        </div>`;
+      }).join('')}
+    </div>
+  `;
 }
 
 /* ---------------- tracked content (automated backend — separate from the manual system above) ----------------
@@ -4315,6 +4430,7 @@ function bindGlobalHandlers(){
   document.querySelectorAll('[data-open-content]').forEach(el => el.addEventListener('click', () => openModal('content', el.dataset.openContent)));
   document.querySelectorAll('[data-open-brand], [data-edit-brand]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); openModal('brand', el.dataset.openBrand || el.dataset.editBrand); }));
   document.querySelectorAll('[data-toggle-brand-status]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); toggleBrandStatus(el.dataset.toggleBrandStatus); }));
+  document.querySelectorAll('[data-select-theme]').forEach(el => el.addEventListener('click', () => setTheme(el.dataset.selectTheme)));
   document.querySelectorAll('[data-del-payment]').forEach(el => el.addEventListener('click', () => { DATA.payments = DATA.payments.filter(p=>p.id!==el.dataset.delPayment); saveData(); render(); }));
   document.querySelectorAll('[data-edit-task]').forEach(el => el.addEventListener('click', () => openModal('task', el.dataset.editTask)));
   document.querySelectorAll('[data-edit-tracked-video]').forEach(el => el.addEventListener('click', () => openModal('trackedVideo', el.dataset.editTrackedVideo)));
