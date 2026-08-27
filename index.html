@@ -212,6 +212,59 @@
   }
   [data-theme="afterglow"] .btn-primary{ background:var(--brand-gradient); border-color:transparent; color:#1b1931; }
 
+  /* ---- Theme: Espresso ----
+     Fourth theme, from a "quiet luxury" brown palette (Almond/Cafe/Caramel/Espresso/Mahogany on a
+     warm cream card) — a light theme like Riptide, not dark like Midnight Gold/Afterglow. The
+     reference itself only gave one real hex (repeated across every swatch row, clearly a template
+     placeholder, not five distinct values) — used that one value for Espresso's ink color, where
+     it actually was a plausible match, and estimated the other four named tones by eye from the
+     swatch bars themselves. No font change — no typography signal was actually asked for this
+     time (the reference has a serif display headline, but that wasn't part of the request), same
+     colors-only state as Riptide/Afterglow. */
+  [data-theme="espresso"]{
+    --bg: #f0ebe3;
+    --bg-raised: #e7dfd1;
+    --surface: #dfd0b8;
+    --surface-2: #d0bc9c;
+    --border: #c2ac86;
+    --border-soft: #d0bc9c;
+    --text: #35261e;
+    --text-dim: #6b5645;
+    --text-faint: #a08f76;
+    --accent: #bd7f48;
+    --accent-dim: #c79485;
+    --accent-text: #35261e;
+    --danger: #a8503e;
+    --danger-bg: #f3e0da;
+    --good: #7a8f5c;
+    --good-bg: #e7ecdd;
+    --warn: #a8763a;
+    --warn-bg: #f0e4d0;
+    --low: #6e7f94;
+    --low-bg: #e2e7ec;
+    --purple: #8a6b7a;
+    --purple-bg: #ece1e5;
+    --orange: #c17a3e;
+    --orange-bg: #f2e2cc;
+    --teal: #5f8079;
+    --teal-bg: #e0e9e6;
+    --accent-bg: #f2e2cc;
+    --fx-green-bg: #e7ecdd;
+    --fx-green: #7a8f5c;
+    --fx-red: #a8503e;
+    --tiktok: #4f7b76;
+    --tiktok-bg: #e1eae8;
+    --instagram: #a8677a;
+    --instagram-bg: #f0e2e6;
+    --youtube: #a8452f;
+    --youtube-bg: #f2dfd8;
+    --facebook: #5e7691;
+    --facebook-bg: #e1e7ec;
+    --glass-rgb: 240,235,227;
+    --brand-gradient: linear-gradient(135deg, #4a2e1e 0%, #bd7f48 50%, #c79485 100%);
+  }
+  [data-theme="espresso"] .btn-primary{ background:var(--brand-gradient); border-color:transparent; color:#f0ebe3; }
+
   *{ box-sizing:border-box; }
   html,body{ margin:0; padding:0; }
   body{
@@ -721,6 +774,7 @@ const THEMES = [
   { id:'midnight', name:'Midnight Gold', desc:'The original look — dark charcoal with a warm gold accent.', swatches:['#16151c','#1c1b23','#c9a15a','#f0eee8'] },
   { id:'riptide', name:'Riptide', desc:'White base, Storm Green ink, Vivid Cyan accent. Colors only for now — typography and layout on top of this are still being tuned.', swatches:['#ffffff','#0f282f','#02eff0','#eaf1f2'] },
   { id:'afterglow', name:'Afterglow', desc:'A deep indigo-night base with a sunset gradient — magenta into rose into gold — carrying the accent. Colors only for now, same as Riptide.', swatches:['#1b1931','#662249','#a34054','#ed9e59'] },
+  { id:'espresso', name:'Espresso', desc:'Quiet-luxury browns — warm cream base, espresso ink, caramel accent. Colors only for now, same as Riptide.', swatches:['#f0ebe3','#35261e','#bd7f48','#c79485'] },
 ];
 let CURRENT_THEME = 'midnight';
 try{ CURRENT_THEME = localStorage.getItem(THEME_KEY) || 'midnight'; }catch(e){ /* localStorage unavailable — just stays on the default */ }
