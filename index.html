@@ -158,6 +158,60 @@
   /* the one flat-fill exception — everywhere else reads --accent through var(), this is the one
      deliberate spot the provided brand gradient actually shows up rather than sitting unused */
   [data-theme="riptide"] .btn-primary{ background:var(--brand-gradient); border-color:transparent; }
+
+  /* ---- Theme: Afterglow ----
+     Third theme, from a 6-stop indigo-to-gold sunset gradient reference — deep indigo-navy base
+     (the darkest stop), the mid gradient (magenta/rose/gold) doing accent duty, same "literal
+     provided hexes for the anchors, derive the rest in-family" approach as Riptide/Midnight Gold.
+     No font change this time — no typography signal in the reference, unlike the Sirin Labs one —
+     colors only, same as Riptide's current state. The palette has no green or blue at all (it's a
+     warm indigo→gold spectrum), so --good/--low/--teal are the only genuinely invented hues here,
+     picked just for enough hue-family contrast against the warm/purple palette to stay legible as
+     "different from everything else," not lifted from the reference. */
+  [data-theme="afterglow"]{
+    --bg: #1b1931;
+    --bg-raised: #221e3c;
+    --surface: #2b2447;
+    --surface-2: #372c56;
+    --border: #453564;
+    --border-soft: #362a4d;
+    --text: #ede3ec;
+    --text-dim: #a98fb0;
+    --text-faint: #6e5a7a;
+    --accent: #ed9e59;
+    --accent-dim: #e98cb9;
+    --accent-text: #1b1931;
+    --danger: #c25468;
+    --danger-bg: #35202a;
+    --good: #6fbf8a;
+    --good-bg: #1f3327;
+    --warn: #d9a24e;
+    --warn-bg: #332818;
+    --low: #6e85bf;
+    --low-bg: #1f2740;
+    --purple: #b98ac7;
+    --purple-bg: #2c1f38;
+    --orange: #e9944a;
+    --orange-bg: #332415;
+    --teal: #5fada8;
+    --teal-bg: #1a2e2c;
+    --accent-bg: #332415;
+    --fx-green-bg: #1f3327;
+    --fx-green: #6fbf8a;
+    --fx-red: #c25468;
+    --tiktok: #5fc2c2;
+    --tiktok-bg: #1a2e30;
+    --instagram: #e98cb9;
+    --instagram-bg: #3a2438;
+    --youtube: #c25468;
+    --youtube-bg: #34212a;
+    --facebook: #6e85bf;
+    --facebook-bg: #1f2740;
+    --glass-rgb: 27,25,49;
+    --brand-gradient: linear-gradient(135deg, #662249 0%, #a34054 50%, #ed9e59 100%);
+  }
+  [data-theme="afterglow"] .btn-primary{ background:var(--brand-gradient); border-color:transparent; color:#1b1931; }
+
   *{ box-sizing:border-box; }
   html,body{ margin:0; padding:0; }
   body{
@@ -666,6 +720,7 @@ const THEME_KEY = 'rwr-theme';
 const THEMES = [
   { id:'midnight', name:'Midnight Gold', desc:'The original look — dark charcoal with a warm gold accent.', swatches:['#16151c','#1c1b23','#c9a15a','#f0eee8'] },
   { id:'riptide', name:'Riptide', desc:'White base, Storm Green ink, Vivid Cyan accent. Colors only for now — typography and layout on top of this are still being tuned.', swatches:['#ffffff','#0f282f','#02eff0','#eaf1f2'] },
+  { id:'afterglow', name:'Afterglow', desc:'A deep indigo-night base with a sunset gradient — magenta into rose into gold — carrying the accent. Colors only for now, same as Riptide.', swatches:['#1b1931','#662249','#a34054','#ed9e59'] },
 ];
 let CURRENT_THEME = 'midnight';
 try{ CURRENT_THEME = localStorage.getItem(THEME_KEY) || 'midnight'; }catch(e){ /* localStorage unavailable — just stays on the default */ }
