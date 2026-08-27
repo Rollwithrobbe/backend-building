@@ -788,9 +788,7 @@ let AI_SETTINGS_OPEN = false;
 let AI_BUSY = false;
 let AI_OPEN = false;
 let ACTIVE_BRAND_FILTER = null;
-let PUB_FILTER = { brandId:'', platform:'', q:'', datePreset:'all', customStart:'', customEnd:'', viewReq:'all' };
 let CONTENT_FILTER = { datePreset:'all', customStart:'', customEnd:'', status:'', dateField:'created' };
-let CONTENT_VIEW_MODE = 'pipeline'; // 'pipeline' (in progress) | 'published' — a toggle within Content now, not its own nav item
 let PAYMENTS_FILTER = { brandId:'' };
 let DP = null; // { key, month: Date }
 let DASH_RANGE = 'month';
@@ -1668,17 +1666,28 @@ function renderBriefQuotas(){
       const trialBadge = trial
         ? `<span class="tag ${trial.expired ? 'tag-danger' : 'tag-warn'}" style="font-size:9.5px;">${trial.expired ? `Trial ended ${Math.abs(trial.daysRemaining)}d ago` : `Trial — ${trial.daysRemaining}d left`}</span>`
         : '';
-      return `<div style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border-soft);">
-        <div style="display:flex; align-items:center; gap:10px;">
-          <span class="swatch" style="background:${b.color}"></span>
-          <span style="font-size:13.5px;">${escapeHtml(b.name)}</span>
-          ${trialBadge}
-          <span class="mono" style="font-size:12px; color:var(--text-dim);">${info.progress}/${info.quota} today</span>
+      // The actual videos this brand's count refers to today (created via "+1 Made", or any other
+      // way) — shown as clickable chips so "2/3 today" isn't just an abstract number: you can see
+      // exactly which titles it means and jump straight into editing one (film/edit/schedule it)
+      // without leaving the dashboard. Each disappears from here on its own once published — it's
+      // reading straight off DATA.content, the same list In Progress shows.
+      const madeToday = DATA.content.filter(c => c.brandId===b.id && (c.createdAt||'').slice(0,10)===todayISO());
+      return `<div style="padding:12px 16px; border-bottom:1px solid var(--border-soft);">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <span class="swatch" style="background:${b.color}"></span>
+            <span style="font-size:13.5px;">${escapeHtml(b.name)}</span>
+            ${trialBadge}
+            <span class="mono" style="font-size:12px; color:var(--text-dim);">${info.progress}/${info.quota} today</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:6px;">
+            <button class="btn btn-ghost btn-sm" data-undo-brief="${b.id}" type="button" title="Correct today's count down by 1 (e.g. after deleting a video)" ${info.progress<=0?'disabled':''}>−1</button>
+            <button class="btn btn-sm ${done?'btn-primary':'btn-ghost'}" data-make-brief="${b.id}" type="button" ${done?'disabled':''}>${done?'Done ✓':'+1 Made'}</button>
+          </div>
         </div>
-        <div style="display:flex; align-items:center; gap:6px;">
-          <button class="btn btn-ghost btn-sm" data-undo-brief="${b.id}" type="button" title="Correct today's count down by 1 (e.g. after deleting a video)" ${info.progress<=0?'disabled':''}>−1</button>
-          <button class="btn btn-sm ${done?'btn-primary':'btn-ghost'}" data-make-brief="${b.id}" type="button" ${done?'disabled':''}>${done?'Done ✓':'+1 Made'}</button>
-        </div>
+        ${madeToday.length ? `<div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; padding-left:24px;">
+          ${madeToday.map(c => `<button type="button" class="tag tag-neutral" data-open-content="${c.id}" style="cursor:pointer; border:none; font-family:inherit;" title="Edit this video">${escapeHtml(c.title)}</button>`).join('')}
+        </div>` : ''}
       </div>`;
     }).join('')}
   </div>`;
@@ -2392,7 +2401,7 @@ function renderView(){
   if(VIEW==='dashboard') return renderDashboard();
   if(VIEW==='trackedContent') return renderTrackedContent();
   if(VIEW==='content') return renderContent();
-  if(VIEW==='published'){ VIEW='content'; CONTENT_VIEW_MODE='published'; return renderContent(); } // old bookmark/state — redirect into Content's Published toggle
+  if(VIEW==='published'){ VIEW='content'; return renderContent(); } // old bookmark/state — Published isn't its own view anymore, just land on Content
   if(VIEW==='tasks') return renderTasks();
   if(VIEW==='brands') return renderBrands();
   if(VIEW==='payments') return renderPayments();
@@ -2875,22 +2884,16 @@ function isContentPublished(c){
 function renderContent(){
   const head = `
     <div class="page-head">
-      <div><h2>Content</h2><div class="sub">Pure production tracking — what you're making and its status. Doesn't affect Earned/Outstanding; that's the Tracked Content tab now.</div></div>
+      <div><h2>Content</h2><div class="sub">What's in progress right now — ideas, filming, editing, scheduled. Once something's published it drops off this list; find it (and its real view counts) in Tracked Content once your connected accounts pick it up.</div></div>
       <div class="head-actions">
-        <div class="seg" style="display:inline-flex; border:1px solid var(--border-soft); border-radius:8px; overflow:hidden;">
-          <button class="btn btn-sm ${CONTENT_VIEW_MODE==='pipeline'?'btn-primary':'btn-ghost'}" id="cvPipeline" type="button" style="border-radius:0;">In progress</button>
-          <button class="btn btn-sm ${CONTENT_VIEW_MODE==='published'?'btn-primary':'btn-ghost'}" id="cvPublished" type="button" style="border-radius:0;">Published</button>
-        </div>
         <button class="btn btn-primary" data-open-modal="content">+ Add content</button>
       </div>
     </div>`;
 
-  if(CONTENT_VIEW_MODE==='published') return head + renderPublishedSection();
-
   const dateField = CONTENT_FILTER.dateField === 'scheduled' ? 'scheduled' : 'created';
   const range = presetDateRange(CONTENT_FILTER.datePreset, CONTENT_FILTER.customStart, CONTENT_FILTER.customEnd);
   const filtered = DATA.content.filter(c => {
-    if(isContentPublished(c)) return false; // published content lives under the Published toggle now
+    if(isContentPublished(c)) return false; // published — done, drops off the in-progress list entirely
     if(ACTIVE_BRAND_FILTER && c.brandId !== ACTIVE_BRAND_FILTER) return false;
     if(CONTENT_FILTER.status){
       const active = (c.platforms||[]).filter(p=>p.active);
@@ -2985,7 +2988,7 @@ function renderContentTable(items){
   </table></div>`;
 }
 
-/* ---------------- published ---------------- */
+// Shared date-range helper — used by Content's own date filter below.
 function presetDateRange(preset, customStart, customEnd){
   const now = new Date();
   const startOfDay = d => new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -3003,98 +3006,13 @@ function presetDateRange(preset, customStart, customEnd){
   }
   return null; // 'all'
 }
-function publishedRows(){
-  const range = presetDateRange(PUB_FILTER.datePreset, PUB_FILTER.customStart, PUB_FILTER.customEnd);
-  return DATA.content.filter(c => {
-    const publishedPlatforms = (c.platforms||[]).filter(p => p.active && p.status==='published');
-    if(publishedPlatforms.length===0) return false;
-    if(PUB_FILTER.brandId && c.brandId !== PUB_FILTER.brandId) return false;
-    if(PUB_FILTER.platform && !publishedPlatforms.some(p=>p.id===PUB_FILTER.platform)) return false;
-    if(PUB_FILTER.q && !(c.title||'').toLowerCase().includes(PUB_FILTER.q.toLowerCase())) return false;
-    if(PUB_FILTER.viewReq==='needsCheck' && !(c.viewRequirement && !c.viewRequirementMet)) return false;
-    if(PUB_FILTER.viewReq==='hit' && !(c.viewRequirement && c.viewRequirementMet)) return false;
-    if(PUB_FILTER.viewReq==='none' && c.viewRequirement) return false;
-    if(range && (range.start || range.end)){
-      const inRange = publishedPlatforms.some(p => {
-        if(!p.postDate) return false;
-        const d = new Date(p.postDate+'T12:00:00');
-        if(range.start && d < range.start) return false;
-        if(range.end && d > range.end) return false;
-        return true;
-      });
-      if(!inRange) return false;
-    }
-    return true;
-  }).sort((a,b) => {
-    const latest = c => (c.platforms||[]).filter(p=>p.active&&p.postDate).map(p=>p.postDate).sort().slice(-1)[0] || '';
-    const dateCompare = latest(b).localeCompare(latest(a));
-    if(dateCompare !== 0) return dateCompare;
-    // same post date — break the tie by which was actually added to the dashboard most recently
-    return (b.createdAt||'').localeCompare(a.createdAt||'');
-  });
-}
-
-// Rendered inside Content when the "Published" toggle is active (see renderContent()) — pure
-// record of what's live and where, no $ columns. Stays visible permanently now instead of being
-// handed off/deleted (see handOffIfPublished — retired for the same reason).
-function renderPublishedSection(){
-  const rows = publishedRows();
-  return `
-    <div class="filter-bar">
-      <select id="pubBrand"><option value="">All brands</option>${DATA.brands.map(b=>`<option value="${b.id}" ${PUB_FILTER.brandId===b.id?'selected':''}>${escapeHtml(b.name)}</option>`).join('')}</select>
-      <select id="pubPlatform"><option value="">All platforms</option>${PLATFORMS.map(p=>`<option value="${p.id}" ${PUB_FILTER.platform===p.id?'selected':''}>${p.label}</option>`).join('')}</select>
-      <select id="pubViewReq">
-        <option value="all" ${PUB_FILTER.viewReq==='all'?'selected':''}>View req. — all</option>
-        <option value="needsCheck" ${PUB_FILTER.viewReq==='needsCheck'?'selected':''}>Needs check</option>
-        <option value="hit" ${PUB_FILTER.viewReq==='hit'?'selected':''}>Hit</option>
-        <option value="none" ${PUB_FILTER.viewReq==='none'?'selected':''}>No requirement</option>
-      </select>
-      <select id="pubDatePreset">
-        <option value="all" ${PUB_FILTER.datePreset==='all'?'selected':''}>All dates</option>
-        <option value="today" ${PUB_FILTER.datePreset==='today'?'selected':''}>Today</option>
-        <option value="yesterday" ${PUB_FILTER.datePreset==='yesterday'?'selected':''}>Yesterday</option>
-        <option value="thisWeek" ${PUB_FILTER.datePreset==='thisWeek'?'selected':''}>This week</option>
-        <option value="lastWeek" ${PUB_FILTER.datePreset==='lastWeek'?'selected':''}>Last week</option>
-        <option value="thisMonth" ${PUB_FILTER.datePreset==='thisMonth'?'selected':''}>This month</option>
-        <option value="custom" ${PUB_FILTER.datePreset==='custom'?'selected':''}>Custom range…</option>
-      </select>
-      ${PUB_FILTER.datePreset==='custom' ? `
-        <button type="button" class="date-trigger ${PUB_FILTER.customStart?'':'empty'}" data-datepicker="pubfilter:start">${PUB_FILTER.customStart?fmtDate(PUB_FILTER.customStart):'From'}</button>
-        <button type="button" class="date-trigger ${PUB_FILTER.customEnd?'':'empty'}" data-datepicker="pubfilter:end">${PUB_FILTER.customEnd?fmtDate(PUB_FILTER.customEnd):'To'}</button>
-      ` : ''}
-      <input type="text" id="pubSearch" placeholder="Search title…" value="${escapeHtml(PUB_FILTER.q)}" />
-    </div>
-    <div class="hint" style="margin-top:-6px;">Click a platform badge to toggle it — filled means live and published, dashed means not posted there. Toggling one on marks it Published today; toggling off just removes that platform.</div>
-    ${rows.length===0 ? emptyState('Nothing published yet', 'Set a platform status to Published in Content and it will show up here.') : `
-    <div class="table-wrap" style="overflow-x:auto;"><table>
-      <thead><tr><th style="min-width:170px;">Title</th><th>Brand</th><th>Platforms</th><th>Posted</th><th>Views</th><th>View req.</th><th></th></tr></thead>
-      <tbody>
-        ${rows.map(c => {
-          const brand = brandById(c.brandId);
-          const publishedPlatforms = c.platforms.filter(p=>p.active && p.status==='published');
-          const totalViews = publishedPlatforms.reduce((s,p)=>s+(Number(p.views)||0), 0);
-          const postedDates = publishedPlatforms.map(p=>p.postDate).filter(Boolean).sort();
-          return `<tr>
-            <td><input type="text" class="cell-input" data-edit-title="${c.id}" value="${escapeHtml(c.title)}" /></td>
-            <td>${brand?`<span class="swatch" style="background:${brand.color}"></span>${escapeHtml(brand.name)}`:'—'}</td>
-            <td><div class="platform-badges">
-              ${PLATFORMS.map(meta => {
-                const p = c.platforms.find(x=>x.id===meta.id);
-                const active = !!(p && p.active);
-                const tip = active ? `${meta.label}: ${STATUS_LABEL[p.status]}` : `${meta.label}: not posted — click to add`;
-                return `<button type="button" class="pf-badge ${active?meta.tagClass:'pf-badge-off'}" data-toggle-platform="${c.id}:${meta.id}" title="${tip}">${active?'':'+'}${meta.short}</button>`;
-              }).join('')}
-            </div></td>
-            <td class="mono">${postedDates.length ? fmtDate(postedDates[0]) : '—'}</td>
-            <td class="mono">${totalViews ? totalViews.toLocaleString() : '—'}</td>
-            <td>${renderViewReqCell(c, false)}</td>
-            <td><button class="btn btn-ghost btn-sm" data-open-content="${c.id}" type="button">Edit</button></td>
-          </tr>`;
-        }).join('')}
-      </tbody>
-    </table></div>`}
-  `;
-}
+// Published used to be a separate browsable tab here (its own filters, a manual "views" column,
+// clickable platform badges) — removed (2026-08-27): every real piece of content gets picked up
+// by the automated Tracked Content pipeline anyway once it's live, so keeping a second, manually-
+// maintained "published" list around just risked drifting out of sync with the real one and
+// confused which was the source of truth. A content item still quietly carries status:'published'
+// internally (see isContentPublished below) and can still be set via the Edit modal — it just has
+// nowhere of its own to live in the UI anymore; it simply drops out of the In progress list.
 
 /* ---------------- brands ---------------- */
 // Quick one-click flip from the Brands table itself, without opening the edit modal — for when
@@ -3465,7 +3383,7 @@ async function sendAI(question){
       body: JSON.stringify({
         model: modelToUse,
         max_tokens: 2200,
-        system: "You are a concise assistant embedded in a UGC creator's ops dashboard. Answer using ONLY the JSON data provided about their brands, content, payments, and tasks. Earnings come entirely from the separate automated tracker (Tracked Content, fed by each brand's connected platform accounts) \u2014 Content and Published are pure production-status information now (what's being made, what's live where) and never affect Earned, Outstanding, or Pending. Payments are logged in bulk against a brand (not per video) \u2014 a brand's Outstanding is its automated-tracked total earned minus everything logged for it in payments. Be direct, use short paragraphs or lists, use $ for money. Each brand may include a 'brief' object with defaults it already has on file (basePay, cpmBonus, viewRequirement, platforms, cadence) \u2014 this sets that brand's automated-tracking rate (and its own recurring-quota cadence), not anything on individual content items, which no longer carry pay fields at all. When adding content for a brand that has a brief, use its platforms as the default instead of asking \u2014 content items take a title, platforms, and status only (plus an optional view requirement, kept purely for the user's own reference, not money).\n\nYou can take actions on the user's behalf, and you can batch many actions into a single reply \u2014 this matters because the user may ask for hundreds of videos at once, and they should never have to confirm one at a time for a bulk request like that. End your reply with exactly one fenced block containing a JSON ARRAY of action objects, even if it's only one:\n```action\n[{...}, {...}]\n```\nOnly emit the block when the request is unambiguous \u2014 if you're missing a required detail (which brand, what amount, what title, how many), ask a plain question instead and wait for their answer. Never invent an id; always copy an 'id' field exactly from the data provided. For any delete action, only act after the user has explicitly confirmed in their own words that they want it deleted \u2014 never delete on the first ask.\n\nWhen the user asks you to log a payment, always ask whether a CPM bonus was included in that amount before logging it, unless they already said so unprompted (e.g. \"got $600, $100 of that was a CPM bonus\"). amount is always the total actually received; cpmBonus (optional, default 0) is just the portion of that total that was a bonus, for their own record-keeping \u2014 it does not add on top of amount.\n\nCRITICAL \u2014 never write more than about 15 individual add_content actions by hand in one reply. If a request needs more videos than that, it always fits one of the two batch actions below instead \u2014 use one of them, never enumerate videos one by one for a bulk request. Writing dozens of individual JSON objects risks the response being cut off mid-way, which silently fails the whole thing.\n\n- add_content_batch: many videos that all share the exact same post date (or are all still unposted):\n{\"type\":\"add_content_batch\",\"brandId\":\"<id>\",\"count\":50,\"titlePrefix\":\"PureFi Video\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null}\nThis creates videos titled \"PureFi Video 1\" through \"PureFi Video 50\" (or however many), all otherwise identical.\n\nviewRequirement/viewRequirementWindowDays are optional and purely informational now (not money) \u2014 a personal reference for whether a video hit whatever number the user cares about, on whatever window. Use a brand's brief.viewRequirement/viewRequirementWindowDays as the default when adding content for that brand if it has one.\n\n- add_content_daily_batch: for any cadence-based bulk request \u2014 'N videos a day for M days', 'backfill 37 videos, 2 a day since a date', 'X per week' converted to a daily count, etc. It spreads a fixed number per day across a date range automatically, incrementing the post date each day:\n{\"type\":\"add_content_daily_batch\",\"brandId\":\"<id>\",\"startDate\":\"YYYY-MM-DD\",\"perDay\":2,\"days\":18,\"platforms\":[\"tiktok\",\"instagram\"],\"status\":\"published\",\"viewRequirement\":300,\"viewRequirementMet\":true,\"viewRequirementWindowDays\":30,\"titlePrefix\":\"Amboras Ongoing\"}\nThis creates perDay*days videos total, dated startDate, startDate+1, startDate+2, ... with perDay videos sharing each date. Only sets a post date on items when status is 'published'. Use this for both backfilling known past history and for scheduling a fixed number of upcoming videos at a cadence.\n\nFor a truly open-ended, indefinite cadence ('ongoing forever until I say stop', no end date at all), a fixed batch isn't the right fit \u2014 tell the user you can add a bounded batch now (ask for a count or an end date), and mention they can also set up a recurring brief directly on the brand's edit screen for indefinite daily quotas, since that's built for exactly that case and isn't something you can configure yourself.\n\nIf a request needs a brand that doesn't exist yet AND a batch of content for it in the same reply, chain them: give the add_brand action a \"ref\" (any short label you pick), then use \"brandRef\" instead of \"brandId\" in the actions that follow it in the same array:\n[{\"type\":\"add_brand\",\"ref\":\"b1\",\"name\":\"New Brand\"},{\"type\":\"add_content_batch\",\"brandRef\":\"b1\",\"count\":20,\"titlePrefix\":\"New Brand Video\",\"platforms\":[\"tiktok\"],\"status\":\"idea\"}]\n\nOther action types and their exact shape:\n- Log a payment received for a brand: {\"type\":\"log_payment\",\"brandId\":\"<id>\",\"amount\":120,\"cpmBonus\":0,\"note\":\"optional\"}\n- Add a new brand: {\"type\":\"add_brand\",\"name\":\"Brand name\",\"status\":\"active\",\"notes\":\"optional\",\"ref\":\"optional label\"}\n- Add a single content item: {\"type\":\"add_content\",\"brandId\":\"<id>\",\"title\":\"Video title\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"postDate\":\"YYYY-MM-DD or omit\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null} (platforms are which of tiktok/instagram/youtube/facebook are active for this deliverable; no pay fields — content no longer carries money, only the brand's own brief does)\n- Change a content item's status: {\"type\":\"set_status\",\"id\":\"<content id>\",\"status\":\"published\"}\n- Mark a content item's view requirement as hit or not: {\"type\":\"set_requirement_met\",\"id\":\"<content id>\",\"met\":true}\n- Add a task: {\"type\":\"add_task\",\"title\":\"Task title\",\"brandId\":\"<id or null>\",\"priority\":\"high\",\"daily\":false,\"requiresTimer\":false,\"timerMinutes\":10} (timerMinutes only matters when requiresTimer is true \u2014 default 10, but a fresh account warm-up often needs 30\u201345)\n- Toggle a task done/undone (for daily tasks this only affects today): {\"type\":\"toggle_task\",\"id\":\"<task id>\"}\n- Delete a content item, brand, or task (only after explicit confirmation): {\"type\":\"delete_content\",\"id\":\"<id>\"} or {\"type\":\"delete_brand\",\"id\":\"<id>\"} or {\"type\":\"delete_task\",\"id\":\"<id>\"}\n\nstatus must be one of: idea, scripting, filming, editing, ready, submitted, revision, approved, scheduled, published. \"scheduled\" means the user has a plan for when it will go out but hasn\u2019t posted it yet \u2014 use it, and set \"scheduledDate\" (YYYY-MM-DD) on the content item, whenever the user is batching/planning ahead rather than posting immediately (e.g. \"I filmed the next 10 for Amboras, starting the 21st\"). scheduledDate is the plan, separate from the real post date which only gets set once something is actually Published \u2014 never set both to the same thing unless it really did go live that day.\n\nIf the data can't answer a question, say so plainly.",
+        system: "You are a concise assistant embedded in a UGC creator's ops dashboard. Answer using ONLY the JSON data provided about their brands, content, payments, and tasks. Earnings come entirely from the separate automated tracker (Tracked Content, fed by each brand's connected platform accounts) \u2014 Content is pure production-status information now (what's being made, its status) and never affects Earned, Outstanding, or Pending. Content only shows in-progress items \u2014 once something is marked Published it drops out of Content entirely; Tracked Content is where it (and its real view counts) shows up from then on. Payments are logged in bulk against a brand (not per video) \u2014 a brand's Outstanding is its automated-tracked total earned minus everything logged for it in payments. Be direct, use short paragraphs or lists, use $ for money. Each brand may include a 'brief' object with defaults it already has on file (basePay, cpmBonus, viewRequirement, platforms, cadence) \u2014 this sets that brand's automated-tracking rate (and its own recurring-quota cadence), not anything on individual content items, which no longer carry pay fields at all. When adding content for a brand that has a brief, use its platforms as the default instead of asking \u2014 content items take a title, platforms, and status only (plus an optional view requirement, kept purely for the user's own reference, not money).\n\nYou can take actions on the user's behalf, and you can batch many actions into a single reply \u2014 this matters because the user may ask for hundreds of videos at once, and they should never have to confirm one at a time for a bulk request like that. End your reply with exactly one fenced block containing a JSON ARRAY of action objects, even if it's only one:\n```action\n[{...}, {...}]\n```\nOnly emit the block when the request is unambiguous \u2014 if you're missing a required detail (which brand, what amount, what title, how many), ask a plain question instead and wait for their answer. Never invent an id; always copy an 'id' field exactly from the data provided. For any delete action, only act after the user has explicitly confirmed in their own words that they want it deleted \u2014 never delete on the first ask.\n\nWhen the user asks you to log a payment, always ask whether a CPM bonus was included in that amount before logging it, unless they already said so unprompted (e.g. \"got $600, $100 of that was a CPM bonus\"). amount is always the total actually received; cpmBonus (optional, default 0) is just the portion of that total that was a bonus, for their own record-keeping \u2014 it does not add on top of amount.\n\nCRITICAL \u2014 never write more than about 15 individual add_content actions by hand in one reply. If a request needs more videos than that, it always fits one of the two batch actions below instead \u2014 use one of them, never enumerate videos one by one for a bulk request. Writing dozens of individual JSON objects risks the response being cut off mid-way, which silently fails the whole thing.\n\n- add_content_batch: many videos that all share the exact same post date (or are all still unposted):\n{\"type\":\"add_content_batch\",\"brandId\":\"<id>\",\"count\":50,\"titlePrefix\":\"PureFi Video\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null}\nThis creates videos titled \"PureFi Video 1\" through \"PureFi Video 50\" (or however many), all otherwise identical.\n\nviewRequirement/viewRequirementWindowDays are optional and purely informational now (not money) \u2014 a personal reference for whether a video hit whatever number the user cares about, on whatever window. Use a brand's brief.viewRequirement/viewRequirementWindowDays as the default when adding content for that brand if it has one.\n\n- add_content_daily_batch: for any cadence-based bulk request \u2014 'N videos a day for M days', 'backfill 37 videos, 2 a day since a date', 'X per week' converted to a daily count, etc. It spreads a fixed number per day across a date range automatically, incrementing the post date each day:\n{\"type\":\"add_content_daily_batch\",\"brandId\":\"<id>\",\"startDate\":\"YYYY-MM-DD\",\"perDay\":2,\"days\":18,\"platforms\":[\"tiktok\",\"instagram\"],\"status\":\"published\",\"viewRequirement\":300,\"viewRequirementMet\":true,\"viewRequirementWindowDays\":30,\"titlePrefix\":\"Amboras Ongoing\"}\nThis creates perDay*days videos total, dated startDate, startDate+1, startDate+2, ... with perDay videos sharing each date. Only sets a post date on items when status is 'published'. Use this for both backfilling known past history and for scheduling a fixed number of upcoming videos at a cadence.\n\nFor a truly open-ended, indefinite cadence ('ongoing forever until I say stop', no end date at all), a fixed batch isn't the right fit \u2014 tell the user you can add a bounded batch now (ask for a count or an end date), and mention they can also set up a recurring brief directly on the brand's edit screen for indefinite daily quotas, since that's built for exactly that case and isn't something you can configure yourself.\n\nIf a request needs a brand that doesn't exist yet AND a batch of content for it in the same reply, chain them: give the add_brand action a \"ref\" (any short label you pick), then use \"brandRef\" instead of \"brandId\" in the actions that follow it in the same array:\n[{\"type\":\"add_brand\",\"ref\":\"b1\",\"name\":\"New Brand\"},{\"type\":\"add_content_batch\",\"brandRef\":\"b1\",\"count\":20,\"titlePrefix\":\"New Brand Video\",\"platforms\":[\"tiktok\"],\"status\":\"idea\"}]\n\nOther action types and their exact shape:\n- Log a payment received for a brand: {\"type\":\"log_payment\",\"brandId\":\"<id>\",\"amount\":120,\"cpmBonus\":0,\"note\":\"optional\"}\n- Add a new brand: {\"type\":\"add_brand\",\"name\":\"Brand name\",\"status\":\"active\",\"notes\":\"optional\",\"ref\":\"optional label\"}\n- Add a single content item: {\"type\":\"add_content\",\"brandId\":\"<id>\",\"title\":\"Video title\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"postDate\":\"YYYY-MM-DD or omit\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null} (platforms are which of tiktok/instagram/youtube/facebook are active for this deliverable; no pay fields — content no longer carries money, only the brand's own brief does)\n- Change a content item's status: {\"type\":\"set_status\",\"id\":\"<content id>\",\"status\":\"published\"}\n- Mark a content item's view requirement as hit or not: {\"type\":\"set_requirement_met\",\"id\":\"<content id>\",\"met\":true}\n- Add a task: {\"type\":\"add_task\",\"title\":\"Task title\",\"brandId\":\"<id or null>\",\"priority\":\"high\",\"daily\":false,\"requiresTimer\":false,\"timerMinutes\":10} (timerMinutes only matters when requiresTimer is true \u2014 default 10, but a fresh account warm-up often needs 30\u201345)\n- Toggle a task done/undone (for daily tasks this only affects today): {\"type\":\"toggle_task\",\"id\":\"<task id>\"}\n- Delete a content item, brand, or task (only after explicit confirmation): {\"type\":\"delete_content\",\"id\":\"<id>\"} or {\"type\":\"delete_brand\",\"id\":\"<id>\"} or {\"type\":\"delete_task\",\"id\":\"<id>\"}\n\nstatus must be one of: idea, scripting, filming, editing, ready, submitted, revision, approved, scheduled, published. \"scheduled\" means the user has a plan for when it will go out but hasn\u2019t posted it yet \u2014 use it, and set \"scheduledDate\" (YYYY-MM-DD) on the content item, whenever the user is batching/planning ahead rather than posting immediately (e.g. \"I filmed the next 10 for Amboras, starting the 21st\"). scheduledDate is the plan, separate from the real post date which only gets set once something is actually Published \u2014 never set both to the same thing unless it really did go live that day.\n\nIf the data can't answer a question, say so plainly.",
         messages: messages
       })
     });
@@ -3755,7 +3673,6 @@ function getDPValue(key){
   if(type==='draftplatform'){ const p = MODAL_STATE.draft.platforms.find(x=>x.id===a); return p ? p.postDate : ''; }
   if(type==='livecontent'){ const c = DATA.content.find(x=>x.id===a); const p = c && c.platforms.find(x=>x.id===b); return p ? p.postDate : ''; }
   if(type==='payment'){ const target = a==='draft' ? MODAL_STATE.draft : DATA.payments.find(x=>x.id===a); return target ? target.date : ''; }
-  if(type==='pubfilter'){ return a==='start' ? PUB_FILTER.customStart : PUB_FILTER.customEnd; }
   if(type==='contentfilter'){ return a==='start' ? CONTENT_FILTER.customStart : CONTENT_FILTER.customEnd; }
   if(type==='scheduled'){ const target = a==='draft' ? MODAL_STATE.draft : DATA.content.find(x=>x.id===a); return target ? target.scheduledDate : ''; }
   if(type==='trialstart'){ return MODAL_STATE.draft && MODAL_STATE.draft.brief ? MODAL_STATE.draft.brief.trialStartDate : ''; }
@@ -3766,7 +3683,6 @@ function setDPValue(key, val){
   if(type==='draftplatform'){ const p = MODAL_STATE.draft.platforms.find(x=>x.id===a); if(p) p.postDate = val; }
   if(type==='livecontent'){ const c = DATA.content.find(x=>x.id===a); const p = c && c.platforms.find(x=>x.id===b); if(p){ p.postDate = val; saveData(); } }
   if(type==='payment'){ if(a==='draft'){ MODAL_STATE.draft.date = val; } else { const p = DATA.payments.find(x=>x.id===a); if(p){ p.date = val; saveData(); } } }
-  if(type==='pubfilter'){ if(a==='start') PUB_FILTER.customStart = val; else PUB_FILTER.customEnd = val; }
   if(type==='contentfilter'){ if(a==='start') CONTENT_FILTER.customStart = val; else CONTENT_FILTER.customEnd = val; }
   if(type==='scheduled'){ if(a==='draft'){ MODAL_STATE.draft.scheduledDate = val; } else { const c = DATA.content.find(x=>x.id===a); if(c){ c.scheduledDate = val; saveData(); } } }
   if(type==='trialstart'){ if(!MODAL_STATE.draft.brief) MODAL_STATE.draft.brief = {}; MODAL_STATE.draft.brief.trialStartDate = val; }
@@ -4173,7 +4089,7 @@ function renderContentModal(){
     <div class="field">
       <button type="button" class="btn btn-sm ${d.viewRequirementMet?'btn-primary':'btn-ghost'}" id="f-viewreqmet" style="width:100%;">${d.viewRequirementMet ? 'Requirement hit ✓ (click to undo)' : 'Mark requirement as hit'}</button>
     </div>
-    <div class="hint">Earnings only count once a platform here is set to Published — and, if you set a view requirement, once you've checked the views yourself and clicked "Mark requirement as hit." If you also set a window and it passes unmet, this drops out of Pending instead of sitting there forever. Payments are logged separately on the Payments tab; you don't need to mark individual videos as paid.</div>
+    <div class="hint">This is pure production tracking and never affects Earned/Outstanding — that comes entirely from Tracked Content, fed automatically once your connected accounts pick this up. View requirement here is just for your own reference. Setting a platform to Published removes this from the In progress list. Payments are logged separately on the Payments tab.</div>
 
     <div class="modal-actions">
       <div>${MODAL_STATE.id ? `<button class="btn btn-danger btn-sm" id="deleteContent" type="button">Delete</button>` : ''}</div>
@@ -4397,25 +4313,6 @@ function bindGlobalHandlers(){
   const paymentsBrandFilter = document.getElementById('paymentsBrandFilter');
   if(paymentsBrandFilter) paymentsBrandFilter.addEventListener('change', () => { PAYMENTS_FILTER.brandId = paymentsBrandFilter.value; render(); });
 
-  // published tab filters + inline edits
-  const pubBrand = document.getElementById('pubBrand');
-  if(pubBrand) pubBrand.addEventListener('change', () => { PUB_FILTER.brandId = pubBrand.value; render(); });
-  const pubPlatform = document.getElementById('pubPlatform');
-  if(pubPlatform) pubPlatform.addEventListener('change', () => { PUB_FILTER.platform = pubPlatform.value; render(); });
-  const pubViewReq = document.getElementById('pubViewReq');
-  if(pubViewReq) pubViewReq.addEventListener('change', () => { PUB_FILTER.viewReq = pubViewReq.value; render(); });
-  const pubDatePreset = document.getElementById('pubDatePreset');
-  if(pubDatePreset) pubDatePreset.addEventListener('change', () => { PUB_FILTER.datePreset = pubDatePreset.value; render(); });
-  const pubSearch = document.getElementById('pubSearch');
-  if(pubSearch) pubSearch.addEventListener('input', () => { PUB_FILTER.q = pubSearch.value; render(); pubSearch.focus(); pubSearch.setSelectionRange(pubSearch.value.length, pubSearch.value.length); });
-  const cvPipeline = document.getElementById('cvPipeline');
-  if(cvPipeline) cvPipeline.addEventListener('click', () => { CONTENT_VIEW_MODE = 'pipeline'; render(); });
-  const cvPublished = document.getElementById('cvPublished');
-  if(cvPublished) cvPublished.addEventListener('click', () => { CONTENT_VIEW_MODE = 'published'; render(); });
-
-  document.querySelectorAll('[data-edit-title]').forEach(el => el.addEventListener('change', () => {
-    const c = DATA.content.find(x=>x.id===el.dataset.editTitle); if(c){ c.title = el.value; saveData(); render(); }
-  }));
   document.querySelectorAll('[data-edit-status-all]').forEach(el => el.addEventListener('change', () => {
     const cid = el.dataset.editStatusAll;
     const c = DATA.content.find(x=>x.id===cid);
@@ -4444,29 +4341,8 @@ function bindGlobalHandlers(){
       render();
     }
   }));
-  document.querySelectorAll('[data-edit-views]').forEach(el => el.addEventListener('change', () => {
-    const [cid,pid] = el.dataset.editViews.split(':');
-    const c = DATA.content.find(x=>x.id===cid); const p = c && c.platforms.find(x=>x.id===pid);
-    if(p){ p.views = el.value; saveData(); render(); }
-  }));
   document.querySelectorAll('[data-toggle-req]').forEach(el => el.addEventListener('click', () => {
     const c = DATA.content.find(x=>x.id===el.dataset.toggleReq); if(c){ c.viewRequirementMet = !c.viewRequirementMet; saveData(); render(); }
-  }));
-  document.querySelectorAll('[data-toggle-platform]').forEach(el => el.addEventListener('click', () => {
-    const [cid, pid] = el.dataset.togglePlatform.split(':');
-    const c = DATA.content.find(x=>x.id===cid);
-    const p = c && c.platforms.find(x=>x.id===pid);
-    if(!p) return;
-    if(p.active){
-      p.active = false;
-    } else {
-      p.active = true;
-      if(p.status !== 'published') p.status = 'published';
-      if(!p.postDate) p.postDate = todayISO();
-    }
-    saveData();
-    handOffIfPublished(cid);
-    render();
   }));
   document.querySelectorAll('[data-make-brief]').forEach(el => el.addEventListener('click', () => makeBriefVideo(el.dataset.makeBrief)));
   document.querySelectorAll('[data-undo-brief]').forEach(el => el.addEventListener('click', () => undoBriefVideo(el.dataset.undoBrief)));
