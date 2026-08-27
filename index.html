@@ -17,7 +17,7 @@
   })();
 </script>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Archivo+Expanded:wght@600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Archivo+Expanded:wght@600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&family=Poppins:wght@500;600;700&display=swap');
 
   :root{
     --bg: #16151c;
@@ -89,56 +89,54 @@
   }
 
   /* ---- Theme: Riptide ----
-     Second selectable theme (see THEME_KEY / renderSettings' Theme tab) — white base, Storm
-     Green for ink, Vivid Cyan as the single accent, built from the exact swatch brief: white
-     dominant, the other two colors doing the work across tabs/cards/charts. Semantic colors
-     (danger/good/warn/etc.) are re-deepened for contrast on white rather than reused verbatim —
-     the dark theme's versions are calibrated to pop against near-black, which reads as washed-out
-     on a white surface. Platform brand colors keep the same hue family, just deepened the same
-     way, so TikTok/Instagram/YouTube/Facebook stay identifiable switching between themes.
-     Headings switch to Space Grotesk here (see the @import above) — body/mono stay Inter/IBM Plex
-     Mono, both already neutral enough to carry either theme without their own override. */
+     Rebuilt (2026-08-27) on a second reference — a REFIRE hydrogen-electric brand shot, deep
+     teal-black landscape with a rust/terracotta vehicle accent — replacing the original white/
+     Storm-Green/Vivid-Cyan version entirely: the "too bright" feedback on the white base wasn't
+     fixable with small tweaks, the whole premise needed to be dark instead. Same discipline as
+     every other theme here: literal reference hexes anchor bg/surface/text/accent, everything
+     else derived to stay in-family. Headings move to Poppins (rounded/smooth/"branded" per
+     request, replacing Space Grotesk) — body/mono stay Inter/IBM Plex Mono. */
   [data-theme="riptide"]{
-    --bg: #ffffff;
-    --bg-raised: #eef6f7;
-    --surface: #d6e6e8;
-    --surface-2: #c2d8db;
-    --border: #a9c4c8;
-    --border-soft: #c2d8db;
-    --text: #0f282f;
-    --text-dim: #4a6169;
-    --text-faint: #8ca3a8;
-    --accent: #02eff0;
-    --accent-dim: #7ff2f2;
-    --accent-text: #0f282f;
-    --danger: #c1443d;
-    --danger-bg: #fbeae9;
-    --good: #2f8f5b;
-    --good-bg: #e7f5ec;
-    --warn: #b07a1f;
-    --warn-bg: #fbf1df;
-    --low: #3e76a8;
-    --low-bg: #e7f0f7;
-    --purple: #7c5fa6;
-    --purple-bg: #f0ebf7;
-    --orange: #b06a2e;
-    --orange-bg: #faeee2;
-    --teal: #2e8e82;
-    --teal-bg: #e5f4f2;
-    --accent-bg: #e0fcfc;
-    --fx-green-bg: #e7f5ec;
-    --fx-green: #2f8f5b;
-    --fx-red: #c1443d;
-    --tiktok: #2f7a85;
-    --tiktok-bg: #e3f0f1;
-    --instagram: #a83f63;
-    --instagram-bg: #f7e7ec;
-    --youtube: #a83f2f;
-    --youtube-bg: #f7e9e6;
-    --facebook: #3d689a;
-    --facebook-bg: #e6eef6;
-    --glass-rgb: 255,255,255;
-    --brand-gradient: linear-gradient(135deg, #0f282f 0%, #02eff0 100%);
+    --bg: #003135;
+    --bg-raised: #073940;
+    --surface: #024950;
+    --surface-2: #0d5058;
+    --border: #16636c;
+    --border-soft: #0d4750;
+    --text: #afdde5;
+    --text-dim: #7fb8c0;
+    --text-faint: #4f7a80;
+    --accent: #0fa4af;
+    --accent-dim: #964734;
+    --accent-text: #003135;
+    --danger: #b85a42;
+    --danger-bg: #2a1712;
+    --good: #5fbf8a;
+    --good-bg: #0f2b1e;
+    --warn: #d9a24e;
+    --warn-bg: #2e2415;
+    --low: #4f8fbf;
+    --low-bg: #16232e;
+    --purple: #8a7ec2;
+    --purple-bg: #211f30;
+    --orange: #c97a4f;
+    --orange-bg: #2e2015;
+    --teal: #0fa4af;
+    --teal-bg: #0a2e30;
+    --accent-bg: #0a2e30;
+    --fx-green-bg: #0f2b1e;
+    --fx-green: #5fbf8a;
+    --fx-red: #b85a42;
+    --tiktok: #0fa4af;
+    --tiktok-bg: #0a2e30;
+    --instagram: #c26e8a;
+    --instagram-bg: #2e1f26;
+    --youtube: #b85a42;
+    --youtube-bg: #2a1712;
+    --facebook: #4f8fbf;
+    --facebook-bg: #16232e;
+    --glass-rgb: 0,49,53;
+    --brand-gradient: linear-gradient(135deg, #024950 0%, #0fa4af 55%, #964734 100%);
   }
   /* h1-h4 covers real page/modal titles, but most of what actually *reads* as a heading in this
      app — card labels, table column headers, "Expiring soon"-style section titles — are plain
@@ -154,10 +152,10 @@
   [data-theme="riptide"] .section-title,
   [data-theme="riptide"] .tw-head,
   [data-theme="riptide"] .nav-btn,
-  [data-theme="riptide"] .btn{ font-family:'Space Grotesk',sans-serif; }
+  [data-theme="riptide"] .btn{ font-family:'Poppins',sans-serif; }
   /* the one flat-fill exception — everywhere else reads --accent through var(), this is the one
      deliberate spot the provided brand gradient actually shows up rather than sitting unused */
-  [data-theme="riptide"] .btn-primary{ background:var(--brand-gradient); border-color:transparent; }
+  [data-theme="riptide"] .btn-primary{ background:var(--brand-gradient); border-color:transparent; color:#003135; }
 
   /* ---- Theme: Afterglow ----
      Third theme, from a 6-stop indigo-to-gold sunset gradient reference — deep indigo-navy base
@@ -772,7 +770,7 @@ let CLOUD_MODE = (typeof localStorage !== 'undefined' && localStorage.getItem(CL
 const THEME_KEY = 'rwr-theme';
 const THEMES = [
   { id:'midnight', name:'Midnight Gold', desc:'The original look — dark charcoal with a warm gold accent.', swatches:['#16151c','#1c1b23','#c9a15a','#f0eee8'] },
-  { id:'riptide', name:'Riptide', desc:'White base, Storm Green ink, Vivid Cyan accent. Colors only for now — typography and layout on top of this are still being tuned.', swatches:['#ffffff','#0f282f','#02eff0','#eaf1f2'] },
+  { id:'riptide', name:'Riptide', desc:'Deep teal-black base with a rust-terracotta accent, headings in a rounded, smooth, more branded-feeling face (Poppins).', swatches:['#003135','#024950','#0fa4af','#964734'] },
   { id:'afterglow', name:'Afterglow', desc:'A deep indigo-night base with a sunset gradient — magenta into rose into gold — carrying the accent. Colors only for now, same as Riptide.', swatches:['#1b1931','#662249','#a34054','#ed9e59'] },
   { id:'espresso', name:'Espresso', desc:'Quiet-luxury browns — warm cream base, espresso ink, caramel accent. Colors only for now, same as Riptide.', swatches:['#f0ebe3','#35261e','#bd7f48','#c79485'] },
 ];
