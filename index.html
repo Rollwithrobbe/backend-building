@@ -2213,8 +2213,15 @@ function renderBrandBreakdownModal(){
 // grouped (crossposted) deliverable is only really "safe" once every platform in it is either
 // past its window or excluded, so this looks at each platform's own eligible_until rather than
 // the deliverable's aggregate status, and surfaces the tightest one.
+// Only genuinely "soon" — a video with weeks of runway left isn't at risk of anything, so
+// "soonest of everything" isn't the right bar. 7 days matches the danger/warn color bands below
+// (<=2 red, <=5 amber) — this is what actually gates whether a row shows up here at all, not just
+// how it's sorted. Nothing within a week → the empty state, which is the honest answer, not
+// padding the list out with something that just happens to be the least-far-away.
+const SOON_CUTOFF_DAYS = 7;
 function expiringSoonDeliverables(limit=8){
   if(!TRACKED_CONTENT_DATA) return [];
+  const cutoff = Date.now() + SOON_CUTOFF_DAYS * 86400000;
   return getDeliverables()
     .filter(dv => !dv.excluded && dv.status==='tracking')
     .map(dv => {
@@ -2225,6 +2232,7 @@ function expiringSoonDeliverables(limit=8){
       return { ...dv, eligibleUntil: soonest.eligible_until, repRow: soonest, viewCount: Number(soonest.view_count)||0, req };
     })
     .filter(Boolean)
+    .filter(dv => new Date(dv.eligibleUntil).getTime() <= cutoff)
     .sort((a,b) => new Date(a.eligibleUntil) - new Date(b.eligibleUntil))
     .slice(0, limit);
 }
