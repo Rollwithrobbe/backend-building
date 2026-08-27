@@ -350,11 +350,13 @@
   .alert-title{ font-size:12.5px; font-weight:600; color:var(--text); line-height:1.4; }
   .alert-detail{ font-size:11.5px; color:var(--text-dim); margin-top:2px; line-height:1.4; overflow:hidden; text-overflow:ellipsis; }
   .alert-hit .alert-title{ color:var(--fx-green); }
+  .alert-run-error .alert-title{ color:var(--fx-red); }
   /* Already-seen notifications stay in the list (only Clear notifications removes them) but fade
      back so unread ones keep standing out — same dim treatment regardless of hit/stale type. */
   .alert-item.alert-read{ opacity:.45; }
   .alert-item.alert-read:hover{ opacity:.75; }
   .alert-item.alert-read.alert-hit .alert-title{ color:var(--text); }
+  .alert-item.alert-read.alert-run-error .alert-title{ color:var(--text); }
 
   /* ---- date picker popover ---- */
   .dp-popover{
@@ -1447,6 +1449,57 @@ function syncAlertsLog(){
     if(log[i].type==='stale' && !currentStaleIds.has(log[i].id)){ log.splice(i,1); changed = true; }
   }
 
+  // System health — did each platform's scan actually run, and did it succeed when it did. This
+  // is different from "stale" above (one video not being re-checked) — this is about the scout
+  // job itself: silently never firing at all, or firing but getting rejected outright (blocked
+  // API, expired token, etc.). Both are invisible from tracked_videos alone — a fully-blocked run
+  // leaves last_checked_at untouched, identical to the cron simply never firing.
+  if(SCOUT_RUNS_DATA){
+    const currentMissingIds = new Set();
+    const PLATFORM_LABELS = { instagram:'Instagram', tiktok:'TikTok', youtube:'YouTube' };
+    ['instagram','tiktok','youtube'].forEach(platform => {
+      const runs = SCOUT_RUNS_DATA.filter(r => r.platform===platform).sort((a,b) => new Date(b.started_at)-new Date(a.started_at));
+      const latest = runs[0];
+      const label = PLATFORM_LABELS[platform];
+      // Missed run — nothing recorded for this platform in the last 26h (a day plus the same
+      // buffer used for stale-coverage above). A live condition, not a fixed fact — self-resolving,
+      // removed the moment a run actually shows up, same as stale-coverage.
+      const missingId = 'run-missing-' + platform;
+      const hasRecentRun = latest && (now - new Date(latest.started_at).getTime()) < 26*3600000;
+      if(!hasRecentRun){
+        currentMissingIds.add(missingId);
+        if(!byId.has(missingId)){
+          const hoursAgo = latest ? Math.floor((now - new Date(latest.started_at).getTime())/3600000) : null;
+          const entry = {
+            id: missingId, type:'run-missing', ts:now, read:false, cleared:false, videoId:null,
+            title: `${label} scan hasn't run in over a day`,
+            detail: hoursAgo!=null ? `Last run ${hoursAgo}h ago` : 'No run recorded yet',
+          };
+          log.push(entry); byId.set(missingId, entry); changed = true;
+        }
+      }
+      // Run error — the most recent run for this platform failed outright, or a brand it scanned
+      // hit an API error (rate limit, blocked access, missing/expired token, etc.). Tied to that
+      // specific run's own id — a run that's still failing doesn't re-notify every sync, but a
+      // fresh failure (a new run id) always does, same as a hit above.
+      if(latest && (!latest.ok || (latest.brand_errors && latest.brand_errors.length))){
+        const id = 'run-error-' + latest.id;
+        if(!byId.has(id)){
+          const msgs = !latest.ok ? [latest.top_error || 'Unknown error'] : latest.brand_errors.map(e => `${e.brand}: ${e.error}`);
+          const entry = {
+            id, type:'run-error', ts:new Date(latest.started_at).getTime(), read:false, cleared:false, videoId:null,
+            title: `${label} scan hit an error`,
+            detail: msgs.join(' · ').slice(0,200),
+          };
+          log.push(entry); byId.set(id, entry); changed = true;
+        }
+      }
+    });
+    for(let i=log.length-1; i>=0; i--){
+      if(log[i].type==='run-missing' && !currentMissingIds.has(log[i].id)){ log.splice(i,1); changed = true; }
+    }
+  }
+
   // No cap here on purpose — this runs on every render (see renderAlertsBell), and truncating
   // would drop entries out of byId, which would then look "un-logged" on the very next sync and
   // get re-added as unread, forever churning. Hit entries are a small, meaningful, permanent
@@ -1513,8 +1566,8 @@ function renderAlertsPanel(){
     ${alerts.length===0 ? `<div class="empty" style="padding:20px 10px;">All caught up — nothing needs your attention.</div>` : `
     <div class="alerts-list">
       ${alerts.map(a => `
-        <div class="alert-item alert-${a.type} ${a.read?'alert-read':''}" data-alert-goto-video="${a.videoId}">
-          <div class="alert-icon">${a.type==='hit' ? '🎉' : '⚠️'}</div>
+        <div class="alert-item alert-${a.type} ${a.read?'alert-read':''}" ${a.videoId?`data-alert-goto-video="${a.videoId}"`:''}>
+          <div class="alert-icon">${a.type==='hit' ? '🎉' : a.type==='run-error' ? '🔴' : a.type==='run-missing' ? '⏱️' : '⚠️'}</div>
           <div class="alert-body">
             <div class="alert-title">${escapeHtml(a.title)}</div>
             <div class="alert-detail">${escapeHtml(a.detail)}</div>
@@ -2436,6 +2489,13 @@ let TRACKED_CONTENT_ERROR = null;
 // and the matching logViewSnapshot()/call-site pieces in all three api/scout-*.js files, then
 // drop the view_snapshots Supabase table. Nothing else reads this variable or depends on it.
 let VIEW_SNAPSHOTS_DATA = null;
+// One row per scout-*.js run (success, per-brand error, or full crash) — written by the jobs
+// themselves (see logScoutRun() in each api/scout-*.js file), read here purely to power the
+// alerts bell's system-health entries (see syncAlertsLog()'s run-error/run-missing section):
+// "the scan actually ran" and "it ran but hit an error" are both invisible from tracked_videos
+// alone — a fully-blocked Instagram run leaves last_checked_at untouched, identical to the cron
+// simply never firing at all, so there was no way to tell those two apart before this existed.
+let SCOUT_RUNS_DATA = null;
 // Row ids (individual tracked_videos, not deliverables) currently checked for merging into one
 // crossposted deliverable — see the Merge button in renderTrackedContent() and renderMergeReviewModal().
 let MERGE_SELECTED = new Set();
@@ -2476,6 +2536,25 @@ async function loadTrackedContent(){
   TRACKED_CONTENT_LOADING = false;
   renderWithChartEnter();
   loadViewSnapshots(); // fire-and-forget — see its own comment; never blocks the main dashboard
+  loadScoutRuns(); // fire-and-forget — see its own comment; never blocks the main dashboard
+}
+
+// See SCOUT_RUNS_DATA's declaration for what this powers. Same silent-give-up-on-failure pattern
+// as loadViewSnapshots() — including if the scout_runs table doesn't exist yet because the SQL
+// migration hasn't been run — this should never surface an error or hold up anything else.
+async function loadScoutRuns(){
+  try{
+    const cutoff = new Date(Date.now() - 3*86400000).toISOString();
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/scout_runs?select=id,platform,started_at,ok,top_error,brand_errors&started_at=gte.${cutoff}&order=started_at.desc`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+    SCOUT_RUNS_DATA = await res.json();
+    render();
+  }catch(e){
+    console.warn('loadScoutRuns failed (system-health alerts just won\'t show) —', e);
+  }
 }
 
 // EXPERIMENTAL (added 2026-08-25, 2-week trial) — see VIEW_SNAPSHOTS_DATA's declaration for the

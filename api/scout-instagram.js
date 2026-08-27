@@ -11,7 +11,26 @@
 // Optional:
 //   CRON_SECRET
 
+// Writes one row to scout_runs at the end of every run — success, per-brand error, or full
+// crash — so the dashboard's alerts bell can tell "ran fine" apart from "silently never ran"
+// apart from "ran but got rejected", instead of only inferring health indirectly from whether
+// tracked_videos.last_checked_at moved (which a fully-blocked run wouldn't move at all). Never
+// lets a logging failure fail the actual scouting run — this is purely observability.
+async function logScoutRun(SUPABASE_URL, sbHeaders, { startedAt, ok, topError, brandsScanned, brandErrors }) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/scout_runs`, {
+      method: 'POST',
+      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        platform: 'instagram', started_at: startedAt, finished_at: new Date().toISOString(),
+        ok, top_error: topError || null, brands_scanned: brandsScanned || 0, brand_errors: brandErrors || [],
+      }),
+    });
+  } catch (e) { /* logging the run shouldn't ever fail the run itself */ }
+}
+
 export default async function handler(req, res) {
+  const startedAt = new Date().toISOString();
   const CRON_SECRET = process.env.CRON_SECRET;
   if (CRON_SECRET && req.headers['authorization'] !== `Bearer ${CRON_SECRET}`) {
     return res.status(401).json({ error: 'unauthorized' });
@@ -39,6 +58,7 @@ export default async function handler(req, res) {
     const brands = await brandsRes.json();
 
     if (!Array.isArray(brands) || brands.length === 0) {
+      await logScoutRun(SUPABASE_URL, sbHeaders, { startedAt, ok: true, brandsScanned: 0 });
       return res.status(200).json({ message: 'no brands with an Instagram account connected yet' });
     }
 
@@ -56,8 +76,11 @@ export default async function handler(req, res) {
       perBrand.push({ brand: brand.name, instagram: brand.instagram_username, ...outcome });
     }
 
+    const brandErrors = perBrand.filter(p => p.error).map(p => ({ brand: p.brand, error: p.error }));
+    await logScoutRun(SUPABASE_URL, sbHeaders, { startedAt, ok: true, brandsScanned: brands.length, brandErrors });
     return res.status(200).json({ brandsScanned: brands.length, perBrand, usage: { peakPct: guard.pct, stoppedEarly: guard.stop } });
   } catch (err) {
+    await logScoutRun(SUPABASE_URL, sbHeaders, { startedAt, ok: false, topError: String(err) });
     return res.status(500).json({ error: String(err) });
   }
 }

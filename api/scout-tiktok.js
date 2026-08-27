@@ -15,7 +15,23 @@
 // Optional:
 //   CRON_SECRET
 
+// See the identical function in scout-instagram.js for the full rationale — duplicated rather
+// than shared since each scout job is a standalone serverless function.
+async function logScoutRun(SUPABASE_URL, sbHeaders, { startedAt, ok, topError, brandsScanned, brandErrors }) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/scout_runs`, {
+      method: 'POST',
+      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        platform: 'tiktok', started_at: startedAt, finished_at: new Date().toISOString(),
+        ok, top_error: topError || null, brands_scanned: brandsScanned || 0, brand_errors: brandErrors || [],
+      }),
+    });
+  } catch (e) { /* logging the run shouldn't ever fail the run itself */ }
+}
+
 export default async function handler(req, res) {
+  const startedAt = new Date().toISOString();
   const CRON_SECRET = process.env.CRON_SECRET;
   if (CRON_SECRET && req.headers['authorization'] !== `Bearer ${CRON_SECRET}`) {
     return res.status(401).json({ error: 'unauthorized' });
@@ -42,6 +58,7 @@ export default async function handler(req, res) {
     const brands = await brandsRes.json();
 
     if (!Array.isArray(brands) || brands.length === 0) {
+      await logScoutRun(SUPABASE_URL, sbHeaders, { startedAt, ok: true, brandsScanned: 0 });
       return res.status(200).json({ message: 'no brands with a TikTok account connected yet' });
     }
 
@@ -64,8 +81,11 @@ export default async function handler(req, res) {
       perBrand.push({ brand: brand.name, tiktok: brand.tiktok_username, ...outcome });
     }
 
+    const brandErrors = perBrand.filter(p => p.error).map(p => ({ brand: p.brand, error: p.error }));
+    await logScoutRun(SUPABASE_URL, sbHeaders, { startedAt, ok: true, brandsScanned: brands.length, brandErrors });
     return res.status(200).json({ brandsScanned: brands.length, perBrand, apiCallsThisRun: callGuard.count });
   } catch (err) {
+    await logScoutRun(SUPABASE_URL, sbHeaders, { startedAt, ok: false, topError: String(err) });
     return res.status(500).json({ error: String(err) });
   }
 }
