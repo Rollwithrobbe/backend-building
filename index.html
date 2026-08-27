@@ -100,11 +100,11 @@
      Mono, both already neutral enough to carry either theme without their own override. */
   [data-theme="riptide"]{
     --bg: #ffffff;
-    --bg-raised: #f5f9fa;
-    --surface: #eaf1f2;
-    --surface-2: #dce7e9;
-    --border: #c7d6d9;
-    --border-soft: #dce7e9;
+    --bg-raised: #eef6f7;
+    --surface: #d6e6e8;
+    --surface-2: #c2d8db;
+    --border: #a9c4c8;
+    --border-soft: #c2d8db;
     --text: #0f282f;
     --text-dim: #4a6169;
     --text-faint: #8ca3a8;
@@ -140,7 +140,21 @@
     --glass-rgb: 255,255,255;
     --brand-gradient: linear-gradient(135deg, #0f282f 0%, #02eff0 100%);
   }
-  [data-theme="riptide"] h1,[data-theme="riptide"] h2,[data-theme="riptide"] h3,[data-theme="riptide"] h4{ font-family:'Space Grotesk',sans-serif; }
+  /* h1-h4 covers real page/modal titles, but most of what actually *reads* as a heading in this
+     app — card labels, table column headers, "Expiring soon"-style section titles — are plain
+     divs/th with manual uppercase+bold styling, not semantic heading tags, so scoping to h1-h4
+     alone left almost the entire dashboard looking untouched. Covering the shared classes/tags
+     those all go through instead of chasing every one-off inline-styled label individually. */
+  [data-theme="riptide"] h1,
+  [data-theme="riptide"] h2,
+  [data-theme="riptide"] h3,
+  [data-theme="riptide"] h4,
+  [data-theme="riptide"] th,
+  [data-theme="riptide"] .card .label,
+  [data-theme="riptide"] .section-title,
+  [data-theme="riptide"] .tw-head,
+  [data-theme="riptide"] .nav-btn,
+  [data-theme="riptide"] .btn{ font-family:'Space Grotesk',sans-serif; }
   /* the one flat-fill exception — everywhere else reads --accent through var(), this is the one
      deliberate spot the provided brand gradient actually shows up rather than sitting unused */
   [data-theme="riptide"] .btn-primary{ background:var(--brand-gradient); border-color:transparent; }
@@ -472,6 +486,9 @@
   .ai-suggest button{ font-size:11px; }
 
   .section-title{ font-size:13px; font-weight:700; color:var(--text-dim); text-transform:uppercase; letter-spacing:.06em; margin:26px 0 10px; }
+  /* the header bar sitting inside a .table-wrap card (e.g. "Today's video quota") — same visual
+     family as .section-title but padded+bordered like a card header instead of a standalone label */
+  .tw-head{ padding:13px 16px; border-bottom:1px solid var(--border-soft); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim); }
   .section-title:first-child{ margin-top:0; }
 
   .fx-green{ color:var(--fx-green) !important; }
@@ -1802,7 +1819,7 @@ function renderBriefQuotas(){
   const briefs = activeBriefBrands();
   if(briefs.length===0) return '';
   return `<div class="table-wrap" style="margin-bottom:22px;">
-    <div style="padding:13px 16px; border-bottom:1px solid var(--border-soft); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim);">Today's video quota</div>
+    <div class="tw-head">Today's video quota</div>
     ${briefs.map(b => {
       const info = briefTodayInfo(b);
       const done = info.remaining<=0;
@@ -2567,7 +2584,7 @@ function renderSettings(){
     <div class="page-head">
       <div><h2>Settings</h2><div class="sub">Dashboard preferences — stored on this device only, not synced to the cloud.</div></div>
     </div>
-    <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim); margin-bottom:12px;">Theme</div>
+    <div class="tw-head" style="padding:0; border-bottom:none; margin-bottom:12px;">Theme</div>
     <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:16px;">
       ${THEMES.map(t => {
         const active = CURRENT_THEME===t.id;
