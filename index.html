@@ -2571,8 +2571,19 @@ function brandViewsBreakdownData(brandId, brandName, topN=5){
 }
 
 // EXPERIMENTAL (added 2026-08-25, 2-week trial) — see VIEW_SNAPSHOTS_DATA's declaration for the
-// full removal note. One scouting run/day means one snapshot per video per day, so summing
-// same-day rows is a safe daily total with no extra dedup needed. Returns oldest-first.
+// full removal note. Returns oldest-first.
+//
+// The original version assumed "one scouting run/day means one snapshot per video per day, so
+// summing same-day rows needs no dedup". That assumption does NOT hold: any manual scout trigger
+// or cron retry writes another row for the same video on the same day, and on 2026-08-28 live
+// data 255 of 438 video-day pairs carried 2–4 rows each. Summing them double-counted a video
+// against itself. Now collapses to one row per video per day (latest wins) before summing.
+//
+// Still only covers videos actually CHECKED that day (the tiered isDueForCheck schedule skips
+// older videos most days), so this stays a rough direction-of-travel sparkline, not a true daily
+// total — which is exactly why the Analytics chart builds its own series from tracked_videos
+// instead of reusing this. Fine for a word-sized "is it climbing" line; not fine for a headline
+// number, so it isn't used as one anywhere.
 function brandPlatformTrend(brandId, brandName, platform){
   if(!VIEW_SNAPSHOTS_DATA) return [];
   // fallback brands (not yet in this device's DATA.brands) have no local id to match snapshots'
@@ -2580,9 +2591,14 @@ function brandPlatformTrend(brandId, brandName, platform){
   // off any already-loaded tracked_videos row for that brand name.
   const resolvedId = brandId || TRACKED_CONTENT_DATA?.find(r => r.brands?.name === brandName)?.brand_id;
   if(!resolvedId) return [];
-  const byDay = {};
+  const latestPerVideoDay = {};
   VIEW_SNAPSHOTS_DATA.forEach(s => {
     if(s.brand_id !== resolvedId || s.platform !== platform) return;
+    const k = s.checked_at.slice(0,10) + '|' + s.tracked_video_id;
+    if(!latestPerVideoDay[k] || s.checked_at > latestPerVideoDay[k].checked_at) latestPerVideoDay[k] = s;
+  });
+  const byDay = {};
+  Object.values(latestPerVideoDay).forEach(s => {
     const day = s.checked_at.slice(0,10);
     byDay[day] = (byDay[day]||0) + (Number(s.view_count)||0);
   });
@@ -3493,15 +3509,19 @@ function caIsNearMiss(dv){
   const ratio = caBestRatio(dv);
   return ratio != null && ratio >= 0.8 && ratio < 1;
 }
-// Views gained since this specific video's last snapshot before its most recent one — real,
-// from the daily view_snapshots history, but only ever as precise as "since last check", not a
-// literal 48h window (checks run roughly daily, not on a fixed clock). null with fewer than 2
-// snapshots yet, which is expected for most videos until the table has more history behind it.
+// Views gained day over day for this video, from the view_snapshots history. Collapses to one
+// snapshot per DAY first (see caLatestSnapshotPerDay) rather than diffing the last two raw rows —
+// two rows minutes apart from a manual scout re-trigger would otherwise report that near-zero gap
+// as the video's velocity, which is what made "since last check" read absurdly low (+72 on a
+// video pulling tens of thousands). null until there are 2+ distinct days of history.
 function caVideoVelocity(trackedVideoId){
   if(!VIEW_SNAPSHOTS_DATA) return null;
-  const rows = VIEW_SNAPSHOTS_DATA.filter(s => s.tracked_video_id === trackedVideoId).sort((a,b)=>a.checked_at.localeCompare(b.checked_at));
-  if(rows.length < 2) return null;
-  return Math.max(0, (Number(rows[rows.length-1].view_count)||0) - (Number(rows[rows.length-2].view_count)||0));
+  const byDay = caLatestSnapshotPerDay(trackedVideoId);
+  const days = Object.keys(byDay).sort();
+  if(days.length < 2) return null;
+  const last = Number(byDay[days[days.length-1]].view_count)||0;
+  const prev = Number(byDay[days[days.length-2]].view_count)||0;
+  return Math.max(0, last - prev);
 }
 function caDeliverableVelocity(dv){
   const vals = dv.rows.map(r => caVideoVelocity(r.id)).filter(v => v != null);
@@ -3532,26 +3552,85 @@ function caIsTrending(dv, velocityByBrand){
   const ratio = caBreakoutRatio(dv, velocityByBrand);
   return ratio != null && ratio >= 2;
 }
-// Real daily total across every currently-tracked video on that platform (every brand, not just
-// one) — same day-bucketing brandPlatformTrend() already uses for the brand-breakdown sparkline,
-// just not scoped to a single brand. Shape, not exact "new views that day" — a snapshot is each
-// video's running view_count on the day it was checked, so this is "total reach as measured that
-// day," same honest framing view_snapshots already carries everywhere else it's used.
-function caPlatformDailySeries(platform){
-  if(!VIEW_SNAPSHOTS_DATA) return [];
-  const byDay = {};
-  VIEW_SNAPSHOTS_DATA.forEach(s => {
-    if(s.platform !== platform) return;
-    const day = s.checked_at.slice(0,10);
-    byDay[day] = (byDay[day]||0) + (Number(s.view_count)||0);
+// Cumulative total views over time, per platform — for each day, the summed view_count of every
+// video on that platform posted on or before that day. Built from tracked_videos, deliberately
+// NOT from view_snapshots.
+//
+// view_snapshots genuinely cannot answer this question. A snapshot row only exists for a video
+// that was actually CHECKED that day, and the tiered schedule (isDueForCheck in the scout jobs)
+// only touches videos older than 30 days weekly, older than 90 monthly. So "sum that day's
+// snapshots" really means "sum whichever subset happened to be due", which swings on check
+// cadence rather than on views. Measured against live data (2026-08-28): daily coverage ranged
+// 49–144 of 155 tracked videos, and 255 video-day pairs carried 2–4 duplicate rows (every manual
+// scout re-trigger or cron retry adds one), so Instagram's line read 296,697 and 301,845 on
+// consecutive days against a true all-time total of 156,650 — near-doubled by duplicates on the
+// days most videos happened to be re-checked. The shape was an artifact of snapshot bookkeeping.
+//
+// This version's final point reconciles exactly with the Dashboard's Brand Comparison "Views —
+// all time" column, because both sum the same tracked_videos.view_count.
+//
+// Honest limitation, stated in the card's own caption too: each video's CURRENT view count is
+// attributed to its post date, so this reads as "cumulative reach of everything published up to
+// this date" — it steps up on posting days rather than tracing how the counter actually climbed
+// between them. Doing the latter needs a full daily snapshot of every video, which is exactly
+// what view_snapshots is too sparse and too duplicated to provide today.
+function caCumulativeSeries(){
+  const platforms = ['tiktok','instagram','youtube'];
+  const empty = { days: [], byPlatform: {} };
+  if(!TRACKED_CONTENT_DATA) return empty;
+  const rows = TRACKED_CONTENT_DATA.filter(r => !r.excluded && r.posted_at && platforms.includes(r.platform));
+  if(rows.length === 0) return empty;
+
+  const DAY = 86400000;
+  const dayKey = (ms) => new Date(ms).toISOString().slice(0,10);
+  const firstMs = Math.min(...rows.map(r => new Date(r.posted_at).getTime()));
+  const nowMs = Date.now();
+  // The range pill windows the X AXIS only — the values stay absolute cumulative totals, same as
+  // zooming a stock chart to 1M without rebasing the price to zero.
+  const startMs = CA_STATE.range === '9999' ? firstMs : Math.max(firstMs, nowMs - Number(CA_STATE.range)*DAY);
+
+  let days = [];
+  for(let t = Math.floor(startMs/DAY)*DAY; t <= Math.floor(nowMs/DAY)*DAY; t += DAY) days.push(dayKey(t));
+  if(days.length === 0) return empty;
+  // keeps the path sane if this ever spans years rather than weeks
+  if(days.length > 180){
+    const step = Math.ceil(days.length/180);
+    const sampled = days.filter((_, i) => i % step === 0);
+    if(sampled[sampled.length-1] !== days[days.length-1]) sampled.push(days[days.length-1]);
+    days = sampled;
+  }
+
+  const byPlatform = {};
+  platforms.forEach(p => {
+    const pRows = rows.filter(r => r.platform === p)
+      .map(r => ({ day: r.posted_at.slice(0,10), views: Number(r.view_count)||0 }))
+      .sort((a,b) => a.day.localeCompare(b.day));
+    if(pRows.length === 0){ byPlatform[p] = []; return; }
+    // single forward walk rather than re-summing every row per day — O(days + rows)
+    let acc = 0, i = 0;
+    byPlatform[p] = days.map(day => {
+      while(i < pRows.length && pRows[i].day <= day){ acc += pRows[i].views; i++; }
+      return { day, value: acc };
+    });
   });
-  return Object.keys(byDay).sort().map(day => ({ day, value: byDay[day] }));
+  return { days, byPlatform };
+}
+// One snapshot per video per day (latest wins), never a sum — a single video can hold several
+// rows for one day after a manual scout re-trigger or a cron retry, and summing them would
+// double-count that video against itself.
+function caLatestSnapshotPerDay(trackedVideoId){
+  const byDay = {};
+  (VIEW_SNAPSHOTS_DATA||[]).forEach(s => {
+    if(s.tracked_video_id !== trackedVideoId) return;
+    const d = s.checked_at.slice(0,10);
+    if(!byDay[d] || s.checked_at > byDay[d].checked_at) byDay[d] = s;
+  });
+  return byDay;
 }
 function caVideoDailySeries(trackedVideoId){
   if(!VIEW_SNAPSHOTS_DATA) return [];
-  return VIEW_SNAPSHOTS_DATA.filter(s => s.tracked_video_id === trackedVideoId)
-    .sort((a,b)=>a.checked_at.localeCompare(b.checked_at))
-    .map(s => ({ day: s.checked_at.slice(0,10), value: Number(s.view_count)||0 }));
+  const byDay = caLatestSnapshotPerDay(trackedVideoId);
+  return Object.keys(byDay).sort().map(d => ({ day: d, value: Number(byDay[d].view_count)||0 }));
 }
 function caRangeCutoff(){ return CA_STATE.range==='9999' ? 0 : Date.now() - Number(CA_STATE.range)*86400000; }
 function caPassesPageFilters(dv, velocityByBrand){
@@ -3638,21 +3717,22 @@ function caBreakoutRowHtml(rows, velocityByBrand){
 }
 
 function caChartCardHtml(){
-  const platforms = ['tiktok','instagram','youtube'];
-  const series = platforms.map(p => ({ platform:p, points: caPlatformDailySeries(p) }));
-  // Matches caRenderChart()'s own 2-point minimum to actually draw a line (each platform on its
-  // own axis now — see the comment there).
-  const shown = series.filter(s => s.points.length >= 2);
-  const pending = series.filter(s => s.points.length > 0 && s.points.length < 2);
-  const pendingNote = pending.length ? ` Still building history for ${pending.map(s=>PLATFORM_DISPLAY_NAME[s.platform]).join(' and ')} — a couple more days of scouting runs and it'll show up here too.` : '';
+  const { days, byPlatform } = caCumulativeSeries();
+  const shown = ['tiktok','instagram','youtube'].filter(p => (byPlatform[p]||[]).length >= 2 && byPlatform[p].some(d => d.value > 0));
+  const rangeLabel = (CA_RANGES.find(r=>r.id===CA_STATE.range)||{}).label || '';
   return `<div class="chart-card">
     <div class="chart-head">
-      <div class="label" style="margin:0;">Views over time — by platform</div>
-      <div class="chart-legend" id="caChartLegend">${platforms.map(p=>`<div class="chart-legend-item">${caPlatformPillHtml(p)}</div>`).join('')}</div>
+      <div class="label" style="margin:0;">Total views over time — ${escapeHtml(rangeLabel)}</div>
+      <div class="chart-legend" id="caChartLegend">${shown.map(p=>`<div class="chart-legend-item">${caPlatformPillHtml(p)}</div>`).join('')}</div>
     </div>
-    ${shown.length>0
-      ? `<svg id="caChartSvg" viewBox="0 0 980 190" width="100%" height="190" preserveAspectRatio="none" class="chart-enter" style="display:block; overflow:visible; cursor:crosshair;"></svg><div class="hint" style="margin-top:8px;">From view_snapshots — daily totals across every tracked video on that platform, shape not exact new-views-that-day. Hover a point to see which platform is which.${pendingNote}</div>`
-      : `<div class="empty" style="padding:34px 10px;">Not enough view history yet — this chart needs a few days of the daily view_snapshots table to have something to draw.</div>`}
+    ${shown.length>0 && days.length>=2
+      ? `<svg id="caChartSvg" viewBox="0 0 980 190" width="100%" height="190" preserveAspectRatio="none" class="chart-enter" style="display:block; overflow:visible; cursor:crosshair;"></svg>
+         <div style="display:flex; justify-content:space-between; margin-top:6px;">
+           <span style="font-size:10px; color:var(--text-faint);">${escapeHtml(fmtDate(days[0]))}</span>
+           <span style="font-size:10px; color:var(--text-faint);">${escapeHtml(fmtDate(days[days.length-1]))}</span>
+         </div>
+         <div class="hint" style="margin-top:6px;">Cumulative views across every tracked video, counted from each video's post date — the right-hand end matches the "Views — all time" figures in Brand Comparison. Because each video's current view count is attributed to the day it was posted, the line steps up on posting days rather than tracing how each video climbed afterwards.</div>`
+      : `<div class="empty" style="padding:34px 10px;">Nothing tracked in this range yet.</div>`}
   </div>`;
 }
 
@@ -3808,14 +3888,18 @@ function caShowChartTooltip(frac, clientX, clientY){
   if(!CA_CHART_SERIES) return;
   const tip = document.getElementById('chartTooltip');
   if(!tip) return;
-  const { platforms, byPlatform, pad, W } = CA_CHART_SERIES;
+  const { platforms, byPlatform, days, pad, W } = CA_CHART_SERIES;
   const targetX = pad + frac*(W-2*pad);
+  // Every platform now shares one real calendar-day axis, so the date is the same across all
+  // three rows — shown once as the header instead of repeated per row (which is also what let
+  // the old tooltip grow wide enough to overflow the card).
+  const dayIdx = Math.max(0, Math.min(days.length-1, Math.round(frac*(days.length-1))));
   const atCursor = platforms
-    .map(p => { const pt = caBezierAtX(byPlatform[p], targetX); return { p, pt, value: caValueFromY(pt.y) }; })
+    .map(p => { const pt = caBezierAtX(byPlatform[p], targetX); return { p, value: caValueFromY(pt.y) }; })
     .sort((a,b) => b.value - a.value); // highest first, not a fixed platform order
-  let html = `<div class="ct-total">Views</div>`;
-  atCursor.forEach(({p, pt, value}) => {
-    html += `<div class="ct-row"><span>${caPlatformPillHtml(p)}</span><span class="ct-amt">${escapeHtml(fmtDate(pt.day))} · ${pt.exact?'':'~'}${Math.round(value).toLocaleString()}</span></div>`;
+  let html = `<div class="ct-total">${escapeHtml(fmtDate(days[dayIdx]))}</div>`;
+  atCursor.forEach(({p, value}) => {
+    html += `<div class="ct-row"><span>${caPlatformPillHtml(p)}</span><span class="ct-amt">${Math.round(value).toLocaleString()}</span></div>`;
   });
   tip.innerHTML = html;
   // Lets the box size to its own content — the shared .chart-tooltip caps at max-width:230px,
@@ -3871,24 +3955,24 @@ function caRenderChart(){
   if(!svg) return;
   const allPlatforms = ['tiktok','instagram','youtube'];
   const W=980, H=190, pad=6, topPad=10, botPad=18;
-  const rawByPlatform = {};
-  allPlatforms.forEach(p => rawByPlatform[p] = caPlatformDailySeries(p));
-  const maxV = Math.max(1, ...allPlatforms.flatMap(p => rawByPlatform[p].map(x=>x.value))) * 1.08;
-  // 2+ points needed to draw an actual line — a single day is just a dot with nothing to compare
-  // it to, same "not enough yet" threshold sparklineSvg() already uses elsewhere in the app.
-  const platforms = allPlatforms.filter(p => rawByPlatform[p].length >= 2);
+  // One shared calendar-day axis for all three platforms now (every series has a value for every
+  // day), rather than the previous per-platform stretched index axis — that workaround existed
+  // only because view_snapshots gave each platform a different, very short run of days.
+  const { days, byPlatform: rawByPlatform } = caCumulativeSeries();
+  const n = days.length;
+  if(n < 2){ CA_CHART_SERIES = null; return; }
+  const platforms = allPlatforms.filter(p => (rawByPlatform[p]||[]).length >= 2 && rawByPlatform[p].some(d => d.value > 0));
+  if(platforms.length === 0){ CA_CHART_SERIES = null; return; }
+  const maxV = Math.max(1, ...platforms.flatMap(p => rawByPlatform[p].map(x=>x.value))) * 1.08;
   const byPlatform = {};
   platforms.forEach(p => {
-    const arr = rawByPlatform[p];
-    const n = arr.length;
-    byPlatform[p] = arr.map((d,i) => ({
-      x: pad + (n>1 ? (i/(n-1))*(W-2*pad) : 0),
+    byPlatform[p] = rawByPlatform[p].map((d,i) => ({
+      x: pad + (i/(n-1))*(W-2*pad),
       y: topPad + (H-topPad-botPad)*(1 - d.value/maxV),
       day: d.day, value: d.value,
     }));
   });
-  CA_CHART_SERIES = { platforms, byPlatform, W, H, pad, topPad, botPad, maxV };
-  if(platforms.length===0) return;
+  CA_CHART_SERIES = { platforms, days, byPlatform, W, H, pad, topPad, botPad, maxV };
 
   let html = '<defs>';
   platforms.forEach(p => {
