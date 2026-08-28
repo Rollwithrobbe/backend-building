@@ -2276,7 +2276,7 @@ function brandComparisonRows(){
     rows.push({
       id: b.id, name: b.name, color: b.color,
       count: items.length, hitRate: hitCount/items.length*100, views30d, viewsAllTime,
-      avgPayout: hitCount ? bt.contentEarned/hitCount : 0, earned: bt.totalEarned, outstanding: bt.outstanding,
+      avgPayout: hitCount ? bt.contentEarned/hitCount : 0, earned: bt.totalEarned, received: bt.received, outstanding: bt.outstanding,
     });
   });
   let fallbackIdx = 0;
@@ -2295,7 +2295,7 @@ function brandComparisonRows(){
       count: items.length, hitRate: hitCount/items.length*100, views30d, viewsAllTime,
       // no local brand link means no local payment record can exist for this name, so nothing's
       // ever been marked "received" — outstanding is simply everything earned so far.
-      avgPayout: hitCount ? earned/hitCount : 0, earned, outstanding: earned,
+      avgPayout: hitCount ? earned/hitCount : 0, earned, received: 0, outstanding: earned,
     });
   });
   return rows;
@@ -2321,6 +2321,7 @@ function renderBrandComparisonTable(){
       ${col('viewsAllTime','Views — all time','right','Total raw views across every platform, ever. Only as complete as tracking allows — a video that aged out of its brief\'s window stops being checked, so this is its view count as of its last real check, not necessarily its true current count.')}
       ${col('avgPayout','Avg payout','right','All time, per video that actually hit')}
       ${col('earned','Earned (all time)','right')}
+      ${col('received','Received (all time)','right','Actually paid — logged on the Payments tab')}
       ${col('outstanding','Outstanding','right','Earned but not yet marked received in Payments')}
     </tr></thead>
     <tbody>
@@ -2337,9 +2338,19 @@ function renderBrandComparisonTable(){
         <td class="mono" style="text-align:right;">${Math.round(r.viewsAllTime).toLocaleString()}</td>
         <td class="mono" style="text-align:right;">${money(r.avgPayout)}</td>
         <td class="mono fx-green" style="text-align:right;">${money(r.earned)}</td>
+        <td class="mono" style="text-align:right;">${money(r.received)}</td>
         <td class="mono ${r.outstanding>0?'fx-red':''}" style="text-align:right;">${money(r.outstanding)}</td>
       </tr>`).join('')}
     </tbody>
+    <tfoot>
+      <tr style="border-top:1px solid var(--border);">
+        <td style="font-weight:700; color:var(--text-dim);">Total</td>
+        <td></td><td></td><td></td><td></td><td></td>
+        <td class="mono fx-green" style="text-align:right; font-weight:700;">${money(sorted.reduce((s,r)=>s+r.earned,0))}</td>
+        <td class="mono" style="text-align:right; font-weight:700;">${money(sorted.reduce((s,r)=>s+r.received,0))}</td>
+        <td class="mono fx-red" style="text-align:right; font-weight:700;">${money(sorted.reduce((s,r)=>s+r.outstanding,0))}</td>
+      </tr>
+    </tfoot>
   </table></div>`;
 }
 
