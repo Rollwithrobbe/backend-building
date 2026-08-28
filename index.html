@@ -2440,7 +2440,9 @@ function renderBrandBreakdownModal(){
       ${data.platformTotals.map(p => {
         // EXPERIMENTAL — see VIEW_SNAPSHOTS_DATA's declaration. sparklineSvg() returns '' until
         // there are 2+ days of history, so this is invisible (not a placeholder) until then.
-        const trend = sparklineSvg(brandPlatformTrend(d.brandId, d.brandName, p.platform), `var(--${p.platform})`);
+        // Neutral color on purpose (not the platform's brand color, like this used to be) — it's
+        // just showing shape/direction, not re-identifying which platform this row already is.
+        const trend = sparklineSvg(brandPlatformTrend(d.brandId, d.brandName, p.platform), 'var(--text-dim)');
         return `
         <div class="brand-bar-row">
           <div style="width:90px; flex-shrink:0;"><span class="tag tag-${p.platform}">${escapeHtml((p.platform||'').toUpperCase())}</span></div>
