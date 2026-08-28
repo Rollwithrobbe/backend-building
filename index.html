@@ -3168,6 +3168,9 @@ function renderDashboard(){
       ${renderChart(series)}
     </div>
 
+    <div class="section-title">Brand comparison (all time)</div>
+    ${renderBrandComparisonTable()}
+
     <div class="two-col">
       <div>
         <div class="section-title" style="margin-top:0;">By brand — ${rangeLabel}</div>
@@ -3178,9 +3181,6 @@ function renderDashboard(){
         ${renderPriorityTasksWidget(topTasks)}
       </div>
     </div>
-
-    <div class="section-title">Brand comparison (all time)</div>
-    ${renderBrandComparisonTable()}
 
     <div class="section-title">Recent content</div>
     ${recent.length===0 ? emptyState('No content logged yet','Add a video and it will show up here.') : renderContentTable(recent)}
