@@ -572,6 +572,41 @@
   .tw-head{ padding:13px 16px; border-bottom:1px solid var(--border-soft); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim); }
   .section-title:first-child{ margin-top:0; }
 
+  /* Brand comparison — collapsible card + drag-to-reorder rows. Collapse/reorder both act
+     directly on the existing DOM nodes (see setBrandComparisonCollapsed / the drag handlers)
+     rather than going through render(), the same reason setMobileNavOpen bypasses it: render()
+     replaces #root.innerHTML wholesale, so a class toggled on a node that's about to be thrown
+     away and recreated never gets a "before" frame to transition from. */
+  .tw-head-collapsible{ cursor:pointer; user-select:none; -webkit-user-select:none; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .tw-head-collapsible:hover .brand-cmp-chevron{ background:var(--surface-2); }
+  .brand-cmp-summary{
+    font-weight:400; text-transform:none; letter-spacing:0; font-size:12px; color:var(--text-faint);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    opacity:0; transform:translateX(-6px);
+    transition:opacity .38s cubic-bezier(.22,1,.36,1) .07s, transform .38s cubic-bezier(.22,1,.36,1) .07s;
+  }
+  .table-wrap.collapsed .brand-cmp-summary{ opacity:1; transform:translateX(0); }
+  .brand-cmp-chevron{
+    flex-shrink:0; color:var(--text-faint); display:flex; align-items:center; justify-content:center;
+    width:22px; height:22px; border-radius:6px;
+    transition:transform .38s cubic-bezier(.22,1,.36,1), background-color .2s ease;
+  }
+  .table-wrap.collapsed .brand-cmp-chevron{ transform:rotate(-90deg); }
+  .brand-cmp-body{ display:grid; grid-template-rows:1fr; transition:grid-template-rows .42s cubic-bezier(.22,1,.36,1); }
+  .table-wrap.collapsed .brand-cmp-body{ grid-template-rows:0fr; }
+  .brand-cmp-body-inner{ overflow:hidden; transition:opacity .28s ease, filter .28s ease; }
+  .table-wrap.collapsed .brand-cmp-body-inner{ opacity:0; filter:blur(1.5px); }
+
+  .brand-cmp-grip-col{ width:26px; padding:0 0 0 10px !important; }
+  td.brand-cmp-grip{ width:26px; padding:9px 0 9px 10px; cursor:grab; color:var(--text-faint); }
+  td.brand-cmp-grip:active{ cursor:grabbing; }
+  td.brand-cmp-grip svg{ display:block; opacity:.45; transition:opacity .2s ease; }
+  tr:hover td.brand-cmp-grip svg{ opacity:.9; }
+  #brandCmpTbody tr{ transition:opacity .2s ease, transform .2s ease, box-shadow .2s ease; }
+  #brandCmpTbody tr.row-dragging{ opacity:.32; }
+  #brandCmpTbody tr.row-drop-before{ box-shadow:inset 0 2px 0 0 var(--accent); }
+  #brandCmpTbody tr.row-drop-after{ box-shadow:inset 0 -2px 0 0 var(--accent); }
+
   .fx-green{ color:var(--fx-green) !important; }
   .fx-red{ color:var(--fx-red) !important; }
   .delta{ font-size:12px; font-weight:600; display:inline-flex; align-items:center; gap:3px; }
@@ -986,6 +1021,11 @@ let PAYMENTS_FILTER = { brandId:'' };
 let DP = null; // { key, month: Date }
 let DASH_RANGE = 'month';
 let BRAND_TABLE_SORT = { key:'earned', dir:'desc' };
+// Manual drag order for the Brand Comparison table — an array of row keys (see brandCmpRowKey),
+// or null when no custom order has been set (falls back to BRAND_TABLE_SORT). Set the moment a
+// row is dragged; clicking a column header clears it and returns to sorting by that column.
+let BRAND_ROW_ORDER = JSON.parse(localStorage.getItem('rwr-brand-order') || 'null');
+const BRAND_CMP_COLLAPSED_KEY = 'rwr-brand-cmp-collapsed';
 // mirrors MODAL_ENTER's pattern (see openModal): true only for the one render() call that
 // should play the chart's materialize-in animation — first mount, a range switch, or the
 // moment tracked-content data first lands. Every other render() (checking a task, editing a
@@ -2300,58 +2340,167 @@ function brandComparisonRows(){
   });
   return rows;
 }
+// Stable identity for a brand-comparison row, used to persist/re-apply a manual drag order —
+// id is null for the "fallback" rows (a brand name seen in tracked content but not linked to a
+// local brand record), so those fall back to a name-based key instead.
+function brandCmpRowKey(r){ return r.id!=null ? ('id:'+r.id) : ('name:'+r.name); }
+
+// Direct DOM mutation, not render() — see the comment on .tw-head-collapsible in the CSS for why:
+// render() replaces #root.innerHTML wholesale, which would give the browser no "before" frame to
+// animate the collapse from.
+function setBrandComparisonCollapsed(collapsed){
+  localStorage.setItem(BRAND_CMP_COLLAPSED_KEY, collapsed ? '1' : '0');
+  const card = document.getElementById('brandCmpCard');
+  if(card) card.classList.toggle('collapsed', collapsed);
+}
+
 function renderBrandComparisonTable(){
   const rows = brandComparisonRows();
   if(rows.length===0) return emptyState('Nothing to compare yet', 'Once a brand has automated deliverables, it shows up here.');
-  const { key, dir } = BRAND_TABLE_SORT;
-  const sorted = [...rows].sort((a,b) => {
-    const cmp = typeof a[key]==='string' ? a[key].localeCompare(b[key]) : a[key]-b[key];
-    return dir==='asc' ? cmp : -cmp;
-  });
+
+  let sorted;
+  if(BRAND_ROW_ORDER){
+    const byKey = new Map(rows.map(r => [brandCmpRowKey(r), r]));
+    sorted = BRAND_ROW_ORDER.map(k => byKey.get(k)).filter(Boolean);
+    rows.forEach(r => { if(!sorted.includes(r)) sorted.push(r); }); // a brand new to the table lands at the end
+  } else {
+    const { key, dir } = BRAND_TABLE_SORT;
+    sorted = [...rows].sort((a,b) => {
+      const cmp = typeof a[key]==='string' ? a[key].localeCompare(b[key]) : a[key]-b[key];
+      return dir==='asc' ? cmp : -cmp;
+    });
+  }
+
   const col = (k, label, align, title) => {
-    const active = key===k;
-    return `<th data-sort-brand="${k}" ${title?`title="${escapeHtml(title)}"`:''} style="cursor:pointer; user-select:none; white-space:nowrap; ${align?`text-align:${align};`:''} ${active?'color:var(--text);':''}">${escapeHtml(label)}${active ? (dir==='asc'?' ↑':' ↓') : ''}</th>`;
+    const active = !BRAND_ROW_ORDER && BRAND_TABLE_SORT.key===k;
+    return `<th data-sort-brand="${k}" ${title?`title="${escapeHtml(title)}"`:''} style="cursor:pointer; user-select:none; white-space:nowrap; ${align?`text-align:${align};`:''} ${active?'color:var(--text);':''}">${escapeHtml(label)}${active ? (BRAND_TABLE_SORT.dir==='asc'?' ↑':' ↓') : ''}</th>`;
   };
-  return `<div class="table-wrap" style="overflow-x:auto;"><table>
-    <thead><tr>
-      ${col('name','Brand')}
-      ${col('count','Deliverables','right','All time')}
-      ${col('hitRate','Hit rate','right','All time')}
-      ${col('views30d','Views — 30d','right','Total raw views across every platform posted in the last 30 days (not per-video — a crosspost counts on each platform it reached). Rolls forward live: a video drops out of this the day it turns 31 days old.')}
-      ${col('viewsAllTime','Views — all time','right','Total raw views across every platform, ever. Only as complete as tracking allows — a video that aged out of its brief\'s window stops being checked, so this is its view count as of its last real check, not necessarily its true current count.')}
-      ${col('avgPayout','Avg payout','right','All time, per video that actually hit')}
-      ${col('earned','Earned (all time)','right')}
-      ${col('received','Received (all time)','right','Actually paid — logged on the Payments tab')}
-      ${col('outstanding','Outstanding','right','Earned but not yet marked received in Payments')}
-    </tr></thead>
-    <tbody>
-      ${sorted.map(r => `<tr class="row-click" data-open-brand-breakdown data-brand-id="${r.id||''}" data-brand-name="${escapeHtml(r.name)}" data-brand-color="${r.color}">
-        <td><span class="swatch" style="background:${r.color}"></span>${escapeHtml(r.name)}</td>
-        <td class="mono" style="text-align:right;">${r.count}</td>
-        <td style="text-align:right;">
-          <div style="display:inline-flex; align-items:center; gap:8px;">
-            <span class="mono" style="font-size:11.5px;">${r.hitRate.toFixed(0)}%</span>
-            <div class="brand-bar-track" style="width:52px;"><div class="brand-bar-fill" style="width:${r.hitRate.toFixed(0)}%; background:${r.hitRate>=50?'var(--fx-green)':'var(--text-faint)'};"></div></div>
-          </div>
-        </td>
-        <td class="mono" style="text-align:right;">${Math.round(r.views30d).toLocaleString()}</td>
-        <td class="mono" style="text-align:right;">${Math.round(r.viewsAllTime).toLocaleString()}</td>
-        <td class="mono" style="text-align:right;">${money(r.avgPayout)}</td>
-        <td class="mono fx-green" style="text-align:right;">${money(r.earned)}</td>
-        <td class="mono" style="text-align:right;">${money(r.received)}</td>
-        <td class="mono ${r.outstanding>0?'fx-red':''}" style="text-align:right;">${money(r.outstanding)}</td>
-      </tr>`).join('')}
-    </tbody>
-    <tfoot>
-      <tr style="border-top:1px solid var(--border);">
-        <td style="font-weight:700; color:var(--text-dim);">Total</td>
-        <td></td><td></td><td></td><td></td><td></td>
-        <td class="mono fx-green" style="text-align:right; font-weight:700;">${money(sorted.reduce((s,r)=>s+r.earned,0))}</td>
-        <td class="mono" style="text-align:right; font-weight:700;">${money(sorted.reduce((s,r)=>s+r.received,0))}</td>
-        <td class="mono fx-red" style="text-align:right; font-weight:700;">${money(sorted.reduce((s,r)=>s+r.outstanding,0))}</td>
-      </tr>
-    </tfoot>
-  </table></div>`;
+
+  const totalEarned = sorted.reduce((s,r)=>s+r.earned,0);
+  const totalReceived = sorted.reduce((s,r)=>s+r.received,0);
+  const totalOutstanding = sorted.reduce((s,r)=>s+r.outstanding,0);
+  const collapsed = localStorage.getItem(BRAND_CMP_COLLAPSED_KEY) === '1';
+  const gripSvg = `<svg width="11" height="15" viewBox="0 0 12 16" fill="currentColor"><circle cx="3" cy="2.5" r="1.4"/><circle cx="9" cy="2.5" r="1.4"/><circle cx="3" cy="8" r="1.4"/><circle cx="9" cy="8" r="1.4"/><circle cx="3" cy="13.5" r="1.4"/><circle cx="9" cy="13.5" r="1.4"/></svg>`;
+
+  return `<div class="table-wrap ${collapsed?'collapsed':''}" id="brandCmpCard" style="margin-bottom:22px;">
+    <div class="tw-head tw-head-collapsible" id="brandCmpHead">
+      <div style="display:flex; align-items:center; gap:10px; min-width:0; overflow:hidden;">
+        <span style="flex-shrink:0;">Brand comparison (all time)</span>
+        <span class="brand-cmp-summary mono">${sorted.length} brand${sorted.length===1?'':'s'} · <span class="fx-green">${money(totalEarned)} earned</span> · <span class="${totalOutstanding>0?'fx-red':''}">${money(totalOutstanding)} outstanding</span></span>
+      </div>
+      <div style="display:flex; align-items:center; gap:10px; flex-shrink:0;">
+        ${BRAND_ROW_ORDER ? `<button type="button" class="btn btn-ghost btn-sm" id="btnResetBrandOrder" title="Drop the custom order and go back to sorting by column" style="text-transform:none; letter-spacing:0; font-weight:600;">Reset order</button>` : ''}
+        <span class="brand-cmp-chevron"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg></span>
+      </div>
+    </div>
+    <div class="brand-cmp-body" id="brandCmpBody"><div class="brand-cmp-body-inner" style="overflow-x:auto;"><table>
+      <thead><tr>
+        <th class="brand-cmp-grip-col" title="Drag a row to reorder"></th>
+        ${col('name','Brand')}
+        ${col('count','Deliverables','right','All time')}
+        ${col('hitRate','Hit rate','right','All time')}
+        ${col('views30d','Views — 30d','right','Total raw views across every platform posted in the last 30 days (not per-video — a crosspost counts on each platform it reached). Rolls forward live: a video drops out of this the day it turns 31 days old.')}
+        ${col('viewsAllTime','Views — all time','right','Total raw views across every platform, ever. Only as complete as tracking allows — a video that aged out of its brief\'s window stops being checked, so this is its view count as of its last real check, not necessarily its true current count.')}
+        ${col('avgPayout','Avg payout','right','All time, per video that actually hit')}
+        ${col('earned','Earned (all time)','right')}
+        ${col('received','Received (all time)','right','Actually paid — logged on the Payments tab')}
+        ${col('outstanding','Outstanding','right','Earned but not yet marked received in Payments')}
+      </tr></thead>
+      <tbody id="brandCmpTbody">
+        ${sorted.map(r => `<tr class="row-click" draggable="true" data-row-key="${brandCmpRowKey(r)}" data-open-brand-breakdown data-brand-id="${r.id||''}" data-brand-name="${escapeHtml(r.name)}" data-brand-color="${r.color}">
+          <td class="brand-cmp-grip">${gripSvg}</td>
+          <td><span class="swatch" style="background:${r.color}"></span>${escapeHtml(r.name)}</td>
+          <td class="mono" style="text-align:right;">${r.count}</td>
+          <td style="text-align:right;">
+            <div style="display:inline-flex; align-items:center; gap:8px;">
+              <span class="mono" style="font-size:11.5px;">${r.hitRate.toFixed(0)}%</span>
+              <div class="brand-bar-track" style="width:52px;"><div class="brand-bar-fill" style="width:${r.hitRate.toFixed(0)}%; background:${r.hitRate>=50?'var(--fx-green)':'var(--text-faint)'};"></div></div>
+            </div>
+          </td>
+          <td class="mono" style="text-align:right;">${Math.round(r.views30d).toLocaleString()}</td>
+          <td class="mono" style="text-align:right;">${Math.round(r.viewsAllTime).toLocaleString()}</td>
+          <td class="mono" style="text-align:right;">${money(r.avgPayout)}</td>
+          <td class="mono fx-green" style="text-align:right;">${money(r.earned)}</td>
+          <td class="mono" style="text-align:right;">${money(r.received)}</td>
+          <td class="mono ${r.outstanding>0?'fx-red':''}" style="text-align:right;">${money(r.outstanding)}</td>
+        </tr>`).join('')}
+      </tbody>
+      <tfoot>
+        <tr style="border-top:1px solid var(--border);">
+          <td></td>
+          <td style="font-weight:700; color:var(--text-dim);">Total</td>
+          <td></td><td></td><td></td><td></td><td></td>
+          <td class="mono fx-green" style="text-align:right; font-weight:700;">${money(totalEarned)}</td>
+          <td class="mono" style="text-align:right; font-weight:700;">${money(totalReceived)}</td>
+          <td class="mono fx-red" style="text-align:right; font-weight:700;">${money(totalOutstanding)}</td>
+        </tr>
+      </tfoot>
+    </table></div></div>
+  </div>`;
+}
+
+// Drag-to-reorder for the Brand Comparison table. Runs entirely outside render() while a drag
+// is in progress — moving the real <tr> nodes in place with a FLIP animation for whichever rows
+// get displaced, then only writing to localStorage on drop. No re-render is needed: the DOM
+// already shows the final order, and row order doesn't affect the footer totals.
+function bindBrandComparisonDnD(){
+  const tbody = document.getElementById('brandCmpTbody');
+  if(!tbody) return;
+  let dragEl = null;
+
+  function captureRects(){
+    const map = new Map();
+    tbody.querySelectorAll('tr').forEach(r => map.set(r.dataset.rowKey, r.getBoundingClientRect()));
+    return map;
+  }
+  function playFlip(before){
+    tbody.querySelectorAll('tr').forEach(row => {
+      if(row === dragEl) return; // the dragged row already follows the cursor via native drag
+      const prev = before.get(row.dataset.rowKey);
+      if(!prev) return;
+      const next = row.getBoundingClientRect();
+      const deltaY = prev.top - next.top;
+      if(Math.abs(deltaY) < 0.5) return;
+      row.style.transition = 'none';
+      row.style.transform = `translateY(${deltaY}px)`;
+      requestAnimationFrame(() => {
+        row.style.transition = 'transform .28s cubic-bezier(.22,1,.36,1)';
+        row.style.transform = '';
+      });
+    });
+  }
+
+  tbody.querySelectorAll('tr').forEach(row => {
+    row.addEventListener('dragstart', e => {
+      dragEl = row;
+      // deferred a frame so the browser's native drag-ghost snapshot still captures full opacity
+      requestAnimationFrame(() => row.classList.add('row-dragging'));
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', row.dataset.rowKey);
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('row-dragging');
+      tbody.querySelectorAll('tr').forEach(r => r.classList.remove('row-drop-before','row-drop-after'));
+      BRAND_ROW_ORDER = [...tbody.querySelectorAll('tr')].map(r => r.dataset.rowKey);
+      localStorage.setItem('rwr-brand-order', JSON.stringify(BRAND_ROW_ORDER));
+      dragEl = null;
+    });
+    row.addEventListener('dragover', e => {
+      e.preventDefault();
+      if(!dragEl || dragEl === row) return;
+      const rect = row.getBoundingClientRect();
+      const before = (e.clientY - rect.top) < rect.height / 2;
+      tbody.querySelectorAll('tr').forEach(r => r.classList.remove('row-drop-before','row-drop-after'));
+      row.classList.add(before ? 'row-drop-before' : 'row-drop-after');
+
+      const target = before ? row : row.nextSibling;
+      if(target === dragEl || dragEl.nextSibling === target) return; // already in place
+
+      const rectsBefore = captureRects();
+      tbody.insertBefore(dragEl, target);
+      playFlip(rectsBefore);
+    });
+  });
 }
 
 // Same 30-day rolling window as the "Views — 30d" column this opens from — the breakdown exists
@@ -3166,7 +3315,6 @@ function renderDashboard(){
       ${renderChart(series)}
     </div>
 
-    <div class="section-title">Brand comparison (all time)</div>
     ${renderBrandComparisonTable()}
 
     ${renderBriefQuotas()}
@@ -4607,8 +4755,21 @@ function bindGlobalHandlers(){
     const k = el.dataset.sortBrand;
     if(BRAND_TABLE_SORT.key === k) BRAND_TABLE_SORT.dir = BRAND_TABLE_SORT.dir==='asc' ? 'desc' : 'asc';
     else BRAND_TABLE_SORT = { key:k, dir: k==='name' ? 'asc' : 'desc' };
+    if(BRAND_ROW_ORDER){ BRAND_ROW_ORDER = null; localStorage.removeItem('rwr-brand-order'); } // clicking a column exits the custom drag order
     render();
   }));
+  const brandCmpHead = document.getElementById('brandCmpHead');
+  if(brandCmpHead) brandCmpHead.addEventListener('click', (e) => {
+    if(e.target.closest('#btnResetBrandOrder')) return; // handled by its own listener below
+    setBrandComparisonCollapsed(!document.getElementById('brandCmpCard').classList.contains('collapsed'));
+  });
+  const btnResetBrandOrder = document.getElementById('btnResetBrandOrder');
+  if(btnResetBrandOrder) btnResetBrandOrder.addEventListener('click', (e) => {
+    e.stopPropagation();
+    BRAND_ROW_ORDER = null; localStorage.removeItem('rwr-brand-order');
+    render();
+  });
+  bindBrandComparisonDnD();
   document.querySelectorAll('[data-chart-point]').forEach(el => {
     const idx = Number(el.dataset.chartPoint);
     el.addEventListener('mouseenter', (e) => { showChartTooltip(idx, e.clientX, e.clientY); moveChartHoverGuide(el); });
