@@ -2830,17 +2830,23 @@ async function loadAllBackendBrands(){
 // would be, so multi-platform rows wrapped mid-number even more than before. white-space:nowrap
 // on the pill plus giving the column real room (see the table's colgroup/th) is what actually
 // prevents the wrap — not separating the two pieces of information.
+const PLATFORM_DISPLAY_NAME = { tiktok:'TikTok', instagram:'Instagram', youtube:'YouTube', facebook:'Facebook' };
+// Platform name stays in the flat neutral pill (see .tag-tiktok etc.) — the view count moved
+// outside it as plain muted text (2026-08-27, per feedback the combined "TIKTOK 534 / 300" pill
+// was harder to read than the platform name and its number being visually separate).
 function platformPill(row){
   const req = row.view_requirement_override != null ? Number(row.view_requirement_override) : (row.brands ? Number(row.brands.view_requirement) : null);
-  const label = `${(row.platform||'').toUpperCase()} ${(row.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`;
+  const platName = PLATFORM_DISPLAY_NAME[row.platform] || (row.platform||'').toUpperCase();
+  const views = `${(row.view_count||0).toLocaleString()}${req ? ` / ${req.toLocaleString()}` : ''}`;
   // Instagram's view_count already folds in Facebook plays when a reel is crossposted there (see
   // scout-instagram.js) — surfaced here as a small aside rather than a separate row/platform,
   // since it was never a separate video to begin with.
   const fbNote = row.facebook_views_component ? `<div class="hint" style="font-size:9px; margin:1px 0 2px;">incl. ${Number(row.facebook_views_component).toLocaleString()} via FB</div>` : '';
-  const style = 'margin:2px 4px 2px 0; display:block; text-decoration:none; white-space:nowrap; width:fit-content;';
+  const style = 'margin:2px 4px 2px 0; display:flex; align-items:center; gap:6px; text-decoration:none; white-space:nowrap; width:fit-content;';
+  const inner = `<span class="tag tag-${row.platform}" style="margin:0;">${escapeHtml(platName)}</span><span class="mono" style="font-size:12px; color:var(--text-faint);">${escapeHtml(views)}</span>`;
   const pill = row.url
-    ? `<a href="${row.url}" target="_blank" rel="noopener" class="tag tag-${row.platform}" style="${style}" title="${escapeHtml(row.title||'')}">${label}</a>`
-    : `<span class="tag tag-${row.platform}" style="${style}">${label}</span>`;
+    ? `<a href="${row.url}" target="_blank" rel="noopener" style="${style}" title="${escapeHtml(row.title||'')}">${inner}</a>`
+    : `<div style="${style}">${inner}</div>`;
   return pill + fbNote;
 }
 
