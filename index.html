@@ -3395,10 +3395,13 @@ let CA_STATE = { range:'30', nearMiss:false, trending:false, brand:'all', dateGr
 const CA_RANGES = [ {id:'7',label:'7d'}, {id:'30',label:'30d'}, {id:'90',label:'90d'}, {id:'9999',label:'All time'} ];
 
 // Flat solid-fill glyphs (no stroke/outline, no gradient shading) replacing 🔥/🎯 — those render
-// as full-color glossy OS emoji, not a clean flat icon. currentColor throughout.
+// as full-color glossy OS emoji, not a clean flat icon. iconTarget uses currentColor (it's meant
+// to blend into whatever it sits in); iconFlame is hardcoded fire-orange instead — a flame that
+// inherited each context's own muted color (chip gray, tag-good green, section-title gray) never
+// actually read as fire, which was the whole point of it over a plain 🔥.
 function iconFlame(size){
   size = size || 12;
-  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="currentColor" style="flex-shrink:0; vertical-align:-2px;"><path d="M12.963 2.286a.75.75 0 0 0-1.071-.136 9.742 9.742 0 0 0-3.539 6.176 7.547 7.547 0 0 1-1.705-1.715.75.75 0 0 0-1.152-.082A9 9 0 1 0 15.68 4.534a7.46 7.46 0 0 1-2.717-2.248zM15.75 14.25a3.75 3.75 0 1 1-7.313-1.172c.628.465 1.35.81 2.133 1a5.99 5.99 0 0 1 1.925-3.545 3.75 3.75 0 0 1 3.255 3.717z"/></svg>`;
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="#FF6B35" style="flex-shrink:0; vertical-align:-2px;"><path d="M12.963 2.286a.75.75 0 0 0-1.071-.136 9.742 9.742 0 0 0-3.539 6.176 7.547 7.547 0 0 1-1.705-1.715.75.75 0 0 0-1.152-.082A9 9 0 1 0 15.68 4.534a7.46 7.46 0 0 1-2.717-2.248zM15.75 14.25a3.75 3.75 0 1 1-7.313-1.172c.628.465 1.35.81 2.133 1a5.99 5.99 0 0 1 1.925-3.545 3.75 3.75 0 0 1 3.255 3.717z"/></svg>`;
 }
 function iconTarget(size){
   size = size || 12;
@@ -3610,14 +3613,18 @@ function caBreakoutRowHtml(rows, velocityByBrand){
 function caChartCardHtml(){
   const platforms = ['tiktok','instagram','youtube'];
   const series = platforms.map(p => ({ platform:p, points: caPlatformDailySeries(p) }));
-  const hasAny = series.some(s => s.points.length > 0);
+  // Matches caRenderChart()'s own 3-point minimum to actually draw a line — see the comment
+  // there for why fewer than that gets left out rather than drawn as a stub.
+  const shown = series.filter(s => s.points.length >= 3);
+  const pending = series.filter(s => s.points.length > 0 && s.points.length < 3);
+  const pendingNote = pending.length ? ` Still building history for ${pending.map(s=>PLATFORM_DISPLAY_NAME[s.platform]).join(' and ')} — a couple more days of scouting runs and it'll show up here too.` : '';
   return `<div class="chart-card">
     <div class="chart-head">
       <div class="label" style="margin:0;">Views over time — by platform</div>
       <div class="chart-legend" id="caChartLegend">${platforms.map(p=>`<div class="chart-legend-item">${caPlatformPillHtml(p)}</div>`).join('')}</div>
     </div>
-    ${hasAny
-      ? `<svg id="caChartSvg" viewBox="0 0 980 190" width="100%" height="190" preserveAspectRatio="none" class="chart-enter" style="display:block; overflow:visible; cursor:crosshair;"></svg><div class="hint" style="margin-top:8px;">From view_snapshots — daily totals across every tracked video on that platform, shape not exact new-views-that-day. Hover a point to see which platform is which.</div>`
+    ${shown.length>0
+      ? `<svg id="caChartSvg" viewBox="0 0 980 190" width="100%" height="190" preserveAspectRatio="none" class="chart-enter" style="display:block; overflow:visible; cursor:crosshair;"></svg><div class="hint" style="margin-top:8px;">From view_snapshots — daily totals across every tracked video on that platform, shape not exact new-views-that-day. Hover a point to see which platform is which.${pendingNote}</div>`
       : `<div class="empty" style="padding:34px 10px;">Not enough view history yet — this chart needs a few days of the daily view_snapshots table to have something to draw.</div>`}
   </div>`;
 }
@@ -3770,13 +3777,19 @@ function caRenderChart(){
     html += `<filter id="caGlow-${p}" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="0" stdDeviation="3" flood-color="${CA_PLATFORM_COLOR[p]}" flood-opacity="0.5"/></filter>`;
   });
   html += '</defs>';
+  // Needs 3+ real points, not just >0, to actually draw a line — a platform with only 1-2 days
+  // of view_snapshots history yet produces a short stub stranded off to one side of the shared
+  // day axis (every OTHER platform's days it doesn't have yet just sit empty), which reads as a
+  // broken chart rather than "this platform's history is still building up". Skipping it here
+  // until there's enough to draw something coherent is the same idea as sparklineSvg() returning
+  // '' below 2 points — hidden, not broken, until there's real shape to show.
   platforms.forEach((p, si) => {
     const pts = days.map((day,i) => {
       const found = byPlatform[p].find(x=>x.day===day);
       return { x: pad+i*stepX, y: topPad+(H-topPad-botPad)*(1-(found?found.value:0)/maxV), has: !!found };
     });
     const present = pts.filter(p=>p.has);
-    if(present.length===0) return;
+    if(present.length<3) return;
     const linePath = smoothPath(present);
     const areaPath = `${linePath} L${present[present.length-1].x.toFixed(1)},${(H-botPad).toFixed(1)} L${present[0].x.toFixed(1)},${(H-botPad).toFixed(1)} Z`;
     html += `<path class="chart-area-path" d="${areaPath}" fill="url(#caAreaGrad-${p})" stroke="none" style="animation-delay:${220+si*90}ms"/>`;
