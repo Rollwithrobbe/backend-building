@@ -3391,7 +3391,7 @@ function emptyState(title, sub){
    dots) and show as "—", not a fabricated number. Trending/breakout and the per-video growth
    curve depend on the EXPERIMENTAL view_snapshots table having 2+ days of history for a video —
    gracefully absent (not broken) until then, same as the brand-breakdown sparkline already is. */
-let CA_STATE = { range:'30', nearMiss:false, trending:false, brand:'all', dateGroup:'overall', sort:'top' };
+let CA_STATE = { range:'30', nearMiss:false, trending:false, brand:'all', dateGroup:'overall', sort:'top', tableExpanded:false };
 const CA_RANGES = [ {id:'7',label:'7d'}, {id:'30',label:'30d'}, {id:'90',label:'90d'}, {id:'9999',label:'All time'} ];
 
 // Flat solid-fill glyphs (no stroke/outline, no gradient shading) replacing 🔥/🎯 — those render
@@ -3635,6 +3635,12 @@ function caTableSectionHtml(allDv, velocityByBrand){
     .sort((a,b)=>a.label.localeCompare(b.label));
   const rows = allDv.filter(dv => caPassesTableFilters(dv, velocityByBrand))
     .sort((a,b) => CA_STATE.sort==='top' ? b.views-a.views : a.views-b.views);
+  // Weekly/Monthly/Overall can easily turn into hundreds of rows — collapsed to the top 9 by
+  // default with a "show more" row standing in for the 10th, same idea as any other
+  // load-more list, rather than dumping the whole filtered set on screen at once.
+  const CA_PAGE_SIZE = 9;
+  const displayRows = CA_STATE.tableExpanded ? rows : rows.slice(0, CA_PAGE_SIZE);
+  const remaining = rows.length - displayRows.length;
 
   return `
     <div class="section-title" style="flex-wrap:wrap; gap:10px;">
@@ -3666,7 +3672,7 @@ function caTableSectionHtml(allDv, velocityByBrand){
         <th style="text-align:right;">Posted</th>
       </tr></thead>
       <tbody>
-        ${rows.length===0 ? `<tr><td colspan="8" style="text-align:center; color:var(--text-faint); padding:26px 14px;">No content matches these filters.</td></tr>` : rows.map(dv => {
+        ${rows.length===0 ? `<tr><td colspan="8" style="text-align:center; color:var(--text-faint); padding:26px 14px;">No content matches these filters.</td></tr>` : displayRows.map(dv => {
           const badges = [
             caIsNearMiss(dv) ? `<span class="tag tag-warn">${iconTarget(10)} Near miss</span>` : '',
             caIsTrending(dv, velocityByBrand) ? `<span class="tag tag-good">${iconFlame(10)} Trending</span>` : '',
@@ -3686,6 +3692,8 @@ function caTableSectionHtml(allDv, velocityByBrand){
             <td class="mono" style="text-align:right; color:var(--text-dim);">${dv.postedAt ? fmtDate(dv.postedAt.slice(0,10)) : '—'}</td>
           </tr>`;
         }).join('')}
+        ${remaining > 0 ? `<tr class="row-click" id="caTableExpand"><td colspan="8" style="text-align:center; padding:11px 14px; color:var(--text-dim); font-weight:600; font-size:12.5px;">Show ${remaining} more video${remaining===1?'':'s'} ▾</td></tr>` : ''}
+        ${CA_STATE.tableExpanded && rows.length > CA_PAGE_SIZE ? `<tr class="row-click" id="caTableCollapse"><td colspan="8" style="text-align:center; padding:11px 14px; color:var(--text-dim); font-weight:600; font-size:12.5px;">Show fewer ▴</td></tr>` : ''}
       </tbody>
     </table></div>
   `;
@@ -3723,9 +3731,13 @@ function caShowChartTooltip(dayIdx, clientX, clientY){
   const { platforms, days } = CA_CHART_SERIES;
   const day = days[dayIdx];
   let html = `<div class="ct-total">${escapeHtml(fmtDate(day))}</div>`;
-  platforms.forEach(p => {
-    const pt = CA_CHART_SERIES.byPlatform[p].find(x=>x.day===day);
-    if(!pt) return;
+  // Highest first, not the fixed TikTok/Instagram/YouTube order — whichever platform actually
+  // led on that specific day should read first regardless of which one usually does.
+  const atDay = platforms
+    .map(p => ({ p, pt: CA_CHART_SERIES.byPlatform[p].find(x=>x.day===day) }))
+    .filter(x => x.pt)
+    .sort((a,b) => b.pt.value - a.pt.value);
+  atDay.forEach(({p, pt}) => {
     html += `<div class="ct-row"><span>${caPlatformPillHtml(p)}</span><span class="ct-amt">${pt.value.toLocaleString()}</span></div>`;
   });
   tip.innerHTML = html;
@@ -5367,6 +5379,10 @@ function bindGlobalHandlers(){
   const caSortBottom = document.getElementById('caSortBottom');
   if(caSortBottom) caSortBottom.addEventListener('click', () => { CA_STATE.sort='bottom'; render(); });
   document.querySelectorAll('[data-open-ca-video]').forEach(el => el.addEventListener('click', () => openContentVideoModal(el.dataset.openCaVideo)));
+  const caTableExpand = document.getElementById('caTableExpand');
+  if(caTableExpand) caTableExpand.addEventListener('click', () => { CA_STATE.tableExpanded = true; render(); });
+  const caTableCollapse = document.getElementById('caTableCollapse');
+  if(caTableCollapse) caTableCollapse.addEventListener('click', () => { CA_STATE.tableExpanded = false; render(); });
   caRenderChart(); // draws the multi-platform SVG + binds its own hover listener — no-op if #caChartSvg isn't on screen
 
   // tasks
