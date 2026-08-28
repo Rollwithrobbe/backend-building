@@ -3445,7 +3445,24 @@ function caAllDeliverables(){
       if(!fallbackColors.has(dv.brandName)) fallbackColors.set(dv.brandName, BRAND_TABLE_FALLBACK_COLORS[fallbackIdx++ % BRAND_TABLE_FALLBACK_COLORS.length]);
       brandColor = fallbackColors.get(dv.brandName);
     }
-    return { ...dv, brandLocalId, brandColor, views: dv.rows.reduce((s,r)=>s+(Number(r.view_count)||0),0), tags: caExtractTags(dv.title) };
+    // Summed across every row in the deliverable (same as views). Tracked per-field, not one
+    // combined flag — a YouTube-only video has real likes/comments but no share count AT ALL
+    // (not "not captured yet", genuinely doesn't exist on that platform's API), so summing it as
+    // 0 and showing "0 shares" would misreport "we measured zero" as if it were a real count.
+    // hasLikes/hasComments/hasShares each mean "at least one row actually has this field."
+    const hasLikes = dv.rows.some(r => r.likes != null);
+    const hasComments = dv.rows.some(r => r.comments != null);
+    const hasShares = dv.rows.some(r => r.shares != null);
+    const hasEngagement = hasLikes || hasComments || hasShares;
+    const likes = dv.rows.reduce((s,r)=>s+(Number(r.likes)||0),0);
+    const comments = dv.rows.reduce((s,r)=>s+(Number(r.comments)||0),0);
+    const shares = dv.rows.reduce((s,r)=>s+(Number(r.shares)||0),0);
+    const views = dv.rows.reduce((s,r)=>s+(Number(r.view_count)||0),0);
+    return {
+      ...dv, brandLocalId, brandColor, views, tags: caExtractTags(dv.title),
+      hasEngagement, hasLikes, hasComments, hasShares, likes, comments, shares,
+      engRate: hasEngagement && views>0 ? (likes+comments+shares)/views*100 : null,
+    };
   });
 }
 function caExtractTags(title){
@@ -3670,10 +3687,10 @@ function caTableSectionHtml(allDv, velocityByBrand){
       <thead><tr>
         <th></th><th>Content</th>
         <th style="text-align:right;">Views</th>
-        <th style="text-align:right;">Likes<span style="color:var(--warn); font-weight:700; margin-left:3px;">●</span></th>
-        <th style="text-align:right;">Comments<span style="color:var(--warn); font-weight:700; margin-left:3px;">●</span></th>
-        <th style="text-align:right;">Shares<span style="color:var(--warn); font-weight:700; margin-left:3px;">●</span></th>
-        <th style="text-align:right;">Eng. rate<span style="color:var(--warn); font-weight:700; margin-left:3px;">●</span></th>
+        <th style="text-align:right;">Likes</th>
+        <th style="text-align:right;">Comments</th>
+        <th style="text-align:right;">Shares</th>
+        <th style="text-align:right;">Eng. rate</th>
         <th style="text-align:right;">Posted</th>
       </tr></thead>
       <tbody>
@@ -3690,10 +3707,10 @@ function caTableSectionHtml(allDv, velocityByBrand){
               ${badges ? `<div style="display:flex; gap:4px; flex-wrap:wrap; margin-top:3px;">${badges}</div>` : ''}
             </td>
             <td class="mono" style="text-align:right;">${dv.views.toLocaleString()}</td>
-            <td class="mono" style="text-align:right; color:var(--text-faint);">—</td>
-            <td class="mono" style="text-align:right; color:var(--text-faint);">—</td>
-            <td class="mono" style="text-align:right; color:var(--text-faint);">—</td>
-            <td class="mono" style="text-align:right; color:var(--text-faint);">—</td>
+            <td class="mono" style="text-align:right; ${dv.hasLikes?'':'color:var(--text-faint);'}">${dv.hasLikes ? dv.likes.toLocaleString() : '—'}</td>
+            <td class="mono" style="text-align:right; ${dv.hasComments?'':'color:var(--text-faint);'}">${dv.hasComments ? dv.comments.toLocaleString() : '—'}</td>
+            <td class="mono" style="text-align:right; ${dv.hasShares?'':'color:var(--text-faint);'}" title="${dv.rows.some(r=>r.platform==='youtube')&&!dv.hasShares?'YouTube has no share-count field at all':''}">${dv.hasShares ? dv.shares.toLocaleString() : '—'}</td>
+            <td class="mono" style="text-align:right; ${dv.engRate!=null?'':'color:var(--text-faint);'}">${dv.engRate!=null ? dv.engRate.toFixed(1)+'%' : '—'}</td>
             <td class="mono" style="text-align:right; color:var(--text-dim);">${dv.postedAt ? fmtDate(dv.postedAt.slice(0,10)) : '—'}</td>
           </tr>`;
         }).join('')}
@@ -3926,8 +3943,16 @@ function renderContentVideoModal(){
     </div>
 
     <div style="margin-bottom:16px;">
-      <div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-faint); margin-bottom:8px;">Engagement <span class="tag tag-warn" style="font-size:9px; padding:1px 6px; margin-left:2px;">soon</span></div>
-      <div class="hint">Likes/comments/shares aren't captured yet — TikTok and YouTube already return them in the same API call that fetches views; Instagram needs a couple more metric names added to its own call.</div>
+      <div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-faint); margin-bottom:8px;">Engagement</div>
+      ${dv.hasEngagement ? `
+      <div class="grid grid-cards" style="margin-bottom:8px;">
+        <div class="card"><div class="label">Likes</div><div class="big mono" ${dv.hasLikes?'':'style="color:var(--text-faint);"'}>${dv.hasLikes ? dv.likes.toLocaleString() : '—'}</div></div>
+        <div class="card"><div class="label">Comments</div><div class="big mono" ${dv.hasComments?'':'style="color:var(--text-faint);"'}>${dv.hasComments ? dv.comments.toLocaleString() : '—'}</div></div>
+        <div class="card"><div class="label">Shares</div><div class="big mono" ${dv.hasShares?'':'style="color:var(--text-faint);"'}>${dv.hasShares ? dv.shares.toLocaleString() : '—'}</div></div>
+      </div>
+      <div class="ca-progress-label"><span>Engagement rate</span><span>${dv.engRate!=null ? dv.engRate.toFixed(1)+'%' : '—'}</span></div>
+      ${dv.rows.some(r=>r.platform==='youtube') && !dv.hasShares ? `<div class="hint" style="margin-top:6px;">YouTube has no share-count field at all — a real platform gap, not missing data.</div>` : ''}
+      ` : `<div class="hint">Not captured yet for this video — it'll fill in the next time a scouting run touches it.</div>`}
     </div>
 
     ${req>0 ? `<div style="margin-bottom:16px;">
