@@ -17,7 +17,7 @@
   })();
 </script>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Archivo+Expanded:wght@600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&family=Poppins:wght@500;600;700&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Work+Sans:wght@600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&family=Poppins:wght@500;600;700&display=swap');
 
   :root{
     --bg: #16151c;
@@ -276,7 +276,21 @@
   #root{ display:flex; min-height:100vh; }
   ::selection{ background:var(--accent); color:var(--accent-text); }
 
-  h1,h2,h3,h4{ font-family:'Archivo Expanded',sans-serif; margin:0; }
+  /* Work Sans replaced Archivo Expanded as the dashboard-wide heading/label face (2026-08-27,
+     after comparing candidates against both a Dashboard mockup and a real Tracked Content row) —
+     applied broadly here (not just h1-h4) for the same reason the per-theme font overrides
+     already were: most of what actually *reads* as a heading in this app is a plain div/th with
+     manual uppercase+bold styling, not a semantic heading tag, so scoping to h1-h4 alone would
+     leave almost everything untouched. Riptide keeps its own separate Poppins override — that
+     was a deliberate, more recent decision for that one theme specifically, unrelated to this. */
+  h1,h2,h3,h4,
+  .card .label,
+  .section-title,
+  .tw-head,
+  th,
+  .nav-btn,
+  .btn{ font-family:'Work Sans',sans-serif; }
+  h1,h2,h3,h4{ margin:0; }
   /* tracking is size-specific, not tag-specific — h2 (22px page titles) is the largest
      text on screen here despite the tag name, so it gets the tightest tracking */
   h2{ letter-spacing:-0.015em; }
