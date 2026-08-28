@@ -3613,10 +3613,10 @@ function caBreakoutRowHtml(rows, velocityByBrand){
 function caChartCardHtml(){
   const platforms = ['tiktok','instagram','youtube'];
   const series = platforms.map(p => ({ platform:p, points: caPlatformDailySeries(p) }));
-  // Matches caRenderChart()'s own 3-point minimum to actually draw a line — see the comment
-  // there for why fewer than that gets left out rather than drawn as a stub.
-  const shown = series.filter(s => s.points.length >= 3);
-  const pending = series.filter(s => s.points.length > 0 && s.points.length < 3);
+  // Matches caRenderChart()'s own 2-point minimum to actually draw a line (each platform on its
+  // own axis now — see the comment there).
+  const shown = series.filter(s => s.points.length >= 2);
+  const pending = series.filter(s => s.points.length > 0 && s.points.length < 2);
   const pendingNote = pending.length ? ` Still building history for ${pending.map(s=>PLATFORM_DISPLAY_NAME[s.platform]).join(' and ')} — a couple more days of scouting runs and it'll show up here too.` : '';
   return `<div class="chart-card">
     <div class="chart-head">
@@ -3638,7 +3638,7 @@ function caTableSectionHtml(allDv, velocityByBrand){
   // Weekly/Monthly/Overall can easily turn into hundreds of rows — collapsed to the top 9 by
   // default with a "show more" row standing in for the 10th, same idea as any other
   // load-more list, rather than dumping the whole filtered set on screen at once.
-  const CA_PAGE_SIZE = 9;
+  const CA_PAGE_SIZE = 6;
   const displayRows = CA_STATE.tableExpanded ? rows : rows.slice(0, CA_PAGE_SIZE);
   const remaining = rows.length - displayRows.length;
 
@@ -3723,43 +3723,45 @@ function caHashtagCardHtml(rows){
 }
 
 // ---- chart hover: which line is which ----
-let CA_CHART_SERIES = null; // {platforms, days, byPlatform: {tiktok:[{day,value}], ...}, W,H,pad,topPad,botPad,maxV}
-function caShowChartTooltip(dayIdx, clientX, clientY){
+let CA_CHART_SERIES = null; // {platforms(shown), byPlatform: {tiktok:[{x,y,day,value}], ...}, W,H,pad,topPad,botPad}
+// Each platform draws on its OWN index axis, stretched to fill the full chart width, rather than
+// all three sharing one calendar-day axis. With view_snapshots this young, platforms rarely have
+// the same number of days yet — forcing a shared axis meant a platform with fewer days drew as a
+// short stub stranded to one side (looked broken), or got hidden outright once that stub got
+// filtered out (looked empty). Own-axis-per-line means every platform with 2+ days shows a full
+// line across the whole card, at the cost of the crosshair no longer meaning "the same calendar
+// day" for all three at once — worth it for always having something to look at instead of one
+// lone line while the others build up history. The tooltip shows each platform's own real date
+// next to its value specifically because of that tradeoff.
+function caShowChartTooltip(frac, clientX, clientY){
   if(!CA_CHART_SERIES) return;
   const tip = document.getElementById('chartTooltip');
   if(!tip) return;
-  const { platforms, days } = CA_CHART_SERIES;
-  const day = days[dayIdx];
-  let html = `<div class="ct-total">${escapeHtml(fmtDate(day))}</div>`;
-  // Highest first, not the fixed TikTok/Instagram/YouTube order — whichever platform actually
-  // led on that specific day should read first regardless of which one usually does.
-  const atDay = platforms
-    .map(p => ({ p, pt: CA_CHART_SERIES.byPlatform[p].find(x=>x.day===day) }))
-    .filter(x => x.pt)
-    .sort((a,b) => b.pt.value - a.pt.value);
-  atDay.forEach(({p, pt}) => {
-    html += `<div class="ct-row"><span>${caPlatformPillHtml(p)}</span><span class="ct-amt">${pt.value.toLocaleString()}</span></div>`;
+  const { platforms, byPlatform } = CA_CHART_SERIES;
+  const atCursor = platforms.map(p => {
+    const arr = byPlatform[p];
+    const idx = Math.max(0, Math.min(arr.length-1, Math.round(frac * (arr.length-1))));
+    return { p, pt: arr[idx] };
+  }).filter(x => x.pt).sort((a,b) => b.pt.value - a.pt.value); // highest first, not a fixed platform order
+  let html = `<div class="ct-total">Views</div>`;
+  atCursor.forEach(({p, pt}) => {
+    html += `<div class="ct-row"><span>${caPlatformPillHtml(p)}</span><span class="ct-amt">${escapeHtml(fmtDate(pt.day))} · ${pt.value.toLocaleString()}</span></div>`;
   });
   tip.innerHTML = html;
   tip.classList.add('show');
   positionChartTooltip(clientX, clientY);
 }
-function caMoveChartHoverGuide(dayIdx){
+function caMoveChartHoverGuide(frac){
   const guide = document.getElementById('caChartHoverGuide');
   if(!guide || !CA_CHART_SERIES) return;
-  const { platforms, days, pad, stepX, topPad, H, botPad, maxV } = CA_CHART_SERIES;
-  const x = pad + dayIdx*stepX;
-  guide.style.transform = `translateX(${x}px)`;
+  const { platforms, byPlatform, pad, W } = CA_CHART_SERIES;
+  guide.style.transform = `translateX(${(pad + frac*(W-2*pad)).toFixed(1)}px)`;
   platforms.forEach(p => {
     const dot = guide.querySelector(`[data-guide-dot="${p}"]`);
-    const pt = CA_CHART_SERIES.byPlatform[p].find(d=>d.day===days[dayIdx]);
-    if(dot && pt){
-      const y = topPad + (H-topPad-botPad)*(1 - pt.value/maxV);
-      dot.setAttribute('cy', y.toFixed(1));
-      dot.style.display = '';
-    } else if(dot){
-      dot.style.display = 'none';
-    }
+    const arr = byPlatform[p];
+    const idx = Math.max(0, Math.min(arr.length-1, Math.round(frac * (arr.length-1))));
+    const pt = arr[idx];
+    if(dot && pt){ dot.setAttribute('cy', pt.y.toFixed(1)); dot.setAttribute('cx', pt.x.toFixed(1)); dot.style.display = ''; }
   });
   guide.classList.add('show');
 }
@@ -3770,16 +3772,26 @@ function caHideChartHoverGuide(){
 function caRenderChart(){
   const svg = document.getElementById('caChartSvg');
   if(!svg) return;
-  const platforms = ['tiktok','instagram','youtube'];
-  const byPlatform = {};
-  platforms.forEach(p => byPlatform[p] = caPlatformDailySeries(p));
-  const days = [...new Set(platforms.flatMap(p => byPlatform[p].map(x=>x.day)))].sort();
-  if(days.length===0) return;
+  const allPlatforms = ['tiktok','instagram','youtube'];
   const W=980, H=190, pad=6, topPad=10, botPad=18;
-  const maxV = Math.max(1, ...platforms.flatMap(p => byPlatform[p].map(x=>x.value))) * 1.08;
-  const n = days.length;
-  const stepX = n>1 ? (W-2*pad)/(n-1) : 0;
-  CA_CHART_SERIES = { platforms, days, byPlatform, W, H, pad, topPad, botPad, stepX, maxV };
+  const rawByPlatform = {};
+  allPlatforms.forEach(p => rawByPlatform[p] = caPlatformDailySeries(p));
+  const maxV = Math.max(1, ...allPlatforms.flatMap(p => rawByPlatform[p].map(x=>x.value))) * 1.08;
+  // 2+ points needed to draw an actual line — a single day is just a dot with nothing to compare
+  // it to, same "not enough yet" threshold sparklineSvg() already uses elsewhere in the app.
+  const platforms = allPlatforms.filter(p => rawByPlatform[p].length >= 2);
+  const byPlatform = {};
+  platforms.forEach(p => {
+    const arr = rawByPlatform[p];
+    const n = arr.length;
+    byPlatform[p] = arr.map((d,i) => ({
+      x: pad + (n>1 ? (i/(n-1))*(W-2*pad) : 0),
+      y: topPad + (H-topPad-botPad)*(1 - d.value/maxV),
+      day: d.day, value: d.value,
+    }));
+  });
+  CA_CHART_SERIES = { platforms, byPlatform, W, H, pad, topPad, botPad };
+  if(platforms.length===0) return;
 
   let html = '<defs>';
   platforms.forEach(p => {
@@ -3789,24 +3801,13 @@ function caRenderChart(){
     html += `<filter id="caGlow-${p}" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="0" stdDeviation="3" flood-color="${CA_PLATFORM_COLOR[p]}" flood-opacity="0.5"/></filter>`;
   });
   html += '</defs>';
-  // Needs 3+ real points, not just >0, to actually draw a line — a platform with only 1-2 days
-  // of view_snapshots history yet produces a short stub stranded off to one side of the shared
-  // day axis (every OTHER platform's days it doesn't have yet just sit empty), which reads as a
-  // broken chart rather than "this platform's history is still building up". Skipping it here
-  // until there's enough to draw something coherent is the same idea as sparklineSvg() returning
-  // '' below 2 points — hidden, not broken, until there's real shape to show.
   platforms.forEach((p, si) => {
-    const pts = days.map((day,i) => {
-      const found = byPlatform[p].find(x=>x.day===day);
-      return { x: pad+i*stepX, y: topPad+(H-topPad-botPad)*(1-(found?found.value:0)/maxV), has: !!found };
-    });
-    const present = pts.filter(p=>p.has);
-    if(present.length<3) return;
-    const linePath = smoothPath(present);
-    const areaPath = `${linePath} L${present[present.length-1].x.toFixed(1)},${(H-botPad).toFixed(1)} L${present[0].x.toFixed(1)},${(H-botPad).toFixed(1)} Z`;
+    const pts = byPlatform[p];
+    const linePath = smoothPath(pts);
+    const areaPath = `${linePath} L${pts[pts.length-1].x.toFixed(1)},${(H-botPad).toFixed(1)} L${pts[0].x.toFixed(1)},${(H-botPad).toFixed(1)} Z`;
     html += `<path class="chart-area-path" d="${areaPath}" fill="url(#caAreaGrad-${p})" stroke="none" style="animation-delay:${220+si*90}ms"/>`;
     html += `<path class="chart-line-path" pathLength="1" d="${linePath}" fill="none" stroke="url(#caLineGrad-${p})" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="1" filter="url(#caGlow-${p})" style="animation-delay:${si*130}ms"/>`;
-    const last = present[present.length-1];
+    const last = pts[pts.length-1];
     html += `<circle r="6" cx="${last.x.toFixed(1)}" cy="${last.y.toFixed(1)}" fill="${CA_PLATFORM_COLOR[p]}" opacity="0.18"/>`;
     html += `<circle class="chart-pt" cx="${last.x.toFixed(1)}" cy="${last.y.toFixed(1)}" r="3.4" fill="${CA_PLATFORM_COLOR[p]}" stroke="var(--surface)" stroke-width="1.5" style="animation-delay:${750+si*90}ms"/>`;
   });
@@ -3820,10 +3821,11 @@ function caRenderChart(){
   listener.addEventListener('mousemove', (e) => {
     const rect = svg.getBoundingClientRect();
     const localX = (e.clientX - rect.left) / rect.width * W;
-    const idx = n>1 ? Math.round((localX - pad) / stepX) : 0;
-    const clamped = Math.max(0, Math.min(n-1, idx));
-    caMoveChartHoverGuide(clamped);
-    caShowChartTooltip(clamped, e.clientX, e.clientY);
+    let frac = (localX - pad) / (W - 2*pad);
+    if(!Number.isFinite(frac)) frac = 0; // rect.width can be transiently 0 mid-reflow — never let a hover crash
+    frac = Math.max(0, Math.min(1, frac));
+    caMoveChartHoverGuide(frac);
+    caShowChartTooltip(frac, e.clientX, e.clientY);
   });
   listener.addEventListener('mouseleave', () => { caHideChartHoverGuide(); hideChartTooltip(); });
 }
