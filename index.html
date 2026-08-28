@@ -782,10 +782,15 @@
   .plat-pill-tiktok{ background:#000; }
   .plat-pill-youtube{ background:#FF0000; }
   .plat-pill-instagram{ background:linear-gradient(135deg, #FCAF45, #F77737, #E1306C, #833AB4); }
-  .ca-chart-hover-guide{ opacity:0; pointer-events:none; transition:opacity 140ms ease, transform 150ms cubic-bezier(.22,1,.36,1); }
+  /* No transition on transform/cx/cy on purpose — this guide now tracks the cursor continuously
+     on every mousemove (see caMoveChartHoverGuide), not just snapping between a few fixed points.
+     Easing a value that's already updating every frame just makes it perpetually lag behind the
+     real cursor position, worse the faster you move — smooth-looking at a crawl, visibly
+     "catching up" in jumps once you drag at a normal speed. Only opacity (show/hide) eases. */
+  .ca-chart-hover-guide{ opacity:0; pointer-events:none; transition:opacity 140ms ease; }
   .ca-chart-hover-guide.show{ opacity:1; }
   .ca-chart-hover-guide line{ stroke:var(--border); stroke-width:1; }
-  .ca-chart-hover-guide circle{ stroke:var(--surface); stroke-width:1.5; transition:cx 90ms linear, cy 90ms linear; }
+  .ca-chart-hover-guide circle{ stroke:var(--surface); stroke-width:1.5; }
   .ca-progress-track{ height:9px; border-radius:5px; background:var(--surface-2); overflow:hidden; margin-bottom:6px; }
   .ca-progress-fill{ height:100%; border-radius:5px; }
   .ca-progress-label{ display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); }
@@ -2796,7 +2801,7 @@ function goToView(id){
 const NAV_ITEMS = [
   {id:'dashboard', label:'Dashboard'},
   {id:'trackedContent', label:'Tracked Content'},
-  {id:'contentAnalytics', label:'Content Analytics'},
+  {id:'contentAnalytics', label:'Analytics'},
   {id:'content', label:'Content'},
   {id:'tasks', label:'Tasks'},
   {id:'brands', label:'Brands'},
@@ -3546,10 +3551,10 @@ function caPassesTableFilters(dv, velocityByBrand){
 // ---- rendering ----
 function renderContentAnalytics(){
   if(TRACKED_CONTENT_ERROR){
-    return `<div class="page-head"><div><h2>Content Analytics</h2></div></div><div class="table-wrap"><div class="empty"><b>Couldn't load</b>${escapeHtml(TRACKED_CONTENT_ERROR)}</div></div>`;
+    return `<div class="page-head"><div><h2>Analytics</h2></div></div><div class="table-wrap"><div class="empty"><b>Couldn't load</b>${escapeHtml(TRACKED_CONTENT_ERROR)}</div></div>`;
   }
   if(!TRACKED_CONTENT_DATA){
-    return `<div class="page-head"><div><h2>Content Analytics</h2></div></div><div class="table-wrap"><div class="empty">Loading…</div></div>`;
+    return `<div class="page-head"><div><h2>Analytics</h2></div></div><div class="table-wrap"><div class="empty">Loading…</div></div>`;
   }
   const allDv = caAllDeliverables();
   const velocityByBrand = caBrandVelocityMap(allDv);
@@ -3564,7 +3569,7 @@ function renderContentAnalytics(){
 
   return `
     <div class="page-head">
-      <div><h2>Content Analytics</h2><div class="sub">Every published post, across every platform, in one place.</div></div>
+      <div><h2>Analytics</h2><div class="sub">Every published post, across every platform, in one place.</div></div>
     </div>
 
     <div class="range-pills">
