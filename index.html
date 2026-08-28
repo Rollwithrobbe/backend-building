@@ -791,6 +791,10 @@
   .ca-chart-hover-guide.show{ opacity:1; }
   .ca-chart-hover-guide line{ stroke:var(--border); stroke-width:1; }
   .ca-chart-hover-guide circle{ stroke:var(--surface); stroke-width:1.5; }
+  /* Analytics chart rows are pill + date + number, all nowrap — wider than .chart-tooltip's
+     230px cap, so the content overflowed the box and clamping (which measures the box) let the
+     visible text run past the card edge. Sizing to content makes the measured width the real one. */
+  .chart-tooltip.ca-chart-tip{ max-width:none; }
   .ca-progress-track{ height:9px; border-radius:5px; background:var(--surface-2); overflow:hidden; margin-bottom:6px; }
   .ca-progress-fill{ height:100%; border-radius:5px; }
   .ca-progress-label{ display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); }
@@ -2170,6 +2174,7 @@ function showChartTooltip(index, clientX, clientY){
     html += s.breakdown.map(b => `<div class="ct-row"><span>${escapeHtml(b.name)}</span><span class="ct-amt">${money(b.sum)}</span></div>`).join('');
   }
   tip.innerHTML = html;
+  tip.classList.remove('ca-chart-tip'); // shared node — drop the Analytics chart's size-to-content variant
   tip.classList.add('show');
   positionChartTooltip(clientX, clientY);
 }
@@ -3761,23 +3766,37 @@ let CA_CHART_SERIES = null; // {platforms(shown), byPlatform: {tiktok:[{x,y,day,
 // middle of a segment, which is what "dots aren't aligned with the lines" was. exact:true only
 // when frac lands (near enough) on an actual recorded point — everything else is marked "~" in
 // the tooltip so it never reads as a real data point that doesn't exist.
-function caBezierEval(arr, frac){
+function caBezierAtX(arr, targetX){
   const n = arr.length;
   if(n===1) return { x:arr[0].x, y:arr[0].y, day:arr[0].day, exact:true };
-  const pos = Math.max(0, Math.min(n-1, frac*(n-1)));
-  const i1 = Math.min(n-2, Math.floor(pos));
+  // Which segment contains targetX. x is monotonically increasing along the whole curve (the
+  // Catmull-Rom control points stay ordered between their endpoints for evenly-spaced input),
+  // so a plain containment scan is safe here.
+  let i1 = n-2;
+  for(let i=0;i<n-1;i++){ if(targetX <= arr[i+1].x){ i1 = i; break; } }
   const i2 = i1+1;
-  const t = pos - i1;
   const p0 = arr[i1-1] || arr[i1];
   const p1 = arr[i1];
   const p2 = arr[i2];
   const p3 = arr[i2+1] || arr[i2];
   const cp1x = p1.x + (p2.x-p0.x)/6, cp1y = p1.y + (p2.y-p0.y)/6;
   const cp2x = p2.x - (p3.x-p1.x)/6, cp2y = p2.y - (p3.y-p1.y)/6;
-  const mt = 1-t;
-  const x = mt*mt*mt*p1.x + 3*mt*mt*t*cp1x + 3*mt*t*t*cp2x + t*t*t*p2.x;
-  const y = mt*mt*mt*p1.y + 3*mt*mt*t*cp1y + 3*mt*t*t*cp2y + t*t*t*p2.y;
-  return { x, y, day: t<0.5?p1.day:p2.day, exact: t<0.02||t>0.98 };
+  const bez = (a,b,c,d,t) => { const mt=1-t; return mt*mt*mt*a + 3*mt*mt*t*b + 3*mt*t*t*c + t*t*t*d; };
+  // Solve bezier_x(t) = targetX rather than assuming t IS the position across the segment. Those
+  // two are only the same when the x control points happen to be evenly spaced, which holds for
+  // interior segments but NOT the first/last — there p0 falls back to p1 (and p3 to p2), which
+  // shifts cp1x/cp2x and makes x(t) nonlinear. Feeding t straight from the cursor fraction is
+  // what left the dot drifting up to ~8px off the crosshair near both ends of the chart.
+  let lo=0, hi=1;
+  for(let k=0;k<24;k++){
+    const mid=(lo+hi)/2;
+    if(bez(p1.x, cp1x, cp2x, p2.x, mid) < targetX) lo=mid; else hi=mid;
+  }
+  const t=(lo+hi)/2;
+  // x is returned as targetX itself, not the solved bezier x — they agree to well under a pixel
+  // after 24 bisections, and this way the dot sits exactly on the crosshair by construction.
+  return { x: targetX, y: bez(p1.y, cp1y, cp2y, p2.y, t), day: t<0.5?p1.day:p2.day,
+           exact: Math.abs(targetX-p1.x)<2 || Math.abs(targetX-p2.x)<2 };
 }
 // The number shown is read straight back off the same y the dot sits at — whatever height the
 // curve is drawn at, that's the value reported, so the two can never disagree with each other.
@@ -3789,15 +3808,22 @@ function caShowChartTooltip(frac, clientX, clientY){
   if(!CA_CHART_SERIES) return;
   const tip = document.getElementById('chartTooltip');
   if(!tip) return;
-  const { platforms, byPlatform } = CA_CHART_SERIES;
+  const { platforms, byPlatform, pad, W } = CA_CHART_SERIES;
+  const targetX = pad + frac*(W-2*pad);
   const atCursor = platforms
-    .map(p => { const pt = caBezierEval(byPlatform[p], frac); return { p, pt, value: caValueFromY(pt.y) }; })
+    .map(p => { const pt = caBezierAtX(byPlatform[p], targetX); return { p, pt, value: caValueFromY(pt.y) }; })
     .sort((a,b) => b.value - a.value); // highest first, not a fixed platform order
   let html = `<div class="ct-total">Views</div>`;
   atCursor.forEach(({p, pt, value}) => {
     html += `<div class="ct-row"><span>${caPlatformPillHtml(p)}</span><span class="ct-amt">${escapeHtml(fmtDate(pt.day))} · ${pt.exact?'':'~'}${Math.round(value).toLocaleString()}</span></div>`;
   });
   tip.innerHTML = html;
+  // Lets the box size to its own content — the shared .chart-tooltip caps at max-width:230px,
+  // but these rows (pill + date + number, all nowrap) measure ~266px, so the content overflowed
+  // the box. Clamping then used the 230px BOX width while the visible text ran wider, which is
+  // why it still spilled past the card's right edge. Removed on the dashboard chart's own
+  // tooltip (see showChartTooltip) so that one keeps its original narrow wrapping.
+  tip.classList.add('ca-chart-tip');
   tip.classList.add('show');
   caPositionChartTooltip(clientX, clientY);
 }
@@ -3826,12 +3852,12 @@ function caMoveChartHoverGuide(frac){
   const guide = document.getElementById('caChartHoverGuide');
   if(!guide || !CA_CHART_SERIES) return;
   const { platforms, byPlatform, pad, W } = CA_CHART_SERIES;
-  const crosshairX = (pad + frac*(W-2*pad)).toFixed(1);
+  const targetX = pad + frac*(W-2*pad);
   const line = guide.querySelector('line');
-  if(line){ line.setAttribute('x1', crosshairX); line.setAttribute('x2', crosshairX); }
+  if(line){ line.setAttribute('x1', targetX.toFixed(1)); line.setAttribute('x2', targetX.toFixed(1)); }
   platforms.forEach(p => {
     const dot = guide.querySelector(`[data-guide-dot="${p}"]`);
-    const pt = caBezierEval(byPlatform[p], frac);
+    const pt = caBezierAtX(byPlatform[p], targetX);
     if(dot && pt){ dot.setAttribute('cx', pt.x.toFixed(1)); dot.setAttribute('cy', pt.y.toFixed(1)); dot.style.display = ''; }
   });
   guide.classList.add('show');
