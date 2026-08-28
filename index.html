@@ -750,6 +750,45 @@
     .timer-done-modal{ animation:none; }
     tr.row-flash td{ animation:none; background:rgba(201,161,90,0.32); }
   }
+
+  /* ---- Content Analytics ---- */
+  .chart-legend{ display:flex; gap:14px; flex-wrap:wrap; }
+  .chart-legend-item{ display:flex; align-items:center; }
+  .ca-chip{ display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:6px 13px; border-radius:20px; border:1px solid var(--border); background:var(--surface); color:var(--text-dim); cursor:pointer; font-family:inherit; transition:transform 100ms ease-out, border-color 150ms ease, background 150ms ease; }
+  .ca-chip:hover{ border-color:var(--accent-dim); }
+  .ca-chip:active{ transform:scale(0.95); }
+  .ca-chip.active{ background:var(--surface-2); border-color:var(--accent); color:var(--text); }
+  .ca-sort-toggle{ display:inline-flex; gap:4px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); padding:2px; }
+  .ca-sort-btn{ font-family:inherit; font-size:11px; font-weight:600; padding:5px 11px; border-radius:5px; border:none; background:none; color:var(--text-faint); cursor:pointer; transition:background 100ms ease-out, color 100ms ease-out; }
+  .ca-sort-btn.active{ background:var(--surface-2); color:var(--text); }
+  .ca-breakout-row{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:22px; }
+  .ca-breakout-card{ flex:1; min-width:240px; background:var(--surface); border:1px solid var(--warn); border-radius:var(--radius); padding:14px 16px; display:flex; align-items:center; gap:12px; cursor:pointer; transition:transform 100ms ease-out, border-color 150ms ease; }
+  .ca-breakout-card:hover{ border-color:var(--accent-dim); }
+  .ca-breakout-card:active{ transform:scale(0.98); }
+  .ca-breakout-flame{ color:var(--warn); flex-shrink:0; }
+  .ca-breakout-title{ font-size:12.5px; color:var(--text); line-height:1.4; margin-bottom:3px; }
+  .ca-breakout-stat{ font-family:'IBM Plex Mono'; font-size:15px; font-weight:700; color:var(--fx-green); }
+  .ca-breakout-sub{ font-size:10.5px; color:var(--text-faint); }
+  .ca-rank-row{ display:flex; align-items:center; gap:10px; padding:9px 0; border-bottom:1px solid var(--border-soft); }
+  .ca-rank-row:last-child{ border-bottom:none; }
+  .ca-rank-idx{ width:16px; font-family:'IBM Plex Mono'; font-size:11px; color:var(--text-faint); flex-shrink:0; }
+  .ca-rank-name{ flex:1; font-size:12.5px; min-width:0; }
+  .ca-rank-val{ width:70px; text-align:right; font-family:'IBM Plex Mono'; font-size:12px; font-weight:600; flex-shrink:0; }
+  /* Colorful branded pills — chart legend only. Every other platform label in the app (table
+     rows, this same page's own content rows) stays the flat neutral .tag-tiktok pill; telling
+     three overlapping lines apart on a chart is the one place brand colors earn their keep. */
+  .plat-pill{ display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:5px; font-size:11px; font-weight:700; white-space:nowrap; color:#fff; }
+  .plat-pill svg{ display:block; }
+  .plat-pill-tiktok{ background:#000; }
+  .plat-pill-youtube{ background:#FF0000; }
+  .plat-pill-instagram{ background:linear-gradient(135deg, #FCAF45, #F77737, #E1306C, #833AB4); }
+  .ca-chart-hover-guide{ opacity:0; pointer-events:none; transition:opacity 140ms ease, transform 150ms cubic-bezier(.22,1,.36,1); }
+  .ca-chart-hover-guide.show{ opacity:1; }
+  .ca-chart-hover-guide line{ stroke:var(--border); stroke-width:1; }
+  .ca-chart-hover-guide circle{ stroke:var(--surface); stroke-width:1.5; transition:cy 150ms cubic-bezier(.22,1,.36,1); }
+  .ca-progress-track{ height:9px; border-radius:5px; background:var(--surface-2); overflow:hidden; margin-bottom:6px; }
+  .ca-progress-fill{ height:100%; border-radius:5px; }
+  .ca-progress-label{ display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); }
 </style>
 </head>
 <body>
@@ -2744,7 +2783,7 @@ function setMobileNavOpen(open){
 // below can reuse the exact same view-switch logic instead of duplicating it.
 function goToView(id){
   VIEW = id; ACTIVE_BRAND_FILTER = null;
-  if(VIEW==='trackedContent' && TRACKED_CONTENT_DATA===null && !TRACKED_CONTENT_LOADING){ loadTrackedContent(); return; }
+  if((VIEW==='trackedContent' || VIEW==='contentAnalytics') && TRACKED_CONTENT_DATA===null && !TRACKED_CONTENT_LOADING){ loadTrackedContent(); return; }
   if(VIEW==='dashboard'){ renderWithChartEnter(); return; }
   render();
 }
@@ -2757,6 +2796,7 @@ function goToView(id){
 const NAV_ITEMS = [
   {id:'dashboard', label:'Dashboard'},
   {id:'trackedContent', label:'Tracked Content'},
+  {id:'contentAnalytics', label:'Content Analytics'},
   {id:'content', label:'Content'},
   {id:'tasks', label:'Tasks'},
   {id:'brands', label:'Brands'},
@@ -2815,6 +2855,7 @@ function renderSidebar(){
 function renderView(){
   if(VIEW==='dashboard') return renderDashboard();
   if(VIEW==='trackedContent') return renderTrackedContent();
+  if(VIEW==='contentAnalytics') return renderContentAnalytics();
   if(VIEW==='content') return renderContent();
   if(VIEW==='published'){ VIEW='content'; return renderContent(); } // old bookmark/state — Published isn't its own view anymore, just land on Content
   if(VIEW==='tasks') return renderTasks();
@@ -2938,11 +2979,15 @@ async function loadScoutRuns(){
 // full removal note. Silently gives up on failure (including "table doesn't exist" if the SQL
 // migration hasn't been run yet) — this is purely a nice-to-have chart, never something that
 // should surface an error to the user or hold up anything else.
+// tracked_video_id added to the select (2026-08-28, alongside Content Analytics) — the column
+// already existed on every row (see logViewSnapshot in the scout-*.js files), just wasn't being
+// read. Without it there's no way to build a per-video growth curve or per-video velocity, only
+// the brand+platform-level daily total the sparkline already used.
 async function loadViewSnapshots(){
   try{
     const cutoff = new Date(Date.now() - 14*86400000).toISOString();
     const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/view_snapshots?select=brand_id,platform,view_count,checked_at&checked_at=gte.${cutoff}&order=checked_at.asc`,
+      `${SUPABASE_URL}/rest/v1/view_snapshots?select=tracked_video_id,brand_id,platform,view_count,checked_at&checked_at=gte.${cutoff}&order=checked_at.asc`,
       { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
     );
     if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
@@ -3337,6 +3382,521 @@ function renderDashboard(){
 
 function emptyState(title, sub){
   return `<div class="table-wrap"><div class="empty"><b>${escapeHtml(title)}</b>${escapeHtml(sub)}</div></div>`;
+}
+
+/* ---------------- content analytics ----------------
+   Views, hit rate, near-miss/breakout detection, and a hashtag ranking are all real — built off
+   the same getDeliverables()/TRACKED_CONTENT_DATA everything else reads. Likes/comments/shares/
+   engagement rate are NOT real yet (none of the three scout jobs capture them — see the "soon"
+   dots) and show as "—", not a fabricated number. Trending/breakout and the per-video growth
+   curve depend on the EXPERIMENTAL view_snapshots table having 2+ days of history for a video —
+   gracefully absent (not broken) until then, same as the brand-breakdown sparkline already is. */
+let CA_STATE = { range:'30', nearMiss:false, trending:false, brand:'all', dateGroup:'overall', sort:'top' };
+const CA_RANGES = [ {id:'7',label:'7d'}, {id:'30',label:'30d'}, {id:'90',label:'90d'}, {id:'9999',label:'All time'} ];
+
+// Flat solid-fill glyphs (no stroke/outline, no gradient shading) replacing 🔥/🎯 — those render
+// as full-color glossy OS emoji, not a clean flat icon. currentColor throughout.
+function iconFlame(size){
+  size = size || 12;
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="currentColor" style="flex-shrink:0; vertical-align:-2px;"><path d="M12.963 2.286a.75.75 0 0 0-1.071-.136 9.742 9.742 0 0 0-3.539 6.176 7.547 7.547 0 0 1-1.705-1.715.75.75 0 0 0-1.152-.082A9 9 0 1 0 15.68 4.534a7.46 7.46 0 0 1-2.717-2.248zM15.75 14.25a3.75 3.75 0 1 1-7.313-1.172c.628.465 1.35.81 2.133 1a5.99 5.99 0 0 1 1.925-3.545 3.75 3.75 0 0 1 3.255 3.717z"/></svg>`;
+}
+function iconTarget(size){
+  size = size || 12;
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" style="flex-shrink:0; vertical-align:-2px;"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4.3"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>`;
+}
+// Real platform brand colors/gradients — deliberately different scope from .tag-tiktok's flat
+// neutral gray (that's for a label everywhere else in the app; this chart is the one place
+// telling three overlapping lines apart at a glance is worth spending brand color on).
+const CA_PLATFORM_COLOR = { tiktok:'#FE2C55', instagram:'#E1306C', youtube:'#FF0000' };
+const CA_PLATFORM_GRADIENT = {
+  tiktok: ['#25F4EE', '#FE2C55'],
+  instagram: ['#833AB4', '#E1306C', '#F77737', '#FCAF45'],
+  youtube: ['#FF0000', '#FF0000'],
+};
+function caPlatformPillHtml(plat){
+  return `<span class="plat-pill plat-pill-${plat}"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">${plat==='tiktok'?'<path d="M16.6 3c.4 2.2 1.9 3.9 4.4 4.2v3.1c-1.6 0-3.1-.5-4.4-1.4v6.4a5.3 5.3 0 1 1-5.3-5.3c.3 0 .6 0 .9.1v3.2a2.1 2.1 0 1 0 1.5 2V3h2.9z"/>':plat==='instagram'?'<path d="M9 3 7.2 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3H9z"/><circle cx="12" cy="13" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/>':'<path d="M6 4l14 8-14 8V4z"/>'}</svg>${PLATFORM_DISPLAY_NAME[plat]||plat}</span>`;
+}
+
+// ---- data derivation ----
+// Same two-pass resolution brandComparisonRows() uses: a real DATA.brands match first (gets a
+// local id + the color already picked for that brand), a consistent fallback color per brand
+// NAME otherwise (never re-derived per row, so the same unlinked brand always gets the same
+// color within one render).
+function caAllDeliverables(){
+  if(!TRACKED_CONTENT_DATA) return [];
+  const bySupabaseId = new Map(DATA.brands.filter(b=>b.supabaseBrandId).map(b=>[b.supabaseBrandId, b]));
+  const fallbackColors = new Map();
+  let fallbackIdx = 0;
+  return getDeliverables().filter(dv => !dv.excluded).map(dv => {
+    const rep = dv.rows[0];
+    const local = bySupabaseId.get(rep.brand_id);
+    let brandLocalId, brandColor;
+    if(local){ brandLocalId = local.id; brandColor = local.color; }
+    else {
+      brandLocalId = 'name:'+dv.brandName;
+      if(!fallbackColors.has(dv.brandName)) fallbackColors.set(dv.brandName, BRAND_TABLE_FALLBACK_COLORS[fallbackIdx++ % BRAND_TABLE_FALLBACK_COLORS.length]);
+      brandColor = fallbackColors.get(dv.brandName);
+    }
+    return { ...dv, brandLocalId, brandColor, views: dv.rows.reduce((s,r)=>s+(Number(r.view_count)||0),0), tags: caExtractTags(dv.title) };
+  });
+}
+function caExtractTags(title){
+  if(!title) return [];
+  const matches = title.match(/#[a-z0-9_]+/gi) || [];
+  return [...new Set(matches.map(t => t.slice(1).toLowerCase()))];
+}
+function caRowRequirement(row){
+  return row.view_requirement_override != null ? Number(row.view_requirement_override) : Number(row.brands?.view_requirement || 0);
+}
+// "how close to hitting" — the best (highest) views/requirement ratio among this deliverable's
+// still-tracking rows. Real hit status is decided per-row, per-platform (see getDeliverables()),
+// not by summing views across platforms against one bar — this mirrors that same logic rather
+// than inventing a combined-total threshold the actual tracking system doesn't use.
+function caBestRatio(dv){
+  const tracking = dv.rows.filter(r => !r.excluded && r.status==='tracking');
+  if(tracking.length===0) return null;
+  const ratios = tracking.map(r => { const req = caRowRequirement(r); return req > 0 ? (Number(r.view_count)||0)/req : 0; });
+  return Math.max(...ratios);
+}
+function caIsNearMiss(dv){
+  if(dv.status !== 'tracking') return false;
+  const ratio = caBestRatio(dv);
+  return ratio != null && ratio >= 0.8 && ratio < 1;
+}
+// Views gained since this specific video's last snapshot before its most recent one — real,
+// from the daily view_snapshots history, but only ever as precise as "since last check", not a
+// literal 48h window (checks run roughly daily, not on a fixed clock). null with fewer than 2
+// snapshots yet, which is expected for most videos until the table has more history behind it.
+function caVideoVelocity(trackedVideoId){
+  if(!VIEW_SNAPSHOTS_DATA) return null;
+  const rows = VIEW_SNAPSHOTS_DATA.filter(s => s.tracked_video_id === trackedVideoId).sort((a,b)=>a.checked_at.localeCompare(b.checked_at));
+  if(rows.length < 2) return null;
+  return Math.max(0, (Number(rows[rows.length-1].view_count)||0) - (Number(rows[rows.length-2].view_count)||0));
+}
+function caDeliverableVelocity(dv){
+  const vals = dv.rows.map(r => caVideoVelocity(r.id)).filter(v => v != null);
+  return vals.length ? Math.max(...vals) : null;
+}
+// Per-brand average velocity across whatever videos currently have enough snapshot history —
+// the baseline a single video's own velocity gets compared against to flag a real breakout,
+// same "relative to this brand's own normal pace" idea as the brand-comparison efficiency work.
+function caBrandVelocityMap(allDv){
+  const byBrand = new Map();
+  allDv.forEach(dv => {
+    const v = caDeliverableVelocity(dv);
+    if(v == null) return;
+    if(!byBrand.has(dv.brandLocalId)) byBrand.set(dv.brandLocalId, []);
+    byBrand.get(dv.brandLocalId).push(v);
+  });
+  const avgMap = new Map();
+  byBrand.forEach((vals, brandLocalId) => avgMap.set(brandLocalId, vals.reduce((a,b)=>a+b,0)/vals.length));
+  return avgMap;
+}
+function caBreakoutRatio(dv, velocityByBrand){
+  const v = caDeliverableVelocity(dv);
+  const avg = velocityByBrand.get(dv.brandLocalId);
+  if(v == null || !avg) return null;
+  return v / avg;
+}
+function caIsTrending(dv, velocityByBrand){
+  const ratio = caBreakoutRatio(dv, velocityByBrand);
+  return ratio != null && ratio >= 2;
+}
+// Real daily total across every currently-tracked video on that platform (every brand, not just
+// one) — same day-bucketing brandPlatformTrend() already uses for the brand-breakdown sparkline,
+// just not scoped to a single brand. Shape, not exact "new views that day" — a snapshot is each
+// video's running view_count on the day it was checked, so this is "total reach as measured that
+// day," same honest framing view_snapshots already carries everywhere else it's used.
+function caPlatformDailySeries(platform){
+  if(!VIEW_SNAPSHOTS_DATA) return [];
+  const byDay = {};
+  VIEW_SNAPSHOTS_DATA.forEach(s => {
+    if(s.platform !== platform) return;
+    const day = s.checked_at.slice(0,10);
+    byDay[day] = (byDay[day]||0) + (Number(s.view_count)||0);
+  });
+  return Object.keys(byDay).sort().map(day => ({ day, value: byDay[day] }));
+}
+function caVideoDailySeries(trackedVideoId){
+  if(!VIEW_SNAPSHOTS_DATA) return [];
+  return VIEW_SNAPSHOTS_DATA.filter(s => s.tracked_video_id === trackedVideoId)
+    .sort((a,b)=>a.checked_at.localeCompare(b.checked_at))
+    .map(s => ({ day: s.checked_at.slice(0,10), value: Number(s.view_count)||0 }));
+}
+function caRangeCutoff(){ return CA_STATE.range==='9999' ? 0 : Date.now() - Number(CA_STATE.range)*86400000; }
+function caPassesPageFilters(dv, velocityByBrand){
+  if(dv.postedAt && new Date(dv.postedAt).getTime() < caRangeCutoff()) return false;
+  if(CA_STATE.nearMiss && !caIsNearMiss(dv)) return false;
+  if(CA_STATE.trending && !caIsTrending(dv, velocityByBrand)) return false;
+  return true;
+}
+function caPassesTableFilters(dv, velocityByBrand){
+  if(!caPassesPageFilters(dv, velocityByBrand)) return false;
+  if(CA_STATE.brand !== 'all' && dv.brandLocalId !== CA_STATE.brand) return false;
+  if(CA_STATE.dateGroup !== 'overall'){
+    const days = CA_STATE.dateGroup === 'weekly' ? 7 : 30;
+    if(!dv.postedAt || (Date.now() - new Date(dv.postedAt).getTime())/86400000 > days) return false;
+  }
+  return true;
+}
+
+// ---- rendering ----
+function renderContentAnalytics(){
+  if(TRACKED_CONTENT_ERROR){
+    return `<div class="page-head"><div><h2>Content Analytics</h2></div></div><div class="table-wrap"><div class="empty"><b>Couldn't load</b>${escapeHtml(TRACKED_CONTENT_ERROR)}</div></div>`;
+  }
+  if(!TRACKED_CONTENT_DATA){
+    return `<div class="page-head"><div><h2>Content Analytics</h2></div></div><div class="table-wrap"><div class="empty">Loading…</div></div>`;
+  }
+  const allDv = caAllDeliverables();
+  const velocityByBrand = caBrandVelocityMap(allDv);
+  const rows = allDv.filter(dv => caPassesPageFilters(dv, velocityByBrand));
+
+  const totalV = rows.reduce((s,dv)=>s+dv.views,0);
+  const hitCount = rows.filter(dv=>dv.status==='hit').length;
+  const hitRate = rows.length ? (hitCount/rows.length*100) : 0;
+  const byPlat = {};
+  rows.forEach(dv => dv.rows.forEach(r => { byPlat[r.platform] = (byPlat[r.platform]||0) + (Number(r.view_count)||0); }));
+  const bestPlat = Object.entries(byPlat).sort((a,b)=>b[1]-a[1])[0];
+
+  return `
+    <div class="page-head">
+      <div><h2>Content Analytics</h2><div class="sub">Every published post, across every platform, in one place.</div></div>
+    </div>
+
+    <div class="range-pills">
+      ${CA_RANGES.map(r=>`<button class="range-pill ${CA_STATE.range===r.id?'active':''}" data-ca-range="${r.id}">${r.label}</button>`).join('')}
+      <span style="flex:1;"></span>
+      <button class="ca-chip ${CA_STATE.nearMiss?'active':''}" id="caChipNearMiss">${iconTarget(12)} Near miss</button>
+      <button class="ca-chip ${CA_STATE.trending?'active':''}" id="caChipTrending">${iconFlame(12)} Trending</button>
+      <button class="clear-filters" id="caClearFilters" style="font-size:11.5px; color:var(--text-faint); background:none; border:none; cursor:pointer; text-decoration:underline; text-underline-offset:2px;">Clear filters</button>
+    </div>
+
+    <div class="grid grid-cards" style="margin-bottom:20px;">
+      <div class="card"><div class="label">Total views</div><div class="big mono">${(totalV).toLocaleString()}</div><div class="foot">${rows.length} post${rows.length===1?'':'s'} in range</div></div>
+      <div class="card"><div class="label">Hit rate</div><div class="big mono">${hitRate.toFixed(0)}%</div><div class="foot">${hitCount} of ${rows.length} crossed requirement</div></div>
+      <div class="card"><div class="label">Best platform</div><div class="big">${bestPlat?(PLATFORM_DISPLAY_NAME[bestPlat[0]]||bestPlat[0]):'—'}</div><div class="foot">${bestPlat?bestPlat[1].toLocaleString()+' views in range':'No data in range'}</div></div>
+    </div>
+
+    <div class="section-title" style="margin-top:0; display:flex; align-items:center; gap:8px;">${iconFlame(14)}Breaking out right now</div>
+    ${caBreakoutRowHtml(rows, velocityByBrand)}
+
+    ${caChartCardHtml()}
+
+    ${caTableSectionHtml(allDv, velocityByBrand)}
+
+    ${caHashtagCardHtml(rows)}
+  `;
+}
+
+function caBreakoutRowHtml(rows, velocityByBrand){
+  const trending = rows.filter(dv => caIsTrending(dv, velocityByBrand))
+    .map(dv => ({ dv, ratio: caBreakoutRatio(dv, velocityByBrand) }))
+    .sort((a,b)=>b.ratio-a.ratio).slice(0,3);
+  if(trending.length===0){
+    return `<div class="ca-breakout-row"><div style="font-size:12.5px; color:var(--text-faint); padding:14px 4px;">Nothing breaking out right now — needs at least 2 days of view history on a video, and this only shows a handful of days in so far.</div></div>`;
+  }
+  return `<div class="ca-breakout-row">${trending.map(({dv,ratio}) => `
+    <div class="ca-breakout-card" data-open-ca-video="${escapeHtml(String(dv.key))}">
+      <div class="ca-breakout-flame">${iconFlame(22)}</div>
+      <div style="min-width:0;">
+        <div class="ca-breakout-title">${escapeHtml((dv.title||'Untitled').length>46?dv.title.slice(0,46)+'…':(dv.title||'Untitled'))}</div>
+        <div class="ca-breakout-stat">${ratio.toFixed(1)}×</div>
+        <div class="ca-breakout-sub">${escapeHtml(dv.brandName)}'s average pace</div>
+      </div>
+    </div>`).join('')}</div>`;
+}
+
+function caChartCardHtml(){
+  const platforms = ['tiktok','instagram','youtube'];
+  const series = platforms.map(p => ({ platform:p, points: caPlatformDailySeries(p) }));
+  const hasAny = series.some(s => s.points.length > 0);
+  return `<div class="chart-card">
+    <div class="chart-head">
+      <div class="label" style="margin:0;">Views over time — by platform</div>
+      <div class="chart-legend" id="caChartLegend">${platforms.map(p=>`<div class="chart-legend-item">${caPlatformPillHtml(p)}</div>`).join('')}</div>
+    </div>
+    ${hasAny
+      ? `<svg id="caChartSvg" viewBox="0 0 980 190" width="100%" height="190" preserveAspectRatio="none" class="chart-enter" style="display:block; overflow:visible; cursor:crosshair;"></svg><div class="hint" style="margin-top:8px;">From view_snapshots — daily totals across every tracked video on that platform, shape not exact new-views-that-day. Hover a point to see which platform is which.</div>`
+      : `<div class="empty" style="padding:34px 10px;">Not enough view history yet — this chart needs a few days of the daily view_snapshots table to have something to draw.</div>`}
+  </div>`;
+}
+
+function caTableSectionHtml(allDv, velocityByBrand){
+  const brandOptions = [...new Map(allDv.map(dv => [dv.brandLocalId, dv])).values()]
+    .map(dv => ({ key: dv.brandLocalId, label: dv.brandName }))
+    .sort((a,b)=>a.label.localeCompare(b.label));
+  const rows = allDv.filter(dv => caPassesTableFilters(dv, velocityByBrand))
+    .sort((a,b) => CA_STATE.sort==='top' ? b.views-a.views : a.views-b.views);
+
+  return `
+    <div class="section-title" style="flex-wrap:wrap; gap:10px;">
+      <span>Content</span>
+      <div class="filter-bar" style="margin-bottom:0; align-items:center;">
+        <select id="caBrandFilter">
+          <option value="all">All brands</option>
+          ${brandOptions.map(b=>`<option value="${escapeHtml(b.key)}" ${CA_STATE.brand===b.key?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
+        </select>
+        <div class="ca-sort-toggle" id="caDateGroup">
+          <button class="ca-sort-btn ${CA_STATE.dateGroup==='weekly'?'active':''}" data-ca-date-group="weekly">Weekly</button>
+          <button class="ca-sort-btn ${CA_STATE.dateGroup==='monthly'?'active':''}" data-ca-date-group="monthly">Monthly</button>
+          <button class="ca-sort-btn ${CA_STATE.dateGroup==='overall'?'active':''}" data-ca-date-group="overall">Overall</button>
+        </div>
+        <div class="ca-sort-toggle">
+          <button class="ca-sort-btn ${CA_STATE.sort==='top'?'active':''}" id="caSortTop">Top performing</button>
+          <button class="ca-sort-btn ${CA_STATE.sort==='bottom'?'active':''}" id="caSortBottom">Underperforming</button>
+        </div>
+      </div>
+    </div>
+    <div class="table-wrap" style="overflow-x:auto;"><table>
+      <thead><tr>
+        <th></th><th>Content</th>
+        <th style="text-align:right;">Views</th>
+        <th style="text-align:right;">Likes<span style="color:var(--warn); font-weight:700; margin-left:3px;">●</span></th>
+        <th style="text-align:right;">Comments<span style="color:var(--warn); font-weight:700; margin-left:3px;">●</span></th>
+        <th style="text-align:right;">Shares<span style="color:var(--warn); font-weight:700; margin-left:3px;">●</span></th>
+        <th style="text-align:right;">Eng. rate<span style="color:var(--warn); font-weight:700; margin-left:3px;">●</span></th>
+        <th style="text-align:right;">Posted</th>
+      </tr></thead>
+      <tbody>
+        ${rows.length===0 ? `<tr><td colspan="8" style="text-align:center; color:var(--text-faint); padding:26px 14px;">No content matches these filters.</td></tr>` : rows.map(dv => {
+          const badges = [
+            caIsNearMiss(dv) ? `<span class="tag tag-warn">${iconTarget(10)} Near miss</span>` : '',
+            caIsTrending(dv, velocityByBrand) ? `<span class="tag tag-good">${iconFlame(10)} Trending</span>` : '',
+          ].join('');
+          return `<tr class="row-click" data-open-ca-video="${escapeHtml(String(dv.key))}">
+            <td>${dv.thumbnail ? `<img src="${dv.thumbnail}" alt="" style="width:36px; height:36px; object-fit:cover; border-radius:6px; display:block;" />` : `<div style="width:36px; height:36px; border-radius:6px; background:var(--surface);"></div>`}</td>
+            <td style="max-width:280px;">
+              <div style="font-size:13px; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(dv.title||'Untitled')}</div>
+              <div style="font-size:11.5px; color:var(--text-faint); display:flex; align-items:center; gap:5px; margin-top:3px; flex-wrap:wrap;"><span class="swatch" style="background:${dv.brandColor}"></span>${escapeHtml(dv.brandName)} · ${dv.rows.map(platformPill).join('')}</div>
+              ${badges ? `<div style="display:flex; gap:4px; flex-wrap:wrap; margin-top:3px;">${badges}</div>` : ''}
+            </td>
+            <td class="mono" style="text-align:right;">${dv.views.toLocaleString()}</td>
+            <td class="mono" style="text-align:right; color:var(--text-faint);">—</td>
+            <td class="mono" style="text-align:right; color:var(--text-faint);">—</td>
+            <td class="mono" style="text-align:right; color:var(--text-faint);">—</td>
+            <td class="mono" style="text-align:right; color:var(--text-faint);">—</td>
+            <td class="mono" style="text-align:right; color:var(--text-dim);">${dv.postedAt ? fmtDate(dv.postedAt.slice(0,10)) : '—'}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table></div>
+  `;
+}
+
+function caHashtagCardHtml(rows){
+  const byTag = {};
+  rows.forEach(dv => dv.tags.forEach(t => {
+    byTag[t] = byTag[t] || { views:0, count:0 };
+    byTag[t].views += dv.views;
+    byTag[t].count += 1;
+  }));
+  const parts = Object.entries(byTag).map(([tag,d]) => ({ tag, avg: d.views/d.count, count:d.count })).sort((a,b)=>b.avg-a.avg).slice(0,6);
+  return `<div class="chart-card" style="margin-bottom:0;">
+    <div class="chart-head"><div class="label" style="margin:0;">Hashtag / keyword performance</div></div>
+    ${parts.length===0 ? `<div style="font-size:12px; color:var(--text-faint); padding:10px 0;">No hashtags found in the titles/captions in range.</div>` : parts.map((p,i) => {
+      const maxV = parts[0].avg;
+      return `<div class="ca-rank-row">
+        <div class="ca-rank-idx">${i+1}</div>
+        <div class="ca-rank-name">#${escapeHtml(p.tag)}<span style="color:var(--text-faint); font-size:11px; margin-left:4px;">(${p.count})</span></div>
+        <div class="brand-bar-track" style="max-width:160px;"><div class="brand-bar-fill" style="width:${(p.avg/maxV*100).toFixed(0)}%; background:var(--text);"></div></div>
+        <div class="ca-rank-val mono">${Math.round(p.avg).toLocaleString()}</div>
+      </div>`;
+    }).join('')}
+    <div class="hint" style="margin-top:8px;">Avg. views per post carrying each tag, pulled straight from saved titles/captions — not usage count.</div>
+  </div>`;
+}
+
+// ---- chart hover: which line is which ----
+let CA_CHART_SERIES = null; // {platforms, days, byPlatform: {tiktok:[{day,value}], ...}, W,H,pad,topPad,botPad,maxV}
+function caShowChartTooltip(dayIdx, clientX, clientY){
+  if(!CA_CHART_SERIES) return;
+  const tip = document.getElementById('chartTooltip');
+  if(!tip) return;
+  const { platforms, days } = CA_CHART_SERIES;
+  const day = days[dayIdx];
+  let html = `<div class="ct-total">${escapeHtml(fmtDate(day))}</div>`;
+  platforms.forEach(p => {
+    const pt = CA_CHART_SERIES.byPlatform[p].find(x=>x.day===day);
+    if(!pt) return;
+    html += `<div class="ct-row"><span>${caPlatformPillHtml(p)}</span><span class="ct-amt">${pt.value.toLocaleString()}</span></div>`;
+  });
+  tip.innerHTML = html;
+  tip.classList.add('show');
+  positionChartTooltip(clientX, clientY);
+}
+function caMoveChartHoverGuide(dayIdx){
+  const guide = document.getElementById('caChartHoverGuide');
+  if(!guide || !CA_CHART_SERIES) return;
+  const { platforms, days, pad, stepX, topPad, H, botPad, maxV } = CA_CHART_SERIES;
+  const x = pad + dayIdx*stepX;
+  guide.style.transform = `translateX(${x}px)`;
+  platforms.forEach(p => {
+    const dot = guide.querySelector(`[data-guide-dot="${p}"]`);
+    const pt = CA_CHART_SERIES.byPlatform[p].find(d=>d.day===days[dayIdx]);
+    if(dot && pt){
+      const y = topPad + (H-topPad-botPad)*(1 - pt.value/maxV);
+      dot.setAttribute('cy', y.toFixed(1));
+      dot.style.display = '';
+    } else if(dot){
+      dot.style.display = 'none';
+    }
+  });
+  guide.classList.add('show');
+}
+function caHideChartHoverGuide(){
+  const guide = document.getElementById('caChartHoverGuide');
+  if(guide) guide.classList.remove('show');
+}
+function caRenderChart(){
+  const svg = document.getElementById('caChartSvg');
+  if(!svg) return;
+  const platforms = ['tiktok','instagram','youtube'];
+  const byPlatform = {};
+  platforms.forEach(p => byPlatform[p] = caPlatformDailySeries(p));
+  const days = [...new Set(platforms.flatMap(p => byPlatform[p].map(x=>x.day)))].sort();
+  if(days.length===0) return;
+  const W=980, H=190, pad=6, topPad=10, botPad=18;
+  const maxV = Math.max(1, ...platforms.flatMap(p => byPlatform[p].map(x=>x.value))) * 1.08;
+  const n = days.length;
+  const stepX = n>1 ? (W-2*pad)/(n-1) : 0;
+  CA_CHART_SERIES = { platforms, days, byPlatform, W, H, pad, topPad, botPad, stepX, maxV };
+
+  let html = '<defs>';
+  platforms.forEach(p => {
+    const stops = CA_PLATFORM_GRADIENT[p];
+    html += `<linearGradient id="caLineGrad-${p}" x1="0" y1="0" x2="1" y2="0">${stops.map((c,i)=>`<stop offset="${(i/(stops.length-1)*100).toFixed(0)}%" stop-color="${c}"/>`).join('')}</linearGradient>`;
+    html += `<linearGradient id="caAreaGrad-${p}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${CA_PLATFORM_COLOR[p]}" stop-opacity="0.30"/><stop offset="100%" stop-color="${CA_PLATFORM_COLOR[p]}" stop-opacity="0"/></linearGradient>`;
+    html += `<filter id="caGlow-${p}" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="0" stdDeviation="3" flood-color="${CA_PLATFORM_COLOR[p]}" flood-opacity="0.5"/></filter>`;
+  });
+  html += '</defs>';
+  platforms.forEach((p, si) => {
+    const pts = days.map((day,i) => {
+      const found = byPlatform[p].find(x=>x.day===day);
+      return { x: pad+i*stepX, y: topPad+(H-topPad-botPad)*(1-(found?found.value:0)/maxV), has: !!found };
+    });
+    const present = pts.filter(p=>p.has);
+    if(present.length===0) return;
+    const linePath = smoothPath(present);
+    const areaPath = `${linePath} L${present[present.length-1].x.toFixed(1)},${(H-botPad).toFixed(1)} L${present[0].x.toFixed(1)},${(H-botPad).toFixed(1)} Z`;
+    html += `<path class="chart-area-path" d="${areaPath}" fill="url(#caAreaGrad-${p})" stroke="none" style="animation-delay:${220+si*90}ms"/>`;
+    html += `<path class="chart-line-path" pathLength="1" d="${linePath}" fill="none" stroke="url(#caLineGrad-${p})" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="1" filter="url(#caGlow-${p})" style="animation-delay:${si*130}ms"/>`;
+    const last = present[present.length-1];
+    html += `<circle r="6" cx="${last.x.toFixed(1)}" cy="${last.y.toFixed(1)}" fill="${CA_PLATFORM_COLOR[p]}" opacity="0.18"/>`;
+    html += `<circle class="chart-pt" cx="${last.x.toFixed(1)}" cy="${last.y.toFixed(1)}" r="3.4" fill="${CA_PLATFORM_COLOR[p]}" stroke="var(--surface)" stroke-width="1.5" style="animation-delay:${750+si*90}ms"/>`;
+  });
+  html += `<g class="ca-chart-hover-guide" id="caChartHoverGuide">
+    <line x1="0" y1="${topPad}" x2="0" y2="${H-botPad}"/>
+    ${platforms.map(p=>`<circle data-guide-dot="${p}" r="4.5" fill="${CA_PLATFORM_COLOR[p]}"/>`).join('')}
+  </g>`;
+  html += `<rect x="0" y="0" width="${W}" height="${H}" fill="transparent" style="pointer-events:all;" data-ca-chart-listener/>`;
+  svg.innerHTML = html;
+  const listener = svg.querySelector('[data-ca-chart-listener]');
+  listener.addEventListener('mousemove', (e) => {
+    const rect = svg.getBoundingClientRect();
+    const localX = (e.clientX - rect.left) / rect.width * W;
+    const idx = n>1 ? Math.round((localX - pad) / stepX) : 0;
+    const clamped = Math.max(0, Math.min(n-1, idx));
+    caMoveChartHoverGuide(clamped);
+    caShowChartTooltip(clamped, e.clientX, e.clientY);
+  });
+  listener.addEventListener('mouseleave', () => { caHideChartHoverGuide(); hideChartTooltip(); });
+}
+
+// ---- per-video modal (reuses the app's own overlay/modal shell) ----
+function openContentVideoModal(dvKey){
+  const dv = caAllDeliverables().find(d => String(d.key)===dvKey);
+  if(!dv) return;
+  MODAL_STATE.type = 'contentVideo';
+  MODAL_STATE.id = dvKey;
+  MODAL_STATE.draft = { dvKey };
+  MODAL_ENTER = true;
+  render();
+  MODAL_ENTER = false;
+  document.getElementById('overlay').classList.add('open');
+}
+function renderContentVideoModal(){
+  const dv = caAllDeliverables().find(d => String(d.key)===MODAL_STATE.draft.dvKey);
+  if(!dv) return `<div class="modal"><div class="empty">This video isn't in the current data anymore.</div><div class="modal-actions"><div></div><div class="right"><button class="btn btn-primary" id="cancelModal" type="button">Close</button></div></div></div>`;
+  const velocityByBrand = caBrandVelocityMap(caAllDeliverables());
+  const ratio = caBreakoutRatio(dv, velocityByBrand);
+  const velocity = caDeliverableVelocity(dv);
+  const rep = dv.rows.find(r=>r.status==='hit') || dv.rows[0];
+  const req = caRowRequirement(rep);
+  const progressPct = req>0 ? Math.min(100, (Number(rep.view_count)||0)/req*100) : 0;
+  const series = caVideoDailySeries(rep.id);
+  const posted = dv.postedAt ? new Date(dv.postedAt) : null;
+  const maxPlatViews = Math.max(...dv.rows.map(r=>Number(r.view_count)||0), 1);
+
+  const badges = [
+    caIsNearMiss(dv) ? `<span class="tag tag-warn">${iconTarget(11)} Near miss</span>` : '',
+    caIsTrending(dv, velocityByBrand) ? `<span class="tag tag-good">${iconFlame(11)} Trending</span>` : '',
+  ].join('');
+
+  return `<div class="modal ${MODAL_ENTER?'modal-enter':''}" style="max-width:560px;">
+    <h3><span class="swatch" style="background:${dv.brandColor}"></span>${escapeHtml(dv.title||'Untitled')}</h3>
+    <div class="hint" style="margin-bottom:14px;">${escapeHtml(dv.brandName)} · ${dv.rows.map(r=>PLATFORM_DISPLAY_NAME[r.platform]||r.platform).join(' + ')}${posted ? ` · Posted ${posted.toLocaleDateString('en-GB',{weekday:'long'})}, ${posted.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}` : ''}</div>
+    ${badges ? `<div style="display:flex; gap:5px; flex-wrap:wrap; margin:-8px 0 14px;">${badges}</div>` : ''}
+
+    <div class="grid grid-cards" style="margin-bottom:16px;">
+      <div class="card"><div class="label">Total views</div><div class="big mono">${dv.views.toLocaleString()}</div></div>
+      <div class="card"><div class="label">Since last check</div><div class="big mono">${velocity!=null?'+'+velocity.toLocaleString():'—'}</div></div>
+      <div class="card"><div class="label">vs. brand pace</div><div class="big mono">${ratio!=null?ratio.toFixed(1)+'×':'—'}</div></div>
+    </div>
+
+    <div style="margin-bottom:16px;">
+      <div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-faint); margin-bottom:8px;">Engagement <span class="tag tag-warn" style="font-size:9px; padding:1px 6px; margin-left:2px;">soon</span></div>
+      <div class="hint">Likes/comments/shares aren't captured yet — TikTok and YouTube already return them in the same API call that fetches views; Instagram needs a couple more metric names added to its own call.</div>
+    </div>
+
+    ${req>0 ? `<div style="margin-bottom:16px;">
+      <div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-faint); margin-bottom:8px;">Requirement progress</div>
+      <div class="ca-progress-track"><div class="ca-progress-fill" style="width:${progressPct.toFixed(0)}%; background:${rep.status==='hit'?'var(--fx-green)':caIsNearMiss(dv)?'var(--warn)':'var(--low)'};"></div></div>
+      <div class="ca-progress-label"><span>${(Number(rep.view_count)||0).toLocaleString()} / ${req.toLocaleString()} views</span><span>${rep.status==='hit' ? 'Hit ✓' : `${progressPct.toFixed(0)}% there`}</span></div>
+    </div>` : ''}
+
+    <div style="margin-bottom:16px;">
+      <div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-faint); margin-bottom:8px;">Growth since posting</div>
+      ${series.length>=2 ? caVideoCurveSvg(series) : `<div class="hint">Not enough daily history yet for this video — check back after a few more scouting runs.</div>`}
+    </div>
+
+    ${dv.rows.length > 1 ? `<div style="margin-bottom:16px;">
+      <div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-faint); margin-bottom:8px;">By platform</div>
+      <div style="display:flex; flex-direction:column; gap:8px;">
+        ${dv.rows.map(r => `
+          <div style="display:flex; align-items:center; gap:10px;">
+            <span class="tag tag-${r.platform}" style="width:78px; justify-content:center; flex-shrink:0;">${PLATFORM_DISPLAY_NAME[r.platform]||r.platform}</span>
+            <div class="brand-bar-track"><div class="brand-bar-fill" style="width:${((Number(r.view_count)||0)/maxPlatViews*100).toFixed(0)}%; background:var(--text);"></div></div>
+            <span class="mono" style="width:70px; text-align:right; font-size:11.5px; color:var(--text-dim); flex-shrink:0;">${(Number(r.view_count)||0).toLocaleString()}</span>
+          </div>`).join('')}
+      </div>
+    </div>` : ''}
+
+    ${dv.tags.length ? `<div style="margin-bottom:0;">
+      <div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-faint); margin-bottom:8px;">Tags</div>
+      <div style="display:flex; gap:6px; flex-wrap:wrap;">${dv.tags.map(t=>`<span class="tag tag-neutral">#${escapeHtml(t)}</span>`).join('')}</div>
+    </div>` : ''}
+
+    <div class="modal-actions">
+      <div>${rep.url ? `<a href="${rep.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">Open ↗</a>` : ''}</div>
+      <div class="right"><button class="btn btn-primary" id="cancelModal" type="button">Close</button></div>
+    </div>
+  </div>`;
+}
+function caVideoCurveSvg(series){
+  const color = CA_PLATFORM_COLOR.tiktok;
+  const W = 516, H = 110, padT = 8, padB = 8;
+  const maxV = Math.max(...series.map(s=>s.value), 1) * 1.08;
+  const n = series.length;
+  const xy = series.map((s,i) => ({ x: n>1 ? (i/(n-1))*W : 0, y: padT + (1 - s.value/maxV) * (H-padT-padB) }));
+  const linePath = smoothPath(xy);
+  const areaPath = `${linePath} L${W},${H} L0,${H} Z`;
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" class="chart-enter" style="display:block; overflow:visible;">
+    <defs><linearGradient id="caVideoGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${color}" stop-opacity="0.32"/><stop offset="100%" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
+    <path class="chart-area-path" d="${areaPath}" fill="url(#caVideoGrad)" stroke="none"/>
+    <path class="chart-line-path" pathLength="1" d="${linePath}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="1"/>
+    <circle class="chart-pt" cx="${xy[n-1].x.toFixed(1)}" cy="${xy[n-1].y.toFixed(1)}" r="4" fill="${color}" stroke="var(--surface)" stroke-width="1.5" style="animation-delay:700ms"/>
+  </svg>`;
 }
 
 /* ---------------- content ---------------- */
@@ -4330,6 +4890,7 @@ function renderModalBody(){
   if(MODAL_STATE.type==='trackedVideo') return renderTrackedVideoModal();
   if(MODAL_STATE.type==='mergeReview') return renderMergeReviewModal();
   if(MODAL_STATE.type==='brandBreakdown') return renderBrandBreakdownModal();
+  if(MODAL_STATE.type==='contentVideo') return renderContentVideoModal();
   return '';
 }
 
@@ -4776,6 +5337,24 @@ function bindGlobalHandlers(){
     el.addEventListener('mousemove', (e) => positionChartTooltip(e.clientX, e.clientY));
     el.addEventListener('mouseleave', () => { hideChartTooltip(); hideChartHoverGuide(); });
   });
+
+  // content analytics
+  document.querySelectorAll('[data-ca-range]').forEach(el => el.addEventListener('click', () => { CA_STATE.range = el.dataset.caRange; render(); }));
+  const caChipNearMiss = document.getElementById('caChipNearMiss');
+  if(caChipNearMiss) caChipNearMiss.addEventListener('click', () => { CA_STATE.nearMiss = !CA_STATE.nearMiss; render(); });
+  const caChipTrending = document.getElementById('caChipTrending');
+  if(caChipTrending) caChipTrending.addEventListener('click', () => { CA_STATE.trending = !CA_STATE.trending; render(); });
+  const caClearFilters = document.getElementById('caClearFilters');
+  if(caClearFilters) caClearFilters.addEventListener('click', () => { CA_STATE.nearMiss=false; CA_STATE.trending=false; render(); });
+  const caBrandFilter = document.getElementById('caBrandFilter');
+  if(caBrandFilter) caBrandFilter.addEventListener('change', () => { CA_STATE.brand = caBrandFilter.value; render(); });
+  document.querySelectorAll('[data-ca-date-group]').forEach(el => el.addEventListener('click', () => { CA_STATE.dateGroup = el.dataset.caDateGroup; render(); }));
+  const caSortTop = document.getElementById('caSortTop');
+  if(caSortTop) caSortTop.addEventListener('click', () => { CA_STATE.sort='top'; render(); });
+  const caSortBottom = document.getElementById('caSortBottom');
+  if(caSortBottom) caSortBottom.addEventListener('click', () => { CA_STATE.sort='bottom'; render(); });
+  document.querySelectorAll('[data-open-ca-video]').forEach(el => el.addEventListener('click', () => openContentVideoModal(el.dataset.openCaVideo)));
+  caRenderChart(); // draws the multi-platform SVG + binds its own hover listener — no-op if #caChartSvg isn't on screen
 
   // tasks
   document.querySelectorAll('[data-edit-priority]').forEach(el => el.addEventListener('change', () => {
