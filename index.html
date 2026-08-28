@@ -3418,7 +3418,7 @@ function emptyState(title, sub){
    curve depend on the EXPERIMENTAL view_snapshots table having 2+ days of history for a video —
    gracefully absent (not broken) until then, same as the brand-breakdown sparkline already is. */
 let CA_STATE = { range:'30', nearMiss:false, trending:false, brand:'all', dateGroup:'overall', sort:'top', tableExpanded:false };
-const CA_RANGES = [ {id:'7',label:'7d'}, {id:'30',label:'30d'}, {id:'90',label:'90d'}, {id:'9999',label:'All time'} ];
+const CA_RANGES = [ {id:'30',label:'30d'}, {id:'60',label:'60d'}, {id:'90',label:'90d'}, {id:'9999',label:'All time'} ];
 
 // Flat solid-fill glyphs (no stroke/outline, no gradient shading) replacing 🔥/🎯 — those render
 // as full-color glossy OS emoji, not a clean flat icon. iconTarget uses currentColor (it's meant
