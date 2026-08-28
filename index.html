@@ -785,7 +785,7 @@
   .ca-chart-hover-guide{ opacity:0; pointer-events:none; transition:opacity 140ms ease, transform 150ms cubic-bezier(.22,1,.36,1); }
   .ca-chart-hover-guide.show{ opacity:1; }
   .ca-chart-hover-guide line{ stroke:var(--border); stroke-width:1; }
-  .ca-chart-hover-guide circle{ stroke:var(--surface); stroke-width:1.5; transition:cy 150ms cubic-bezier(.22,1,.36,1); }
+  .ca-chart-hover-guide circle{ stroke:var(--surface); stroke-width:1.5; transition:cx 90ms linear, cy 90ms linear; }
   .ca-progress-track{ height:9px; border-radius:5px; background:var(--surface-2); overflow:hidden; margin-bottom:6px; }
   .ca-progress-fill{ height:100%; border-radius:5px; }
   .ca-progress-label{ display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); }
@@ -3733,23 +3733,61 @@ let CA_CHART_SERIES = null; // {platforms(shown), byPlatform: {tiktok:[{x,y,day,
 // day" for all three at once — worth it for always having something to look at instead of one
 // lone line while the others build up history. The tooltip shows each platform's own real date
 // next to its value specifically because of that tradeoff.
+// Linear interpolation between the two real points either side of frac — without this, moving
+// the mouse across only 2-3 real data points makes the number jump in one or two hard steps
+// instead of climbing smoothly, and the guide dot snaps between fixed spots instead of gliding
+// along the line. exact:true only when frac lands (near enough) on an actual recorded point —
+// everything in between is a straight-line estimate between two real days, marked with "~" in
+// the tooltip so it never reads as a third real data point that doesn't exist.
+function caInterpolate(arr, frac){
+  const n = arr.length;
+  if(n===1) return { ...arr[0], exact:true };
+  const pos = Math.max(0, Math.min(n-1, frac*(n-1)));
+  const i0 = Math.min(n-2, Math.floor(pos));
+  const i1 = i0+1;
+  const t = pos - i0;
+  const p0 = arr[i0], p1 = arr[i1];
+  return {
+    x: p0.x + (p1.x-p0.x)*t,
+    y: p0.y + (p1.y-p0.y)*t,
+    value: p0.value + (p1.value-p0.value)*t,
+    day: t < 0.5 ? p0.day : p1.day,
+    exact: t < 0.02 || t > 0.98,
+  };
+}
 function caShowChartTooltip(frac, clientX, clientY){
   if(!CA_CHART_SERIES) return;
   const tip = document.getElementById('chartTooltip');
   if(!tip) return;
   const { platforms, byPlatform } = CA_CHART_SERIES;
-  const atCursor = platforms.map(p => {
-    const arr = byPlatform[p];
-    const idx = Math.max(0, Math.min(arr.length-1, Math.round(frac * (arr.length-1))));
-    return { p, pt: arr[idx] };
-  }).filter(x => x.pt).sort((a,b) => b.pt.value - a.pt.value); // highest first, not a fixed platform order
+  const atCursor = platforms
+    .map(p => ({ p, pt: caInterpolate(byPlatform[p], frac) }))
+    .sort((a,b) => b.pt.value - a.pt.value); // highest first, not a fixed platform order
   let html = `<div class="ct-total">Views</div>`;
   atCursor.forEach(({p, pt}) => {
-    html += `<div class="ct-row"><span>${caPlatformPillHtml(p)}</span><span class="ct-amt">${escapeHtml(fmtDate(pt.day))} · ${pt.value.toLocaleString()}</span></div>`;
+    const val = Math.round(pt.value).toLocaleString();
+    html += `<div class="ct-row"><span>${caPlatformPillHtml(p)}</span><span class="ct-amt">${escapeHtml(fmtDate(pt.day))} · ${pt.exact?'':'~'}${val}</span></div>`;
   });
   tip.innerHTML = html;
   tip.classList.add('show');
-  positionChartTooltip(clientX, clientY);
+  caPositionChartTooltip(clientX, clientY);
+}
+// Positions above the cursor and clamped to the chart card's own bounds, not just the viewport —
+// the shared positionChartTooltip() only guards viewport edges and defaults to below-right of the
+// cursor, which let this tooltip spill out past the bottom of the card into the content below it
+// whenever the cursor was in the lower half of the chart.
+function caPositionChartTooltip(clientX, clientY){
+  const tip = document.getElementById('chartTooltip');
+  const card = document.getElementById('caChartSvg')?.closest('.chart-card');
+  if(!tip || !card) return;
+  const cardRect = card.getBoundingClientRect();
+  const tipRect = tip.getBoundingClientRect();
+  let left = clientX - tipRect.width/2;
+  let top = clientY - tipRect.height - 16;
+  left = Math.max(cardRect.left+6, Math.min(cardRect.right-tipRect.width-6, left));
+  top = Math.max(cardRect.top+6, top);
+  tip.style.left = left + 'px';
+  tip.style.top = top + 'px';
 }
 function caMoveChartHoverGuide(frac){
   const guide = document.getElementById('caChartHoverGuide');
@@ -3758,9 +3796,7 @@ function caMoveChartHoverGuide(frac){
   guide.style.transform = `translateX(${(pad + frac*(W-2*pad)).toFixed(1)}px)`;
   platforms.forEach(p => {
     const dot = guide.querySelector(`[data-guide-dot="${p}"]`);
-    const arr = byPlatform[p];
-    const idx = Math.max(0, Math.min(arr.length-1, Math.round(frac * (arr.length-1))));
-    const pt = arr[idx];
+    const pt = caInterpolate(byPlatform[p], frac);
     if(dot && pt){ dot.setAttribute('cy', pt.y.toFixed(1)); dot.setAttribute('cx', pt.x.toFixed(1)); dot.style.display = ''; }
   });
   guide.classList.add('show');
