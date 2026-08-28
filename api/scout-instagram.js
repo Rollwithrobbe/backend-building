@@ -227,11 +227,17 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
     }
   }
   const debug = [];
-  const views = await fetchViews(media.id, token, guard, debug);
+  // Fired together, not sequentially — same reasoning as views/facebook_views inside fetchViews()
+  // itself: two independent Graph API calls, no reason to wait on one before starting the other.
+  const [views, engagement] = await Promise.all([
+    fetchViews(media.id, token, guard, debug),
+    fetchEngagement(media.id, token, guard),
+  ]);
   if (views === null) {
     return { id: media.id, action: 'skipped', reason: 'could not read view count', debug: debug[0] };
   }
   const { total: viewCount, facebookComponent } = views;
+  const { likes, comments, shares } = engagement;
 
   const existingRes = await fetch(
     `${SUPABASE_URL}/rest/v1/tracked_videos?platform=eq.instagram&external_video_id=eq.${media.id}&select=*`,
@@ -259,6 +265,7 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
         title: media.caption ? media.caption.slice(0, 200) : '',
         posted_at: media.timestamp || null,
         view_count: viewCount,
+        likes, comments, shares,
         last_checked_at: new Date().toISOString(),
         eligible_until: eligibleUntil,
         status: alreadyHit ? 'hit' : 'tracking',
@@ -309,19 +316,28 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
       // this row's banner should stay permanently blank just because it existed before
       // thumbnail capture was added. Every video's thumbnail backfills itself the next time
       // it's touched by a scouting run — no separate migration needed.
-      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned, thumbnail_url: media.thumbnail_url || media.media_url || null, facebook_views_component: facebookComponent }),
+      body: JSON.stringify({
+        view_count: viewCount, likes, comments, shares,
+        last_checked_at: new Date().toISOString(), status, earned,
+        thumbnail_url: media.thumbnail_url || media.media_url || null, facebook_views_component: facebookComponent,
+      }),
     });
     return { id: media.id, action: 'updated', views: viewCount, status };
   }
 
   // status is 'hit' or 'expired' — the payout outcome is already locked in either way, so
-  // there's nothing left to decide here, but the view count itself is still real, meaningful
-  // information (matches what the brand's own dashboard shows, and what you'd actually want to
-  // see if you go check on a video later). Only status/earned/pay_amount stay locked.
+  // there's nothing left to decide here, but the view count (and now likes/comments/shares) is
+  // still real, meaningful information (matches what the brand's own dashboard shows, and what
+  // you'd actually want to see if you go check on a video later). Only status/earned/pay_amount
+  // stay locked.
   await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
     method: 'PATCH',
     headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), thumbnail_url: media.thumbnail_url || media.media_url || null, facebook_views_component: facebookComponent }),
+    body: JSON.stringify({
+      view_count: viewCount, likes, comments, shares,
+      last_checked_at: new Date().toISOString(),
+      thumbnail_url: media.thumbnail_url || media.media_url || null, facebook_views_component: facebookComponent,
+    }),
   });
   return { id: media.id, action: 'updated (views only)', views: viewCount, status: row.status };
 }
@@ -395,6 +411,22 @@ async function fetchMetric(mediaId, metric, token, guard) {
     guard
   );
   return res.json();
+}
+// Likes/comments/shares — one extra Graph API call per reel (Instagram's insights endpoint
+// doesn't reliably let "views" and "likes" ride in the same request across API versions), fired
+// alongside fetchViews() in processOneMedia rather than after it, so it's still just one extra
+// round trip, not one extra round trip per field. Meta's insights endpoint does accept a
+// comma-separated metric list in a single call. Any of the three can legitimately come back
+// missing (e.g. a creator hid like counts) — null in that case, never a false zero.
+async function fetchEngagement(mediaId, token, guard) {
+  if (guard.stop) return { likes: null, comments: null, shares: null };
+  const data = await fetchMetric(mediaId, 'likes,comments,shares', token, guard);
+  const valueFor = (name) => {
+    const entry = data?.data?.find((d) => d.name === name);
+    const v = entry?.values?.[0]?.value;
+    return typeof v === 'number' ? v : null;
+  };
+  return { likes: valueFor('likes'), comments: valueFor('comments'), shares: valueFor('shares') };
 }
 // Returns { total, facebookComponent } — total is native + facebook_views combined (what
 // actually gets compared against the brand's requirement and stored as view_count, matching

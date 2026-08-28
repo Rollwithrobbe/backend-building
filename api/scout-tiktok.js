@@ -133,7 +133,7 @@ async function scoutBrandAccount(brand, callGuard, CLIENT_KEY, CLIENT_SECRET, SU
     if (cursor) body.cursor = cursor;
     tickCallGuard(callGuard);
     const listRes = await fetch(
-      'https://open.tiktokapis.com/v2/video/list/?fields=id,title,view_count,create_time,share_url,cover_image_url',
+      'https://open.tiktokapis.com/v2/video/list/?fields=id,title,view_count,like_count,comment_count,share_count,create_time,share_url,cover_image_url',
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -229,6 +229,9 @@ async function processOneVideo(video, brand, SUPABASE_URL, sbHeaders) {
         title: video.title ? video.title.slice(0, 200) : '',
         posted_at: video.create_time ? new Date(video.create_time * 1000).toISOString() : null,
         view_count: viewCount,
+        likes: typeof video.like_count === 'number' ? video.like_count : null,
+        comments: typeof video.comment_count === 'number' ? video.comment_count : null,
+        shares: typeof video.share_count === 'number' ? video.share_count : null,
         last_checked_at: new Date().toISOString(),
         eligible_until: eligibleUntil,
         status: alreadyHit ? 'hit' : 'tracking',
@@ -266,18 +269,30 @@ async function processOneVideo(video, brand, SUPABASE_URL, sbHeaders) {
       // returns cover_image_url on every single fetch regardless of status, so every video's
       // thumbnail backfills itself the next time it's touched by a scouting run instead of
       // staying permanently blank just because it existed before thumbnail capture was added.
-      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned, thumbnail_url: video.cover_image_url || null }),
+      body: JSON.stringify({
+        view_count: viewCount,
+        likes: typeof video.like_count === 'number' ? video.like_count : null,
+        comments: typeof video.comment_count === 'number' ? video.comment_count : null,
+        shares: typeof video.share_count === 'number' ? video.share_count : null,
+        last_checked_at: new Date().toISOString(), status, earned, thumbnail_url: video.cover_image_url || null,
+      }),
     });
     return { id: video.id, action: 'updated', views: viewCount, status };
   }
 
   // status is 'hit' or 'expired' — the payout outcome is already locked in, but the view
-  // count is still real information worth keeping current. Only status/earned/pay_amount
-  // stay locked.
+  // count (and now likes/comments/shares) are still real information worth keeping current.
+  // Only status/earned/pay_amount stay locked.
   await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
     method: 'PATCH',
     headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), thumbnail_url: video.cover_image_url || null }),
+    body: JSON.stringify({
+      view_count: viewCount,
+      likes: typeof video.like_count === 'number' ? video.like_count : null,
+      comments: typeof video.comment_count === 'number' ? video.comment_count : null,
+      shares: typeof video.share_count === 'number' ? video.share_count : null,
+      last_checked_at: new Date().toISOString(), thumbnail_url: video.cover_image_url || null,
+    }),
   });
   return { id: video.id, action: 'updated (views only)', views: viewCount, status: row.status };
 }

@@ -196,6 +196,13 @@ function isDueForCheck(daysSincePosted){
 
 async function processOneVideo(v, brand, SUPABASE_URL, sbHeaders) {
   const viewCount = parseInt(v.statistics?.viewCount || '0', 10);
+  // Already in the same statistics response the view count comes from — no extra API call, no
+  // extra quota. likeCount/commentCount come back as strings same as viewCount; either can be
+  // absent (creator hid likes, or comments are disabled), so null rather than a false zero in
+  // that case. YouTube's Data API has no share-count field at all — shares stays null here always,
+  // that's a real platform gap, not a bug.
+  const likeCount = v.statistics?.likeCount != null ? parseInt(v.statistics.likeCount, 10) : null;
+  const commentCount = v.statistics?.commentCount != null ? parseInt(v.statistics.commentCount, 10) : null;
   if (v.snippet?.publishedAt) {
     const daysSincePosted = (Date.now() - new Date(v.snippet.publishedAt).getTime()) / 86400000;
     if (!isDueForCheck(daysSincePosted)) {
@@ -226,6 +233,8 @@ async function processOneVideo(v, brand, SUPABASE_URL, sbHeaders) {
         title: v.snippet?.title || '',
         posted_at: v.snippet?.publishedAt || null,
         view_count: viewCount,
+        likes: likeCount,
+        comments: commentCount,
         last_checked_at: new Date().toISOString(),
         eligible_until: eligibleUntil,
         status: alreadyHit ? 'hit' : 'tracking',
@@ -269,18 +278,24 @@ async function processOneVideo(v, brand, SUPABASE_URL, sbHeaders) {
       // returns snippet.thumbnails on every single fetch regardless of status, so every video's
       // thumbnail backfills itself the next time it's touched by a scouting run instead of
       // staying permanently blank just because it existed before thumbnail capture was added.
-      body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), status, earned, thumbnail_url: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.default?.url || null }),
+      body: JSON.stringify({
+        view_count: viewCount, likes: likeCount, comments: commentCount,
+        last_checked_at: new Date().toISOString(), status, earned, thumbnail_url: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.default?.url || null,
+      }),
     });
     return { id: v.id, action: 'updated', views: viewCount, status };
   }
 
   // status is 'hit' or 'expired' — the payout outcome is already locked in, but the view
-  // count is still real information worth keeping current. Only status/earned/pay_amount
-  // stay locked.
+  // count (and now likes/comments) are still real information worth keeping current. Only
+  // status/earned/pay_amount stay locked.
   await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${row.id}`, {
     method: 'PATCH',
     headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify({ view_count: viewCount, last_checked_at: new Date().toISOString(), thumbnail_url: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.default?.url || null }),
+    body: JSON.stringify({
+      view_count: viewCount, likes: likeCount, comments: commentCount,
+      last_checked_at: new Date().toISOString(), thumbnail_url: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.default?.url || null,
+    }),
   });
   return { id: v.id, action: 'updated (views only)', views: viewCount, status: row.status };
 }
