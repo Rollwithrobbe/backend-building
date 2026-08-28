@@ -3728,7 +3728,7 @@ function caHashtagCardHtml(rows){
 }
 
 // ---- chart hover: which line is which ----
-let CA_CHART_SERIES = null; // {platforms(shown), byPlatform: {tiktok:[{x,y,day,value}], ...}, W,H,pad,topPad,botPad}
+let CA_CHART_SERIES = null; // {platforms(shown), byPlatform: {tiktok:[{x,y,day,value}], ...}, W,H,pad,topPad,botPad,maxV}
 // Each platform draws on its OWN index axis, stretched to fill the full chart width, rather than
 // all three sharing one calendar-day axis. With view_snapshots this young, platforms rarely have
 // the same number of days yet — forcing a shared axis meant a platform with fewer days drew as a
@@ -3738,27 +3738,35 @@ let CA_CHART_SERIES = null; // {platforms(shown), byPlatform: {tiktok:[{x,y,day,
 // day" for all three at once — worth it for always having something to look at instead of one
 // lone line while the others build up history. The tooltip shows each platform's own real date
 // next to its value specifically because of that tradeoff.
-// Linear interpolation between the two real points either side of frac — without this, moving
-// the mouse across only 2-3 real data points makes the number jump in one or two hard steps
-// instead of climbing smoothly, and the guide dot snaps between fixed spots instead of gliding
-// along the line. exact:true only when frac lands (near enough) on an actual recorded point —
-// everything in between is a straight-line estimate between two real days, marked with "~" in
-// the tooltip so it never reads as a third real data point that doesn't exist.
-function caInterpolate(arr, frac){
+// Evaluates the exact same cubic Bezier smoothPath() draws (Catmull-Rom control points) at an
+// arbitrary t, so the hover dot sits ON the visible curve instead of a straight-line guess
+// between two real points — a straight secant visibly drifts off a curved line through the
+// middle of a segment, which is what "dots aren't aligned with the lines" was. exact:true only
+// when frac lands (near enough) on an actual recorded point — everything else is marked "~" in
+// the tooltip so it never reads as a real data point that doesn't exist.
+function caBezierEval(arr, frac){
   const n = arr.length;
-  if(n===1) return { ...arr[0], exact:true };
+  if(n===1) return { x:arr[0].x, y:arr[0].y, day:arr[0].day, exact:true };
   const pos = Math.max(0, Math.min(n-1, frac*(n-1)));
-  const i0 = Math.min(n-2, Math.floor(pos));
-  const i1 = i0+1;
-  const t = pos - i0;
-  const p0 = arr[i0], p1 = arr[i1];
-  return {
-    x: p0.x + (p1.x-p0.x)*t,
-    y: p0.y + (p1.y-p0.y)*t,
-    value: p0.value + (p1.value-p0.value)*t,
-    day: t < 0.5 ? p0.day : p1.day,
-    exact: t < 0.02 || t > 0.98,
-  };
+  const i1 = Math.min(n-2, Math.floor(pos));
+  const i2 = i1+1;
+  const t = pos - i1;
+  const p0 = arr[i1-1] || arr[i1];
+  const p1 = arr[i1];
+  const p2 = arr[i2];
+  const p3 = arr[i2+1] || arr[i2];
+  const cp1x = p1.x + (p2.x-p0.x)/6, cp1y = p1.y + (p2.y-p0.y)/6;
+  const cp2x = p2.x - (p3.x-p1.x)/6, cp2y = p2.y - (p3.y-p1.y)/6;
+  const mt = 1-t;
+  const x = mt*mt*mt*p1.x + 3*mt*mt*t*cp1x + 3*mt*t*t*cp2x + t*t*t*p2.x;
+  const y = mt*mt*mt*p1.y + 3*mt*mt*t*cp1y + 3*mt*t*t*cp2y + t*t*t*p2.y;
+  return { x, y, day: t<0.5?p1.day:p2.day, exact: t<0.02||t>0.98 };
+}
+// The number shown is read straight back off the same y the dot sits at — whatever height the
+// curve is drawn at, that's the value reported, so the two can never disagree with each other.
+function caValueFromY(y){
+  const { topPad, H, botPad, maxV } = CA_CHART_SERIES;
+  return Math.max(0, (1 - (y-topPad)/(H-topPad-botPad)) * maxV);
 }
 function caShowChartTooltip(frac, clientX, clientY){
   if(!CA_CHART_SERIES) return;
@@ -3766,43 +3774,48 @@ function caShowChartTooltip(frac, clientX, clientY){
   if(!tip) return;
   const { platforms, byPlatform } = CA_CHART_SERIES;
   const atCursor = platforms
-    .map(p => ({ p, pt: caInterpolate(byPlatform[p], frac) }))
-    .sort((a,b) => b.pt.value - a.pt.value); // highest first, not a fixed platform order
+    .map(p => { const pt = caBezierEval(byPlatform[p], frac); return { p, pt, value: caValueFromY(pt.y) }; })
+    .sort((a,b) => b.value - a.value); // highest first, not a fixed platform order
   let html = `<div class="ct-total">Views</div>`;
-  atCursor.forEach(({p, pt}) => {
-    const val = Math.round(pt.value).toLocaleString();
-    html += `<div class="ct-row"><span>${caPlatformPillHtml(p)}</span><span class="ct-amt">${escapeHtml(fmtDate(pt.day))} · ${pt.exact?'':'~'}${val}</span></div>`;
+  atCursor.forEach(({p, pt, value}) => {
+    html += `<div class="ct-row"><span>${caPlatformPillHtml(p)}</span><span class="ct-amt">${escapeHtml(fmtDate(pt.day))} · ${pt.exact?'':'~'}${Math.round(value).toLocaleString()}</span></div>`;
   });
   tip.innerHTML = html;
   tip.classList.add('show');
   caPositionChartTooltip(clientX, clientY);
 }
-// Positions above the cursor and clamped to the chart card's own bounds, not just the viewport —
-// the shared positionChartTooltip() only guards viewport edges and defaults to below-right of the
-// cursor, which let this tooltip spill out past the bottom of the card into the content below it
-// whenever the cursor was in the lower half of the chart.
+// Positions above the cursor and clamped to the SVG's own bounding box specifically — clamping to
+// the whole .chart-card (its previous bound) let the tooltip render on top of the "Views over
+// time" title above the SVG, since that title sits inside the same card but above the chart.
 function caPositionChartTooltip(clientX, clientY){
   const tip = document.getElementById('chartTooltip');
-  const card = document.getElementById('caChartSvg')?.closest('.chart-card');
-  if(!tip || !card) return;
-  const cardRect = card.getBoundingClientRect();
+  const svg = document.getElementById('caChartSvg');
+  if(!tip || !svg) return;
+  const svgRect = svg.getBoundingClientRect();
   const tipRect = tip.getBoundingClientRect();
   let left = clientX - tipRect.width/2;
   let top = clientY - tipRect.height - 16;
-  left = Math.max(cardRect.left+6, Math.min(cardRect.right-tipRect.width-6, left));
-  top = Math.max(cardRect.top+6, top);
+  left = Math.max(svgRect.left+6, Math.min(svgRect.right-tipRect.width-6, left));
+  top = Math.max(svgRect.top+6, top);
   tip.style.left = left + 'px';
   tip.style.top = top + 'px';
 }
+// Sets every coordinate as an absolute SVG attribute (x1/x2 on the line, cx/cy on each dot) —
+// no group-level transform anymore. The previous version set BOTH a translateX() on the parent
+// <g> AND an absolute cx on each dot, which stacked: the dot rendered at its own x-position PLUS
+// the group's translateX, roughly doubling the real offset from the cursor the further right you
+// hovered — exactly the "4cm off" symptom.
 function caMoveChartHoverGuide(frac){
   const guide = document.getElementById('caChartHoverGuide');
   if(!guide || !CA_CHART_SERIES) return;
   const { platforms, byPlatform, pad, W } = CA_CHART_SERIES;
-  guide.style.transform = `translateX(${(pad + frac*(W-2*pad)).toFixed(1)}px)`;
+  const crosshairX = (pad + frac*(W-2*pad)).toFixed(1);
+  const line = guide.querySelector('line');
+  if(line){ line.setAttribute('x1', crosshairX); line.setAttribute('x2', crosshairX); }
   platforms.forEach(p => {
     const dot = guide.querySelector(`[data-guide-dot="${p}"]`);
-    const pt = caInterpolate(byPlatform[p], frac);
-    if(dot && pt){ dot.setAttribute('cy', pt.y.toFixed(1)); dot.setAttribute('cx', pt.x.toFixed(1)); dot.style.display = ''; }
+    const pt = caBezierEval(byPlatform[p], frac);
+    if(dot && pt){ dot.setAttribute('cx', pt.x.toFixed(1)); dot.setAttribute('cy', pt.y.toFixed(1)); dot.style.display = ''; }
   });
   guide.classList.add('show');
 }
@@ -3831,7 +3844,7 @@ function caRenderChart(){
       day: d.day, value: d.value,
     }));
   });
-  CA_CHART_SERIES = { platforms, byPlatform, W, H, pad, topPad, botPad };
+  CA_CHART_SERIES = { platforms, byPlatform, W, H, pad, topPad, botPad, maxV };
   if(platforms.length===0) return;
 
   let html = '<defs>';
