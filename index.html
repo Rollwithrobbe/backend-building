@@ -2433,7 +2433,7 @@ function renderBrandBreakdownModal(){
         return `
         <div class="brand-bar-row">
           <div style="width:90px; flex-shrink:0;"><span class="tag tag-${p.platform}">${escapeHtml((p.platform||'').toUpperCase())}</span></div>
-          <div class="brand-bar-track"><div class="brand-bar-fill" style="width:${(p.views/maxPlatform*100).toFixed(0)}%; background:var(--${p.platform});"></div></div>
+          <div class="brand-bar-track"><div class="brand-bar-fill" style="width:${(p.views/maxPlatform*100).toFixed(0)}%; background:var(--text);"></div></div>
           ${trend}
           <div class="mono" style="width:80px; text-align:right; font-size:12.5px; flex-shrink:0;">${p.views.toLocaleString()}</div>
         </div>`;
@@ -2449,7 +2449,7 @@ function renderBrandBreakdownModal(){
           <div style="flex:1; min-width:0;">
             <div style="display:flex; align-items:center; gap:6px;"><span class="tag tag-${v.platform}" style="font-size:10px;">${escapeHtml((v.platform||'').toUpperCase())}</span><span style="font-size:12.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(v.title || 'Untitled')}</span></div>
             <div style="display:flex; align-items:center; gap:8px; margin-top:4px;">
-              <div class="brand-bar-track" style="height:5px; max-width:120px;"><div class="brand-bar-fill" style="width:${pct.toFixed(0)}%; background:var(--${v.platform});"></div></div>
+              <div class="brand-bar-track" style="height:5px; max-width:120px;"><div class="brand-bar-fill" style="width:${pct.toFixed(0)}%; background:var(--text);"></div></div>
               <span class="hint" style="white-space:nowrap;">${(v.view_count||0).toLocaleString()} views · ${v.posted_at ? fmtDate(v.posted_at.slice(0,10)) : '—'}</span>
             </div>
           </div>
