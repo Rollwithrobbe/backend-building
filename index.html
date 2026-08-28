@@ -50,25 +50,11 @@
     --fx-green-bg: #17281e;
     --fx-green: #4fae72;
     --fx-red: #e0574c;
-    /* bumped ~15-20% more saturated + spread further apart in hue than the original set —
-       these tags used to be pure decoration on a single manually-logged video; now they're a
-       scanning surface (Tracked Content, Compare Platforms) where you need to tell TikTok from
-       Instagram from YouTube at a glance across dozens of rows, so they need to actually
-       pre-attentively separate instead of all reading as "muted brown-grey" */
-    /* tied to each platform's real brand hue (muted for the dark theme, not lifted straight
-       off their logos) instead of the previous set, which put Instagram and YouTube both in
-       the same muted orange-brown family — indistinguishable at a glance in exactly the
-       scanning context (Tracked Content, Compare) where telling them apart matters most.
-       TikTok → its cyan accent · Instagram → its pink/magenta · YouTube → its red · Facebook →
-       its blue. Four different hue families now, not two pairs that collide. */
-    --tiktok: #4a8a94;
-    --tiktok-bg: #172427;
-    --instagram: #c1527a;
-    --instagram-bg: #2a1c22;
-    --youtube: #c1503f;
-    --youtube-bg: #2a1a16;
-    --facebook: #4f7fb0;
-    --facebook-bg: #1b232b;
+    /* Platform tags (TikTok/Instagram/YouTube/Facebook) used to each get their own brand-ish hue
+       here — dropped (2026-08-27) after feedback that distinct per-platform colors fought with
+       the theme's own accent/brand colors and added visual noise the tag didn't need. Every
+       platform now renders through one shared neutral chip — see .tag-tiktok etc. below, which
+       no longer read a --platform variable at all, just a flat dark-gray/white pair. */
     --radius: 10px;
     --radius-sm: 6px;
     /* one elevation system for every floating surface (modal, popover, drawer) instead of
@@ -127,14 +113,6 @@
     --fx-green-bg: #0f2b1e;
     --fx-green: #5fbf8a;
     --fx-red: #b85a42;
-    --tiktok: #0fa4af;
-    --tiktok-bg: #0a2e30;
-    --instagram: #c26e8a;
-    --instagram-bg: #2e1f26;
-    --youtube: #b85a42;
-    --youtube-bg: #2a1712;
-    --facebook: #4f8fbf;
-    --facebook-bg: #16232e;
     --glass-rgb: 0,49,53;
     --brand-gradient: linear-gradient(135deg, #024950 0%, #0fa4af 55%, #964734 100%);
   }
@@ -197,14 +175,6 @@
     --fx-green-bg: #1f3327;
     --fx-green: #6fbf8a;
     --fx-red: #c25468;
-    --tiktok: #5fc2c2;
-    --tiktok-bg: #1a2e30;
-    --instagram: #e98cb9;
-    --instagram-bg: #3a2438;
-    --youtube: #c25468;
-    --youtube-bg: #34212a;
-    --facebook: #6e85bf;
-    --facebook-bg: #1f2740;
     --glass-rgb: 27,25,49;
     --brand-gradient: linear-gradient(135deg, #662249 0%, #a34054 50%, #ed9e59 100%);
   }
@@ -250,14 +220,6 @@
     --fx-green-bg: #e7ecdd;
     --fx-green: #7a8f5c;
     --fx-red: #a8503e;
-    --tiktok: #4f7b76;
-    --tiktok-bg: #e1eae8;
-    --instagram: #a8677a;
-    --instagram-bg: #f0e2e6;
-    --youtube: #a8452f;
-    --youtube-bg: #f2dfd8;
-    --facebook: #5e7691;
-    --facebook-bg: #e1e7ec;
     --glass-rgb: 240,235,227;
     --brand-gradient: linear-gradient(135deg, #4a2e1e 0%, #bd7f48 50%, #c79485 100%);
   }
@@ -425,10 +387,10 @@
   tr.row-flash td{ animation:rowFlash 2.1s ease-out; }
 
   .tag{ display:inline-flex; align-items:center; gap:5px; padding:3px 8px; border-radius:5px; font-size:11px; font-weight:600; white-space:nowrap; }
-  .tag-tiktok{ background:var(--tiktok-bg); color:var(--tiktok); }
-  .tag-instagram{ background:var(--instagram-bg); color:var(--instagram); }
-  .tag-youtube{ background:var(--youtube-bg); color:var(--youtube); }
-  .tag-facebook{ background:var(--facebook-bg); color:var(--facebook); }
+  /* One shared neutral chip for every platform — not per-platform brand colors (that fought with
+     the theme's own accent/palette) — deliberately a fixed dark-gray/white pair rather than
+     theme-driven tokens, same look regardless of which theme is active. */
+  .tag-tiktok, .tag-instagram, .tag-youtube, .tag-facebook{ background:#2b2a30; color:#f5f3ef; }
   .tag-good{ background:var(--good-bg); color:var(--good); }
   .tag-warn{ background:var(--warn-bg); color:var(--warn); }
   .tag-danger{ background:var(--danger-bg); color:var(--danger); }
