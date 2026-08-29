@@ -2622,10 +2622,13 @@ function sparklineSvg(values, color, w=48, h=16){
 function openBrandBreakdown(brandId, brandName, brandColor){
   MODAL_STATE.type = 'brandBreakdown';
   MODAL_STATE.id = brandId || brandName;
-  // Defaults to 'all' (not the 30-day window) — the Brand Comparison table's "Views — all time"
-  // column is the one most often glanced at first, and the toggle right below the title makes it
-  // just as easy to flip to the 30-day number, so nothing is hidden either way.
-  MODAL_STATE.draft = { brandId: brandId || null, brandName, brandColor, range: 'all' };
+  // Opens on whichever views window the table itself is currently sorted/highlighted by — click
+  // the row while "Views — 30d" is the active sort column and the modal should already be
+  // showing 30 days, not a default that disagrees with what's visibly highlighted in the table
+  // you just clicked from. Anything else (sorted by earned, hit rate, a custom drag order, etc.)
+  // falls back to all time. Either way the toggle right below the title can still switch it.
+  const defaultRange = BRAND_TABLE_SORT.key === 'views30d' ? '30d' : 'all';
+  MODAL_STATE.draft = { brandId: brandId || null, brandName, brandColor, range: defaultRange };
   MODAL_ENTER = true;
   render();
   MODAL_ENTER = false;
