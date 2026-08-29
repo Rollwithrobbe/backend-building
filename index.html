@@ -2953,8 +2953,8 @@ let VIEW_SNAPSHOTS_DATA = null;
 // alone — a fully-blocked Instagram run leaves last_checked_at untouched, identical to the cron
 // simply never firing at all, so there was no way to tell those two apart before this existed.
 let SCOUT_RUNS_DATA = null;
-// Latest row from ai_insights — written daily by api/ai-insights.js (Claude-generated content
-// recommendations built from this same tracked_videos/view_snapshots data). null until loaded;
+// Latest row from ai_insights — written weekly (Mondays) by api/ai-insights.js (Claude-generated
+// content recommendations built from this same tracked_videos/view_snapshots data). null until loaded;
 // the Analytics page just shows nothing for this card until it arrives, same as the rest here.
 let AI_INSIGHTS_DATA = null;
 // Row ids (individual tracked_videos, not deliverables) currently checked for merging into one
@@ -3743,7 +3743,7 @@ function renderContentAnalytics(){
   `;
 }
 
-// Latest daily run of api/ai-insights.js — see AI_INSIGHTS_DATA's declaration. Absent entirely
+// Latest weekly run of api/ai-insights.js — see AI_INSIGHTS_DATA's declaration. Absent entirely
 // until the first run exists (nothing has generated one yet, e.g. right after shipping this
 // before the cron/manual trigger has run once) — shows a quiet placeholder instead of a card
 // with fake content in that case.
@@ -3751,7 +3751,7 @@ function caAiInsightsCardHtml(){
   if(!AI_INSIGHTS_DATA){
     return `<div class="card ca-ai-card">
       <div class="ca-ai-head"><div class="ca-ai-title">${iconSpark(15)} AI Recommendations</div></div>
-      <div class="hint" style="margin-top:6px;">No recommendations generated yet — this fills in after the first daily run.</div>
+      <div class="hint" style="margin-top:6px;">No recommendations generated yet — this fills in after the first Monday run.</div>
     </div>`;
   }
   const d = AI_INSIGHTS_DATA;

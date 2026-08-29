@@ -2,7 +2,8 @@
   "crons": [
     { "path": "/api/scout-youtube", "schedule": "0 22 * * *" },
     { "path": "/api/scout-instagram", "schedule": "30 22 * * *" },
-    { "path": "/api/scout-tiktok", "schedule": "0 23 * * *" }
+    { "path": "/api/scout-tiktok", "schedule": "0 23 * * *" },
+    { "path": "/api/ai-insights", "schedule": "45 23 * * 1" }
   ],
   "functions": {
     "api/scout-youtube.js": { "maxDuration": 60 },

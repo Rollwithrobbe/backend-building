@@ -1,7 +1,9 @@
-// Daily AI content-analytics job: pulls the same underlying data the Analytics page computes
-// from (tracked_videos + brands + view_snapshots), builds a compact structured summary, and asks
-// Claude (claude-sonnet-5) what's working, what's not, what hooks/patterns are paying off, and
-// what to do next. Writes the result to ai_insights so the dashboard can show the latest run.
+// Weekly AI content-analytics job (Mondays, 23:45 UTC — after that day's three scout jobs have
+// run, so it's reasoning over fresh data): pulls the same underlying data the Analytics page
+// computes from (tracked_videos + brands + view_snapshots), builds a compact structured summary,
+// and asks Claude (claude-sonnet-5) what's working, what's not, what hooks/patterns are paying
+// off, and what to do next. Writes the result to ai_insights so the dashboard can show the latest
+// run. Weekly (not daily) is a deliberate cost/value call — see vercel.json's cron entry.
 //
 // Deliberately raw `fetch` throughout, matching scout-tiktok.js / scout-instagram.js /
 // scout-youtube.js — this project has no package.json / npm dependencies, so no @anthropic-ai/sdk.
@@ -122,7 +124,7 @@ function buildInsightsPayload(deliverables, snapshots) {
   velocityByBrand.forEach((vals, brandId) => brandAvgVelocity.set(brandId, vals.reduce((a, b) => a + b, 0) / vals.length));
 
   // Most recently posted first, capped so the prompt stays a bounded, predictable size —
-  // recent content is what a daily recommendation run should actually be about.
+  // recent content is what a weekly recommendation run should actually be about.
   const sorted = [...deliverables].sort((a, b) => (b.postedAt || '').localeCompare(a.postedAt || ''));
   const capped = sorted.slice(0, 200);
 
