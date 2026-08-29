@@ -7,6 +7,7 @@
   "functions": {
     "api/scout-youtube.js": { "maxDuration": 60 },
     "api/scout-instagram.js": { "maxDuration": 60 },
-    "api/scout-tiktok.js": { "maxDuration": 60 }
+    "api/scout-tiktok.js": { "maxDuration": 60 },
+    "api/ai-insights.js": { "maxDuration": 60 }
   }
 }

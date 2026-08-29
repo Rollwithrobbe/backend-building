@@ -798,6 +798,19 @@
   .ca-progress-track{ height:9px; border-radius:5px; background:var(--surface-2); overflow:hidden; margin-bottom:6px; }
   .ca-progress-fill{ height:100%; border-radius:5px; }
   .ca-progress-label{ display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); }
+  .ca-ai-card{ margin-bottom:20px; }
+  .ca-ai-head{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  .ca-ai-title{ display:flex; align-items:center; gap:7px; font-size:13.5px; font-weight:700; color:var(--text); }
+  .ca-ai-meta{ font-size:11px; color:var(--text-faint); font-family:'IBM Plex Mono'; }
+  .ca-ai-summary{ font-size:12.5px; color:var(--text-dim); line-height:1.55; margin:10px 0 4px; }
+  .ca-ai-block{ margin-top:16px; }
+  .ca-ai-block-title{ font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-faint); margin-bottom:8px; }
+  .ca-ai-item{ display:flex; align-items:flex-start; gap:9px; padding:6px 0; }
+  .ca-ai-item .tag{ margin-top:1px; width:16px; height:16px; padding:0; justify-content:center; font-size:11px; }
+  .ca-ai-item-text{ font-size:12.5px; color:var(--text); line-height:1.4; }
+  .ca-ai-item-evidence{ font-size:11px; color:var(--text-faint); line-height:1.4; margin-top:2px; }
+  .ca-ai-recs{ margin:0; padding-left:18px; }
+  .ca-ai-recs li{ font-size:12.5px; color:var(--text-dim); line-height:1.6; }
 </style>
 </head>
 <body>
@@ -2940,6 +2953,10 @@ let VIEW_SNAPSHOTS_DATA = null;
 // alone — a fully-blocked Instagram run leaves last_checked_at untouched, identical to the cron
 // simply never firing at all, so there was no way to tell those two apart before this existed.
 let SCOUT_RUNS_DATA = null;
+// Latest row from ai_insights — written daily by api/ai-insights.js (Claude-generated content
+// recommendations built from this same tracked_videos/view_snapshots data). null until loaded;
+// the Analytics page just shows nothing for this card until it arrives, same as the rest here.
+let AI_INSIGHTS_DATA = null;
 // Row ids (individual tracked_videos, not deliverables) currently checked for merging into one
 // crossposted deliverable — see the Merge button in renderTrackedContent() and renderMergeReviewModal().
 let MERGE_SELECTED = new Set();
@@ -2981,6 +2998,25 @@ async function loadTrackedContent(){
   renderWithChartEnter();
   loadViewSnapshots(); // fire-and-forget — see its own comment; never blocks the main dashboard
   loadScoutRuns(); // fire-and-forget — see its own comment; never blocks the main dashboard
+  loadAiInsights(); // fire-and-forget — see its own comment; never blocks the main dashboard
+}
+
+// Pulls the single most recent ai_insights row (see AI_INSIGHTS_DATA's declaration). Silently
+// gives up on failure — including if the table doesn't exist yet because the SQL migration
+// hasn't been run — same pattern as loadViewSnapshots()/loadScoutRuns().
+async function loadAiInsights(){
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/ai_insights?select=*&order=created_at.desc&limit=1`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+    const rows = await res.json();
+    AI_INSIGHTS_DATA = rows[0] || null;
+    render();
+  }catch(e){
+    console.warn('loadAiInsights failed (the AI Recommendations card just won\'t show) —', e);
+  }
 }
 
 // See SCOUT_RUNS_DATA's declaration for what this powers. Same silent-give-up-on-failure pattern
@@ -3433,6 +3469,13 @@ function iconTarget(size){
   size = size || 12;
   return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" style="flex-shrink:0; vertical-align:-2px;"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4.3"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>`;
 }
+// Flat 4-point sparkle — matches iconFlame/iconTarget's flat-2D style (no emoji, no gradients).
+// Used only to mark the AI Recommendations card as AI-generated, currentColor so it inherits
+// whatever accent the surrounding text uses rather than carrying its own fixed color.
+function iconSpark(size){
+  size = size || 12;
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="currentColor" style="flex-shrink:0; vertical-align:-2px;"><path d="M12 2.5c.3 3.6 1.1 6.1 2.4 7.4S17.9 11.7 21.5 12c-3.6.3-6.1 1.1-7.4 2.4S12.3 17.9 12 21.5c-.3-3.6-1.1-6.1-2.4-7.4S6.1 12.3 2.5 12c3.6-.3 6.1-1.1 7.4-2.4S11.7 6.1 12 2.5z"/></svg>`;
+}
 // Real platform brand colors/gradients — deliberately different scope from .tag-tiktok's flat
 // neutral gray (that's for a label everywhere else in the app; this chart is the one place
 // telling three overlapping lines apart at a glance is worth spending brand color on).
@@ -3687,6 +3730,8 @@ function renderContentAnalytics(){
       <div class="card"><div class="label">Best platform</div><div class="big">${bestPlat?(PLATFORM_DISPLAY_NAME[bestPlat[0]]||bestPlat[0]):'—'}</div><div class="foot">${bestPlat?bestPlat[1].toLocaleString()+' views in range':'No data in range'}</div></div>
     </div>
 
+    ${caAiInsightsCardHtml()}
+
     <div class="section-title" style="margin-top:0; display:flex; align-items:center; gap:8px;">${iconFlame(14)}Breaking out right now</div>
     ${caBreakoutRowHtml(rows, velocityByBrand)}
 
@@ -3696,6 +3741,52 @@ function renderContentAnalytics(){
 
     ${caHashtagCardHtml(rows)}
   `;
+}
+
+// Latest daily run of api/ai-insights.js — see AI_INSIGHTS_DATA's declaration. Absent entirely
+// until the first run exists (nothing has generated one yet, e.g. right after shipping this
+// before the cron/manual trigger has run once) — shows a quiet placeholder instead of a card
+// with fake content in that case.
+function caAiInsightsCardHtml(){
+  if(!AI_INSIGHTS_DATA){
+    return `<div class="card ca-ai-card">
+      <div class="ca-ai-head"><div class="ca-ai-title">${iconSpark(15)} AI Recommendations</div></div>
+      <div class="hint" style="margin-top:6px;">No recommendations generated yet — this fills in after the first daily run.</div>
+    </div>`;
+  }
+  const d = AI_INSIGHTS_DATA;
+  const listBlock = (title, cls, items) => {
+    if(!items || items.length===0) return '';
+    return `<div class="ca-ai-block">
+      <div class="ca-ai-block-title">${title}</div>
+      ${items.map(it => `<div class="ca-ai-item"><span class="tag ${cls}" style="flex-shrink:0;">${cls==='tag-good'?'+':'−'}</span><div><div class="ca-ai-item-text">${escapeHtml(it.insight)}</div><div class="ca-ai-item-evidence">${escapeHtml(it.evidence)}</div></div></div>`).join('')}
+    </div>`;
+  };
+  const hookBlock = (d.hook_patterns||[]).length ? `<div class="ca-ai-block">
+      <div class="ca-ai-block-title">Hook &amp; script patterns</div>
+      ${d.hook_patterns.map(p => `<div class="ca-ai-item"><div><div class="ca-ai-item-text">${escapeHtml(p.pattern)}</div>${(p.examples||[]).length?`<div class="ca-ai-item-evidence">${p.examples.map(escapeHtml).join(' · ')}</div>`:''}</div></div>`).join('')}
+    </div>` : '';
+  const videosBlock = (d.videos_to_watch||[]).length ? `<div class="ca-ai-block">
+      <div class="ca-ai-block-title">Videos to watch</div>
+      ${d.videos_to_watch.map(v => `<div class="ca-ai-item"><div><div class="ca-ai-item-text">${escapeHtml(v.title)} <span style="color:var(--text-faint); font-weight:400;">· ${escapeHtml(v.brand)}</span></div><div class="ca-ai-item-evidence">${escapeHtml(v.reason)}</div></div></div>`).join('')}
+    </div>` : '';
+  const recsBlock = (d.recommendations||[]).length ? `<div class="ca-ai-block">
+      <div class="ca-ai-block-title">Recommended next actions</div>
+      <ul class="ca-ai-recs">${d.recommendations.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>
+    </div>` : '';
+
+  return `<div class="card ca-ai-card">
+    <div class="ca-ai-head">
+      <div class="ca-ai-title">${iconSpark(15)} AI Recommendations</div>
+      <div class="ca-ai-meta">${fmtDateTime(d.created_at)} · ${d.deliverables_analyzed||0} videos analyzed${d.estimated_cost_usd!=null?` · ~$${Number(d.estimated_cost_usd).toFixed(3)}`:''}</div>
+    </div>
+    <div class="ca-ai-summary">${escapeHtml(d.summary||'')}</div>
+    ${listBlock('What\'s working', 'tag-good', d.whats_working)}
+    ${listBlock('What\'s not working', 'tag-warn', d.whats_not_working)}
+    ${hookBlock}
+    ${videosBlock}
+    ${recsBlock}
+  </div>`;
 }
 
 function caBreakoutRowHtml(rows, velocityByBrand){
