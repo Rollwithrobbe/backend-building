@@ -2552,12 +2552,13 @@ function bindBrandComparisonDnD(){
   });
 }
 
-// Same 30-day rolling window as the "Views — 30d" column this opens from — the breakdown exists
-// to answer "what actually makes up that number", so it has to read off the exact same window
-// or the two would silently disagree the moment a video ages past 30 days between renders.
-function brandViewsBreakdownData(brandId, brandName, topN=5){
+// range 'all' reads off the exact same rows as the "Views — all time" column; range '30d' (the
+// default) reads off the exact same 30-day rolling window as "Views — 30d" — the breakdown exists
+// to answer "what actually makes up that number", so whichever one is picked has to match its
+// column exactly or the two would silently disagree.
+function brandViewsBreakdownData(brandId, brandName, topN=5, range='30d'){
   if(!TRACKED_CONTENT_DATA) return { platformTotals: [], topVideos: [], totalViews: 0 };
-  const cutoff = Date.now() - 30*86400000;
+  const cutoff = range==='all' ? 0 : Date.now() - 30*86400000;
   const rows = TRACKED_CONTENT_DATA.filter(r => {
     if(r.excluded) return false;
     if(!r.posted_at || new Date(r.posted_at).getTime() < cutoff) return false;
@@ -2621,7 +2622,10 @@ function sparklineSvg(values, color, w=48, h=16){
 function openBrandBreakdown(brandId, brandName, brandColor){
   MODAL_STATE.type = 'brandBreakdown';
   MODAL_STATE.id = brandId || brandName;
-  MODAL_STATE.draft = { brandId: brandId || null, brandName, brandColor };
+  // Defaults to 'all' (not the 30-day window) — the Brand Comparison table's "Views — all time"
+  // column is the one most often glanced at first, and the toggle right below the title makes it
+  // just as easy to flip to the 30-day number, so nothing is hidden either way.
+  MODAL_STATE.draft = { brandId: brandId || null, brandName, brandColor, range: 'all' };
   MODAL_ENTER = true;
   render();
   MODAL_ENTER = false;
@@ -2630,13 +2634,20 @@ function openBrandBreakdown(brandId, brandName, brandColor){
 function renderBrandBreakdownModal(){
   const d = MODAL_STATE.draft;
   if(!d) return '';
-  const data = brandViewsBreakdownData(d.brandId, d.brandName);
+  const range = d.range || 'all';
+  const data = brandViewsBreakdownData(d.brandId, d.brandName, 5, range);
   const maxPlatform = Math.max(...data.platformTotals.map(p=>p.views), 1);
   const maxTopViews = Math.max(...data.topVideos.map(v=>Number(v.view_count)||0), 1);
+  const windowLabel = range==='all' ? 'all time' : 'last 30 days';
+  const columnLabel = range==='all' ? 'Views — all time' : 'Views — 30d';
   return `<div class="modal ${MODAL_ENTER?'modal-enter':''}" style="max-width:560px;">
-    <h3><span class="swatch" style="background:${d.brandColor}"></span>${escapeHtml(d.brandName)} — views (last 30 days)</h3>
-    <div class="hint" style="margin-bottom:14px;">${data.totalViews.toLocaleString()} total views across ${data.platformTotals.length} platform${data.platformTotals.length===1?'':'s'} — same window as the "Views — 30d" column, so it always adds up to that number.</div>
-    ${data.platformTotals.length===0 ? emptyState('Nothing in the last 30 days', 'Once this brand has videos posted within the window, they show up here.') : `
+    <h3><span class="swatch" style="background:${d.brandColor}"></span>${escapeHtml(d.brandName)} — views (${windowLabel})</h3>
+    <div class="range-pills" style="margin-bottom:12px;">
+      <button class="range-pill ${range==='30d'?'active':''}" data-bb-range="30d">30 days</button>
+      <button class="range-pill ${range==='all'?'active':''}" data-bb-range="all">All time</button>
+    </div>
+    <div class="hint" style="margin-bottom:14px;">${data.totalViews.toLocaleString()} total views across ${data.platformTotals.length} platform${data.platformTotals.length===1?'':'s'} — same window as the "${columnLabel}" column in Brand Comparison, so it always adds up to that number.</div>
+    ${data.platformTotals.length===0 ? emptyState(`Nothing in the ${windowLabel==='all time'?'all-time total':'last 30 days'}`, 'Once this brand has videos posted within the window, they show up here.') : `
     <div class="card" style="margin-bottom:16px;">
       ${data.platformTotals.map(p => {
         // EXPERIMENTAL — see VIEW_SNAPSHOTS_DATA's declaration. sparklineSvg() returns '' until
@@ -5470,6 +5481,10 @@ function bindGlobalHandlers(){
   document.querySelectorAll('[data-open-modal]').forEach(el => el.addEventListener('click', () => openModal(el.dataset.openModal)));
   document.querySelectorAll('[data-open-brand-breakdown]').forEach(el => el.addEventListener('click', () => {
     openBrandBreakdown(el.dataset.brandId || null, el.dataset.brandName, el.dataset.brandColor);
+  }));
+  document.querySelectorAll('[data-bb-range]').forEach(el => el.addEventListener('click', () => {
+    if(MODAL_STATE.draft) MODAL_STATE.draft.range = el.dataset.bbRange;
+    render();
   }));
   document.querySelectorAll('[data-open-content]').forEach(el => el.addEventListener('click', () => openModal('content', el.dataset.openContent)));
   document.querySelectorAll('[data-open-brand], [data-edit-brand]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); openModal('brand', el.dataset.openBrand || el.dataset.editBrand); }));
