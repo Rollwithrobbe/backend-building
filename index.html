@@ -799,7 +799,11 @@
   .ca-progress-fill{ height:100%; border-radius:5px; }
   .ca-progress-label{ display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); }
   .ca-ai-card{ margin-bottom:20px; }
-  .ca-ai-head{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  /* Collapsible, same pattern as Brand Comparison (see .tw-head-collapsible's comment) — direct
+     DOM class toggling via setAiInsightsCollapsed(), not render(), so the browser gets a real
+     "before" frame to animate from. */
+  .ca-ai-head{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap; cursor:pointer; user-select:none; -webkit-user-select:none; }
+  .ca-ai-head:hover .ca-ai-chevron{ background:var(--surface-2); }
   .ca-ai-title{ display:flex; align-items:center; gap:7px; font-size:13.5px; font-weight:700; color:var(--text); }
   .ca-ai-meta{ font-size:11px; color:var(--text-faint); font-family:'IBM Plex Mono'; }
   .ca-ai-summary{ font-size:12.5px; color:var(--text-dim); line-height:1.55; margin:10px 0 4px; }
@@ -811,6 +815,31 @@
   .ca-ai-item-evidence{ font-size:11px; color:var(--text-faint); line-height:1.4; margin-top:2px; }
   .ca-ai-recs{ margin:0; padding-left:18px; }
   .ca-ai-recs li{ font-size:12.5px; color:var(--text-dim); line-height:1.6; }
+  .ca-ai-summary-compact{
+    font-weight:400; font-size:12px; color:var(--text-faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    opacity:0; transform:translateX(-6px);
+    transition:opacity .38s cubic-bezier(.22,1,.36,1) .07s, transform .38s cubic-bezier(.22,1,.36,1) .07s;
+  }
+  .ca-ai-card.collapsed .ca-ai-summary-compact{ opacity:1; transform:translateX(0); }
+  .ca-ai-chevron{
+    flex-shrink:0; color:var(--text-faint); display:flex; align-items:center; justify-content:center;
+    width:22px; height:22px; border-radius:6px;
+    transition:transform .38s cubic-bezier(.22,1,.36,1), background-color .2s ease;
+  }
+  .ca-ai-card.collapsed .ca-ai-chevron{ transform:rotate(-90deg); }
+  .ca-ai-body{ display:grid; grid-template-rows:1fr; transition:grid-template-rows .42s cubic-bezier(.22,1,.36,1); }
+  .ca-ai-card.collapsed .ca-ai-body{ grid-template-rows:0fr; }
+  .ca-ai-body-inner{ overflow:hidden; transition:opacity .28s ease, filter .28s ease; }
+  .ca-ai-card.collapsed .ca-ai-body-inner{ opacity:0; filter:blur(1.5px); }
+  /* Full-width Dashboard teaser card — 2 "doing well" lines + 1 "needs improvement" line, with a
+     link across to the full report on Analytics. Not collapsible (it's already short). */
+  .dash-ai-card{ margin-bottom:20px; }
+  .dash-ai-head{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+  .dash-ai-link{ font-size:11.5px; font-weight:600; color:var(--accent); text-decoration:none; white-space:nowrap; }
+  .dash-ai-link:hover{ text-decoration:underline; }
+  .dash-ai-row{ display:flex; align-items:flex-start; gap:9px; padding:5px 0; }
+  .dash-ai-row .tag{ margin-top:1px; width:16px; height:16px; padding:0; justify-content:center; font-size:11px; flex-shrink:0; }
+  .dash-ai-row-text{ font-size:12.5px; color:var(--text); line-height:1.4; }
 </style>
 </head>
 <body>
@@ -1087,6 +1116,7 @@ let BRAND_TABLE_SORT = { key:'earned', dir:'desc' };
 // row is dragged; clicking a column header clears it and returns to sorting by that column.
 let BRAND_ROW_ORDER = JSON.parse(localStorage.getItem('rwr-brand-order') || 'null');
 const BRAND_CMP_COLLAPSED_KEY = 'rwr-brand-cmp-collapsed';
+const AI_INSIGHTS_COLLAPSED_KEY = 'rwr-ai-insights-collapsed';
 // mirrors MODAL_ENTER's pattern (see openModal): true only for the one render() call that
 // should play the chart's materialize-in animation — first mount, a range switch, or the
 // moment tracked-content data first lands. Every other render() (checking a task, editing a
@@ -3437,6 +3467,8 @@ function renderDashboard(){
       </div>
     </div>
 
+    ${dashAiSummaryCardHtml()}
+
     <div class="section-title">Recent content</div>
     ${recent.length===0 ? emptyState('No content logged yet','Add a video and it will show up here.') : renderContentTable(recent)}
   `;
@@ -3444,6 +3476,31 @@ function renderDashboard(){
 
 function emptyState(title, sub){
   return `<div class="table-wrap"><div class="empty"><b>${escapeHtml(title)}</b>${escapeHtml(sub)}</div></div>`;
+}
+
+// Full-width teaser for the AI Recommendations report (see caAiInsightsCardHtml on the Analytics
+// page for the full version this summarizes) — top 2 "what's working" wins plus the single
+// biggest "what's not working" issue, so the headline read is visible without leaving Dashboard.
+// AI_INSIGHTS_DATA is loaded once at startup (see loadAiInsights(), called from
+// loadTrackedContent()) so it's already available here regardless of which page loaded first.
+function dashAiSummaryCardHtml(){
+  if(!AI_INSIGHTS_DATA){
+    return `<div class="card dash-ai-card">
+      <div class="dash-ai-head"><div class="ca-ai-title">${iconSpark(15)} AI Recommendations</div></div>
+      <div class="hint">No recommendations generated yet — this fills in after the first Monday run.</div>
+    </div>`;
+  }
+  const d = AI_INSIGHTS_DATA;
+  const wins = (d.whats_working||[]).slice(0,2);
+  const issue = (d.whats_not_working||[])[0];
+  return `<div class="card dash-ai-card">
+    <div class="dash-ai-head">
+      <div class="ca-ai-title">${iconSpark(15)} AI Recommendations <span style="font-weight:400; color:var(--text-faint); font-size:11.5px;">· ${fmtDate(d.created_at.slice(0,10))}</span></div>
+      <a href="#" class="dash-ai-link" data-goto-ca-ai>View full report →</a>
+    </div>
+    ${wins.map(w => `<div class="dash-ai-row"><span class="tag tag-good">+</span><div class="dash-ai-row-text">${escapeHtml(w.insight)}</div></div>`).join('')}
+    ${issue ? `<div class="dash-ai-row"><span class="tag tag-warn">−</span><div class="dash-ai-row-text">${escapeHtml(issue.insight)}</div></div>` : ''}
+  </div>`;
 }
 
 /* ---------------- content analytics ----------------
@@ -3730,8 +3787,6 @@ function renderContentAnalytics(){
       <div class="card"><div class="label">Best platform</div><div class="big">${bestPlat?(PLATFORM_DISPLAY_NAME[bestPlat[0]]||bestPlat[0]):'—'}</div><div class="foot">${bestPlat?bestPlat[1].toLocaleString()+' views in range':'No data in range'}</div></div>
     </div>
 
-    ${caAiInsightsCardHtml()}
-
     <div class="section-title" style="margin-top:0; display:flex; align-items:center; gap:8px;">${iconFlame(14)}Breaking out right now</div>
     ${caBreakoutRowHtml(rows, velocityByBrand)}
 
@@ -3740,6 +3795,8 @@ function renderContentAnalytics(){
     ${caTableSectionHtml(allDv, velocityByBrand)}
 
     ${caHashtagCardHtml(rows)}
+
+    ${caAiInsightsCardHtml()}
   `;
 }
 
@@ -3775,18 +3832,42 @@ function caAiInsightsCardHtml(){
       <ul class="ca-ai-recs">${d.recommendations.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>
     </div>` : '';
 
-  return `<div class="card ca-ai-card">
-    <div class="ca-ai-head">
+  // Collapsed by default the very first time (nothing stored yet) — this report is long, and it
+  // now sits at the bottom of the page, so starting closed keeps Analytics from opening onto a
+  // huge wall of text. Once the user has ever explicitly toggled it, that choice is remembered
+  // (same localStorage-remembers-collapse pattern as Brand Comparison's setBrandComparisonCollapsed).
+  const collapsed = localStorage.getItem(AI_INSIGHTS_COLLAPSED_KEY) !== '0';
+  const workingCount = (d.whats_working||[]).length;
+  const issueCount = (d.whats_not_working||[]).length;
+  const actionCount = (d.recommendations||[]).length;
+
+  return `<div class="card ca-ai-card ${collapsed?'collapsed':''}" id="caAiCard">
+    <div class="ca-ai-head" id="caAiHead">
       <div class="ca-ai-title">${iconSpark(15)} AI Recommendations</div>
-      <div class="ca-ai-meta">${fmtDateTime(d.created_at)} · ${d.deliverables_analyzed||0} videos analyzed${d.estimated_cost_usd!=null?` · ~$${Number(d.estimated_cost_usd).toFixed(3)}`:''}</div>
+      <div style="display:flex; align-items:center; gap:12px; min-width:0; overflow:hidden;">
+        <span class="ca-ai-summary-compact mono">${workingCount} working · ${issueCount} to fix · ${actionCount} action${actionCount===1?'':'s'}</span>
+        <span class="ca-ai-chevron"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg></span>
+      </div>
     </div>
-    <div class="ca-ai-summary">${escapeHtml(d.summary||'')}</div>
-    ${listBlock('What\'s working', 'tag-good', d.whats_working)}
-    ${listBlock('What\'s not working', 'tag-warn', d.whats_not_working)}
-    ${hookBlock}
-    ${videosBlock}
-    ${recsBlock}
+    <div class="ca-ai-body" id="caAiBody"><div class="ca-ai-body-inner">
+      <div class="ca-ai-meta">${fmtDateTime(d.created_at)} · ${d.deliverables_analyzed||0} videos analyzed${d.estimated_cost_usd!=null?` · ~$${Number(d.estimated_cost_usd).toFixed(3)}`:''}</div>
+      <div class="ca-ai-summary">${escapeHtml(d.summary||'')}</div>
+      ${listBlock('What\'s working', 'tag-good', d.whats_working)}
+      ${listBlock('What\'s not working', 'tag-warn', d.whats_not_working)}
+      ${hookBlock}
+      ${videosBlock}
+      ${recsBlock}
+    </div></div>
   </div>`;
+}
+
+// Direct DOM mutation, not render() — same reason as setBrandComparisonCollapsed: render()
+// replaces #root.innerHTML wholesale, which would give the browser no "before" frame to animate
+// the collapse from.
+function setAiInsightsCollapsed(collapsed){
+  localStorage.setItem(AI_INSIGHTS_COLLAPSED_KEY, collapsed ? '1' : '0');
+  const card = document.getElementById('caAiCard');
+  if(card) card.classList.toggle('collapsed', collapsed);
 }
 
 function caBreakoutRowHtml(rows, velocityByBrand){
@@ -5665,6 +5746,15 @@ function bindGlobalHandlers(){
   if(caTableExpand) caTableExpand.addEventListener('click', () => { CA_STATE.tableExpanded = true; render(); });
   const caTableCollapse = document.getElementById('caTableCollapse');
   if(caTableCollapse) caTableCollapse.addEventListener('click', () => { CA_STATE.tableExpanded = false; render(); });
+  const caAiHead = document.getElementById('caAiHead');
+  if(caAiHead) caAiHead.addEventListener('click', () => {
+    setAiInsightsCollapsed(!document.getElementById('caAiCard').classList.contains('collapsed'));
+  });
+  document.querySelectorAll('[data-goto-ca-ai]').forEach(el => el.addEventListener('click', (e) => {
+    e.preventDefault();
+    goToView('contentAnalytics');
+    setAiInsightsCollapsed(false); // jumping here specifically to read it — open it, don't make them click again
+  }));
   caRenderChart(); // draws the multi-platform SVG + binds its own hover listener — no-op if #caChartSvg isn't on screen
 
   // tasks
