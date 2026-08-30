@@ -830,6 +830,21 @@
   .pm-demo-tbl td{ text-align:right; padding:6px 4px; border-bottom:1px solid var(--border-soft); font-family:'IBM Plex Mono',monospace; }
   .pm-demo-tbl tr:last-child td{ border-bottom:none; }
   .pm-demo-tbl td.pm-pay{ color:var(--fx-green); font-weight:600; }
+
+  /* ---- Briefs ---- */
+  .brief-card{ background:var(--surface); border:1px solid var(--border-soft); border-radius:var(--radius); padding:16px 18px; margin-bottom:10px; }
+  .brief-card.inactive{ opacity:.7; }
+  .brief-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  .brief-title-row{ display:flex; align-items:flex-start; gap:8px; }
+  .brief-title-row .swatch{ margin-top:5px; }
+  .brief-name{ font-weight:700; font-size:14.5px; }
+  .brief-dates{ font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:var(--text-faint); margin-top:3px; }
+  .brief-actions{ display:flex; gap:8px; align-items:center; flex-shrink:0; }
+  .brief-summary-row{ display:flex; align-items:center; gap:26px; margin-top:14px; flex-wrap:wrap; }
+  .brief-stat-label{ font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-faint); margin-bottom:3px; }
+  .brief-stat-value{ font-family:'IBM Plex Mono',monospace; font-size:13.5px; font-weight:600; }
+  .brief-editor-form{ background:var(--surface); border:1px dashed var(--border); border-radius:var(--radius); padding:16px 18px; margin-bottom:14px; }
+  .brief-editor-title{ font-weight:700; font-size:13.5px; margin-bottom:12px; }
 </style>
 </head>
 <body>
@@ -1620,13 +1635,16 @@ function brandTotals(brandId){
     const items = getDeliverables().filter(dv => !dv.excluded && dv.rows[0].brand_id === brand.supabaseBrandId);
     const hitItems = items.filter(dv=>dv.status==='hit');
     contentEarned = hitItems.reduce((s,dv)=>s+dv.payAmount,0);
-    // Of contentEarned, however much came from a video whose locked payout model was Continuous
-    // CPM or Milestones — NOT the same thing as receivedCpm below (a manually-logged "CPM bonus"
-    // portion of a payment you've actually received). This one is the automated-tracking side:
-    // what a video's own locked rate computed it as worth, still gated by the same status==='hit'
-    // this whole total already is — see tcAmount()'s comment for why locked_payout_model exists.
+    // Of contentEarned, however much came from a video priced as Continuous CPM or Milestones —
+    // NOT the same thing as receivedCpm below (a manually-logged "CPM bonus" portion of a payment
+    // you've actually received). This one is the automated-tracking side: what a video's own rate
+    // computed it as worth, still gated by the same status==='hit' this whole total already is.
+    // Mirrors tcAmount()'s own priority: a covering Brief wins over the discovery-time
+    // locked_payout_model, which is what actually determined dv.payAmount for this row.
     contentEarnedCpm = hitItems.filter(dv => {
-      const m = dv.rows[0].locked_payout_model;
+      const rep = dv.repRow || dv.rows[0];
+      const brief = briefForVideo(rep);
+      const m = brief ? brief.payout_model : rep.locked_payout_model;
       return m && (m.type==='cpm' || m.type==='milestones');
     }).reduce((s,dv)=>s+dv.payAmount,0);
     pending = items.filter(dv=>dv.status==='tracking').reduce((s,dv)=>s+dv.payAmount,0);
@@ -1641,20 +1659,31 @@ function brandTotals(brandId){
   const totalEarned = contentEarned + receivedCpm;
   return { count, contentEarned, contentEarnedCpm, totalEarned, pending, received, receivedBase, receivedCpm, outstanding: totalEarned - received };
 }
-// A tracked video's payout is whatever was snapshotted onto it when the scouting job first
-// discovered it — not a live join to the brand's current rate. That's deliberate: if a brand's
-// deal changes later (e.g. a warm-up brief ending and a new rate starting), older videos keep
-// the rate that applied when they were found, and only newly-discovered videos pick up the new
-// one. Two different shapes of "what was snapshotted," depending on the brand's payout model at
-// discovery time:
-//   flat (r.pay_amount = that brand's base_pay at the time) — a locked dollar figure, unchanged
-//   by anything that happens to the video afterward. Can also be edited by hand per-video (see
-//   the Edit button in the Tracked Content table) for one-off exceptions.
-//   cpm/milestones (r.locked_payout_model) — the whole model gets locked instead of one number,
-//   because unlike flat there's no single bar to clear — the payout is meant to keep growing
-//   with the video for as long as it's tracked, so this recomputes live off the video's current
-//   view_count on every call instead of freezing the first time it's shown.
+// Looks up whichever payout_briefs row (if any) covers this video's posted_at date — see that
+// table's migration comment for the full mechanism. A brand with zero rows in PAYOUT_BRIEFS_DATA
+// returns null here for every one of its videos, every time — that's what keeps Briefs fully
+// backward-compatible: a brand that's never created one behaves exactly as it always has.
+function briefForVideo(r){
+  if(!PAYOUT_BRIEFS_DATA || !r.posted_at) return null;
+  const postedDate = r.posted_at.slice(0,10);
+  const brandBriefs = PAYOUT_BRIEFS_DATA.filter(b => b.brand_id === r.brand_id);
+  if(brandBriefs.length === 0) return null;
+  return brandBriefs.find(b => postedDate >= b.start_date && (!b.end_date || postedDate <= b.end_date)) || null;
+}
+// A tracked video's payout, in priority order:
+//   1. A payout_briefs row whose date range covers when it was posted — looked up LIVE, every
+//      call, off the video's current view_count. Deliberately retroactive: creating or editing a
+//      brief can change what an already-posted video is worth, which is the whole point (see
+//      payout_briefs' migration comment) — the "locked" flag on a brief is the safety net against
+//      doing that by accident, not this function.
+//   2. If the brand has no briefs at all, the original mechanism, completely unchanged: whatever
+//      was snapshotted onto the video when the scouting job first discovered it — flat
+//      (r.pay_amount, a locked dollar figure) or cpm/milestones (r.locked_payout_model, the whole
+//      model locked instead of one number, recomputed off current view_count but never
+//      reassigned to a different model after discovery).
 function tcAmount(r){
+  const brief = briefForVideo(r);
+  if(brief) return pmModelPayout(brief.payout_model, Number(r.view_count)||0);
   const locked = r.locked_payout_model;
   if(locked && locked.type === 'cpm'){
     return pmCpmPayout(locked.rate, locked.per, locked.minViews||0, locked.capEnabled?locked.cap:null, Number(r.view_count)||0);
@@ -1678,7 +1707,7 @@ function getDeliverables(){
     else standalone.push(r);
   });
   const deliverables = standalone.map(r => ({
-    key: r.id, rows: [r], grouped: false,
+    key: r.id, rows: [r], grouped: false, repRow: r,
     brand: r.brands, brandName: r.brands?.name || 'Unassigned (automated)',
     excluded: !!r.excluded, status: r.status,
     payAmount: tcAmount(r), earnedAt: r.status==='hit' ? r.posted_at : null,
@@ -1688,11 +1717,20 @@ function getDeliverables(){
     const active = rows.filter(r=>!r.excluded);
     const allExcluded = active.length === 0;
     const consider = allExcluded ? rows : active;
-    const hitRow = consider.find(r=>r.status==='hit');
+    // Among rows tied for "hit" (or, failing that, among all rows considered), the representative
+    // one is whichever has the most views — not just the first one found in array order. This
+    // used to be harmless when every model was Flat (pay_amount doesn't depend on view_count), but
+    // it stopped being harmless once CPM/Milestones/Briefs went live: a crossposted deliverable's
+    // TikTok and Instagram rows can carry wildly different view counts, and picking the wrong one
+    // as rep silently priced the whole deliverable off the smaller number. Caught via a real
+    // Amboras video (38k-view Instagram reel crossposted with a 550-view TikTok clip) that a test
+    // Brief priced as $0 instead of ~$90 until this was fixed.
+    const byViews = (a,b) => (Number(b.view_count)||0) - (Number(a.view_count)||0);
+    const hitRow = [...consider].filter(r=>r.status==='hit').sort(byViews)[0];
     const anyTracking = consider.some(r=>r.status==='tracking');
     const anyMissing = consider.some(r=>r.status==='missing');
     const status = hitRow ? 'hit' : anyTracking ? 'tracking' : anyMissing ? 'missing' : 'expired';
-    const rep = hitRow || consider[0];
+    const rep = hitRow || [...consider].sort(byViews)[0];
     // earliest of the group's post times — when this piece of content first went out, before
     // it was crossposted elsewhere (matches clusterForCompare's anchor convention)
     const postedAt = rows.map(r=>r.posted_at).filter(Boolean).sort()[0] || null;
@@ -1703,7 +1741,7 @@ function getDeliverables(){
     // thumbnail for the same piece of content was sitting right there in the same group.
     const thumbnail = rep.thumbnail_url || rows.map(r=>r.thumbnail_url).find(Boolean) || null;
     deliverables.push({
-      key: gid, rows, grouped: true,
+      key: gid, rows, grouped: true, repRow: rep,
       brand: rep.brands, brandName: rep.brands?.name || 'Unassigned (automated)',
       excluded: allExcluded, status,
       payAmount: tcAmount(rep), earnedAt: hitRow ? hitRow.posted_at : null,
@@ -2466,7 +2504,9 @@ function brandComparisonRows(){
     const earned = hitItems.reduce((s,dv)=>s+dv.payAmount,0);
     // Same CPM/Milestones split as the linked-brand path above — see brandTotals()'s comment.
     const earnedCpm = hitItems.filter(dv => {
-      const m = dv.rows[0].locked_payout_model;
+      const rep = dv.repRow || dv.rows[0];
+      const brief = briefForVideo(rep);
+      const m = brief ? brief.payout_model : rep.locked_payout_model;
       return m && (m.type==='cpm' || m.type==='milestones');
     }).reduce((s,dv)=>s+dv.payAmount,0);
     const views30d = sumViews30d(r => r.brands?.name === name);
@@ -2984,7 +3024,7 @@ function setMobileNavOpen(open){
 // below can reuse the exact same view-switch logic instead of duplicating it.
 function goToView(id){
   VIEW = id; ACTIVE_BRAND_FILTER = null;
-  if((VIEW==='trackedContent' || VIEW==='contentAnalytics') && TRACKED_CONTENT_DATA===null && !TRACKED_CONTENT_LOADING){ loadTrackedContent(); return; }
+  if((VIEW==='trackedContent' || VIEW==='contentAnalytics' || VIEW==='briefs') && TRACKED_CONTENT_DATA===null && !TRACKED_CONTENT_LOADING){ loadTrackedContent(); return; }
   if(VIEW==='dashboard'){ renderWithChartEnter(); return; }
   render();
 }
@@ -3001,6 +3041,7 @@ const NAV_ITEMS = [
   {id:'content', label:'Content'},
   {id:'tasks', label:'Tasks'},
   {id:'brands', label:'Brands'},
+  {id:'briefs', label:'Briefs'},
   {id:'payments', label:'Payments'},
   {id:'settings', label:'Settings'},
 ];
@@ -3061,6 +3102,7 @@ function renderView(){
   if(VIEW==='published'){ VIEW='content'; return renderContent(); } // old bookmark/state — Published isn't its own view anymore, just land on Content
   if(VIEW==='tasks') return renderTasks();
   if(VIEW==='brands') return renderBrands();
+  if(VIEW==='briefs') return renderBriefs();
   if(VIEW==='payments') return renderPayments();
   if(VIEW==='settings') return renderSettings();
   return '';
@@ -3115,6 +3157,10 @@ let VIEW_SNAPSHOTS_DATA = null;
 // alone — a fully-blocked Instagram run leaves last_checked_at untouched, identical to the cron
 // simply never firing at all, so there was no way to tell those two apart before this existed.
 let SCOUT_RUNS_DATA = null;
+// Every payout_briefs row across every brand — see that table's migration comment for the full
+// mechanism. null until loaded; tcAmount() falls back to the pre-Briefs behavior for any brand
+// with no rows here, so a null/not-yet-loaded state is safe, not just "missing a nice-to-have."
+let PAYOUT_BRIEFS_DATA = null;
 // Row ids (individual tracked_videos, not deliverables) currently checked for merging into one
 // crossposted deliverable — see the Merge button in renderTrackedContent() and renderMergeReviewModal().
 let MERGE_SELECTED = new Set();
@@ -3156,6 +3202,25 @@ async function loadTrackedContent(){
   renderWithChartEnter();
   loadViewSnapshots(); // fire-and-forget — see its own comment; never blocks the main dashboard
   loadScoutRuns(); // fire-and-forget — see its own comment; never blocks the main dashboard
+  loadPayoutBriefs(); // fire-and-forget — see its own comment; never blocks the main dashboard
+}
+
+// See PAYOUT_BRIEFS_DATA's declaration. Silently gives up on failure (including "table doesn't
+// exist" if the migration hasn't been run yet) — same pattern as loadViewSnapshots()/
+// loadScoutRuns(), and for the same reason: this should never surface an error or hold up
+// anything else, since every brand keeps working exactly as before until it actually has a brief.
+async function loadPayoutBriefs(){
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/payout_briefs?select=*&order=start_date.asc`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+    PAYOUT_BRIEFS_DATA = await res.json();
+    render();
+  }catch(e){
+    console.warn('loadPayoutBriefs failed (brands just keep their pre-Briefs behavior) —', e);
+  }
 }
 
 // See SCOUT_RUNS_DATA's declaration for what this powers. Same silent-give-up-on-failure pattern
@@ -3473,14 +3538,21 @@ function renderTrackedContent(){
       <thead><tr><th></th><th></th><th>Brand</th><th style="min-width:150px;">Platform(s) &amp; views</th><th>Title</th><th>Status</th><th>Payout</th><th>CPM</th><th>Posted</th><th></th></tr></thead>
       <tbody>
         ${deliverables.map(dv => {
-          const rep = dv.rows[0];
+          // dv.rows[0] is NOT reliably the row tcAmount priced this deliverable off of (see
+          // getDeliverables()' byViews comment) — dv.repRow is the one that actually determined
+          // dv.payAmount, so anything about how this deliverable is priced reads from that, not
+          // rows[0]. rows[0] stays fine for things that don't depend on the pricing row (Edit/View
+          // just need any row id/url from the group).
+          const rep = dv.repRow || dv.rows[0];
           const allIds = dv.rows.map(r=>r.id);
           const allSelected = allIds.every(id => MERGE_SELECTED.has(id));
-          // Locked at discovery time (see tcAmount's comment) — a flat-model deliverable shows
-          // its usual locked Payout and nothing in the new CPM column; a cpm/milestones one is
-          // the other way around, since it has no locked dollar figure, only a live-recalculating
+          // Whichever priced this deliverable — a covering Brief takes priority (same order as
+          // tcAmount), falling back to the discovery-time lock. Either way: a flat-model
+          // deliverable shows its usual Payout and nothing in the CPM column; a cpm/milestones one
+          // is the other way around, since it has no fixed dollar figure, only a live-recalculating
           // one keyed off its current view count.
-          const lockedModel = rep.locked_payout_model;
+          const activeBrief = briefForVideo(rep);
+          const lockedModel = activeBrief ? activeBrief.payout_model : rep.locked_payout_model;
           const isDynamic = lockedModel && (lockedModel.type==='cpm' || lockedModel.type==='milestones');
           const cpmRateLabel = lockedModel?.type==='cpm' ? `$${lockedModel.rate}/${pmFmtCompact(lockedModel.per)}` : '';
           return `<tr data-dv-key="${escapeHtml(String(dv.key))}" ${dv.excluded?'style="opacity:.5;"':''}>
@@ -4502,6 +4574,290 @@ function renderBrands(){
   `;
 }
 
+/* ---------------- briefs ---------------- */
+// See PAYOUT_BRIEFS_DATA's declaration and the payout_briefs migration comment for the full
+// mechanism. This tab is the UI for it: create/edit/lock a brand's date-ranged briefs, each
+// with its own payout model (reusing buildPayoutModelEditor exactly as built for brand
+// connections), and see — per brief — how many already-tracked videos fall in its window and
+// what they'd earn under it. Editing is gated behind an explicit unlock per brief (defaults
+// locked on save) since an edit here can retroactively change what an already-posted video is
+// worth; see togglePayoutBriefLock().
+let BRIEFS_FILTER = { brandId: '', status: 'all' };
+let BRIEFS_OPEN_EDITOR = null; // null | {type:'new'} | {type:'edit', briefId}
+let BRIEF_EDITOR_CURRENT_MODEL = null;
+
+// Every brand id this dashboard currently knows about — the Supabase one, since that's what
+// payout_briefs.brand_id references, not DATA.brands' own local id. Includes brands linked
+// locally (DATA.brands with a supabaseBrandId) AND any brand only ever seen via tracked_videos'
+// brand_id (a fallback/unlinked brand, same convention brandComparisonRows() already uses).
+function allTrackedBrandIds(){
+  const map = new Map();
+  DATA.brands.forEach(b => { if(b.supabaseBrandId) map.set(b.supabaseBrandId, {id:b.supabaseBrandId, name:b.name, color:b.color}); });
+  if(TRACKED_CONTENT_DATA){
+    TRACKED_CONTENT_DATA.forEach(r => {
+      if(r.brand_id && !map.has(r.brand_id)) map.set(r.brand_id, {id:r.brand_id, name:r.brands?.name || 'Unknown brand', color:'var(--text-faint)'});
+    });
+  }
+  return [...map.values()].sort((a,b)=>a.name.localeCompare(b.name));
+}
+
+function briefModelSummary(m){
+  if(!m || !m.type) return '—';
+  if(m.type==='flat') return `${money(m.basePay)} flat`;
+  if(m.type==='cpm') return `${money(m.rate)} / ${pmFmtCompact(m.per)} views${m.capEnabled ? ` (capped at ${pmFmtCompact(m.cap)})` : ''}`;
+  if(m.type==='milestones') return `Milestones — ${(m.tiers||[]).length} tier${(m.tiers||[]).length===1?'':'s'}`;
+  return '—';
+}
+
+// UTC-safe "day before" — never mix local-time Date parsing with toISOString() for date-only
+// math (see the Brand Briefs mockup's timezone bug/fix note this same pattern comes from), or
+// this is off by a day for anyone west of UTC.
+function subOneDayUTC(iso){
+  const [y,m,d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m-1, d));
+  dt.setUTCDate(dt.getUTCDate() - 1);
+  return dt.toISOString().slice(0,10);
+}
+
+function renderBriefs(){
+  if(TRACKED_CONTENT_ERROR){
+    return `<div class="page-head"><div><h2>Briefs</h2></div></div><div class="table-wrap"><div class="empty"><b>Couldn't load</b>${escapeHtml(TRACKED_CONTENT_ERROR)}</div></div>`;
+  }
+  if(!TRACKED_CONTENT_DATA){
+    return `<div class="page-head"><div><h2>Briefs</h2></div></div><div class="table-wrap"><div class="empty">Loading…</div></div>`;
+  }
+  const brandOptions = allTrackedBrandIds();
+  const allBriefs = PAYOUT_BRIEFS_DATA || [];
+  const briefs = allBriefs.filter(b => {
+    if(BRIEFS_FILTER.brandId && b.brand_id !== BRIEFS_FILTER.brandId) return false;
+    const active = !b.end_date;
+    if(BRIEFS_FILTER.status==='active' && !active) return false;
+    if(BRIEFS_FILTER.status==='inactive' && active) return false;
+    return true;
+  }).sort((a,b) => b.start_date.localeCompare(a.start_date));
+
+  return `
+    <div class="page-head">
+      <div><h2>Briefs</h2><div class="sub">Each brand's deal periods over time — its own payout model, its own date range. A brief prices any tracked video whose post date falls in its window, past or future.</div></div>
+      <div class="head-actions"><button class="btn btn-primary" id="btnNewBrief" type="button">+ New brief</button></div>
+    </div>
+    <div class="filter-bar">
+      <select id="briefsBrandFilter"><option value="">All brands</option>${brandOptions.map(b=>`<option value="${b.id}" ${BRIEFS_FILTER.brandId===b.id?'selected':''}>${escapeHtml(b.name)}</option>`).join('')}</select>
+      <button type="button" class="range-pill ${BRIEFS_FILTER.status==='all'?'active':''}" data-briefs-status="all">All</button>
+      <button type="button" class="range-pill ${BRIEFS_FILTER.status==='active'?'active':''}" data-briefs-status="active">Active</button>
+      <button type="button" class="range-pill ${BRIEFS_FILTER.status==='inactive'?'active':''}" data-briefs-status="inactive">Inactive</button>
+    </div>
+    ${BRIEFS_OPEN_EDITOR?.type==='new' ? renderBriefEditorForm(null, brandOptions) : ''}
+    ${briefs.length===0
+      ? emptyState('No briefs yet', allBriefs.length===0 ? 'Create one to give a brand a proper date-ranged payout period — it can price videos already tracked, not just future ones.' : 'Nothing matches this filter.')
+      : briefs.map(b => renderBriefCard(b, brandOptions)).join('')}
+  `;
+}
+
+function renderBriefCard(b, brandOptions){
+  if(BRIEFS_OPEN_EDITOR?.type==='edit' && BRIEFS_OPEN_EDITOR.briefId===b.id) return renderBriefEditorForm(b, brandOptions);
+  const brandInfo = brandOptions.find(x=>x.id===b.brand_id) || {name:'Unknown brand', color:'var(--text-faint)'};
+  const active = !b.end_date;
+  // Same convention as elsewhere: stats reflect *deliverables* (getDeliverables()' grouped view),
+  // filtered to this brand and this brief's exact date window, using each deliverable's own
+  // already-computed payAmount (tcAmount on its representative row) rather than recomputing here.
+  const deliverables = getDeliverables().filter(dv => !dv.excluded && dv.rows[0]?.brand_id===b.brand_id && dv.postedAt
+    && dv.postedAt.slice(0,10) >= b.start_date && (!b.end_date || dv.postedAt.slice(0,10) <= b.end_date));
+  const earned = deliverables.filter(dv=>dv.status==='hit').reduce((s,dv)=>s+dv.payAmount, 0);
+
+  return `<div class="brief-card ${active?'':'inactive'}">
+    <div class="brief-head">
+      <div class="brief-title-row">
+        <span class="swatch" style="background:${brandInfo.color}"></span>
+        <div>
+          <div class="brief-name">${escapeHtml(brandInfo.name)} — ${briefModelSummary(b.payout_model)}</div>
+          <div class="brief-dates">${fmtDate(b.start_date)} &rarr; ${b.end_date ? fmtDate(b.end_date) : 'ongoing'}</div>
+        </div>
+      </div>
+      <div class="brief-actions">
+        <span class="tag ${active?'tag-good':'tag-neutral'}">${active?'Active':'Inactive'}</span>
+        <button type="button" class="btn btn-ghost btn-sm" data-toggle-brief-lock="${b.id}">${b.locked ? 'Unlock to edit' : 'Lock'}</button>
+      </div>
+    </div>
+    <div class="brief-summary-row">
+      <div><div class="brief-stat-label">Videos in this window</div><div class="brief-stat-value">${deliverables.length}</div></div>
+      <div><div class="brief-stat-label">Earned under this brief</div><div class="brief-stat-value" style="color:var(--fx-green);">${money(earned)}</div></div>
+      ${!b.locked ? `<div style="margin-left:auto; display:flex; align-items:center; gap:8px;">
+        <button type="button" class="btn btn-ghost btn-sm" data-edit-brief="${b.id}">Edit</button>
+        ${active ? `<button type="button" class="btn btn-ghost btn-sm" data-end-brief-now="${b.id}" title="Sets the end date to today and leaves it unlocked">End now</button>` : ''}
+        <button type="button" class="btn btn-ghost btn-sm" style="color:var(--danger);" data-delete-brief="${b.id}">Delete</button>
+      </div>` : ''}
+    </div>
+  </div>`;
+}
+
+function renderBriefEditorForm(brief, brandOptions){
+  const isNew = !brief;
+  return `<div class="brief-editor-form">
+    <div class="brief-editor-title">${isNew ? '+ New brief' : 'Editing brief'}</div>
+    <div class="field-row">
+      <div class="field"><label>Brand</label>
+        <select id="briefFormBrand" ${isNew?'':'disabled'}>
+          ${brandOptions.map(b=>`<option value="${b.id}" ${(isNew ? BRIEFS_FILTER.brandId : brief.brand_id)===b.id?'selected':''}>${escapeHtml(b.name)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Starts</label><input type="date" id="briefFormStart" value="${isNew ? todayISO() : brief.start_date}"></div>
+    </div>
+    <div id="briefEditorMount"></div>
+    <div class="hint" style="margin-top:2px;">${isNew
+      ? 'Creating this closes out the brand\'s current active brief the day before this one starts — automatic, nothing to do by hand. Saves locked; unlock to change it later.'
+      : 'Saving locks this brief again automatically.'}</div>
+    <div style="display:flex; gap:8px; margin-top:12px;">
+      <button type="button" class="btn btn-primary btn-sm" id="briefFormSave">${isNew ? 'Create & activate' : 'Save & lock'}</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="briefFormCancel">Cancel</button>
+    </div>
+  </div>`;
+}
+
+// Mounts buildPayoutModelEditor into #briefEditorMount, same call/tracking pattern as
+// mountPayoutModelEditor() — called from bindGlobalHandlers() after every render(). A no-op
+// unless the new-brief or edit-brief form is actually showing.
+function mountBriefEditor(){
+  const mount = document.getElementById('briefEditorMount');
+  if(!mount) { BRIEF_EDITOR_CURRENT_MODEL = null; return; }
+  let existingModel = null;
+  if(BRIEFS_OPEN_EDITOR?.type==='edit'){
+    const brief = (PAYOUT_BRIEFS_DATA||[]).find(b=>b.id===BRIEFS_OPEN_EDITOR.briefId);
+    existingModel = brief?.payout_model || null;
+  }
+  const conn = { base_pay:0, view_requirement:0, payout_model: existingModel };
+  BRIEF_EDITOR_CURRENT_MODEL = pmDefaultModel(conn);
+  mount.innerHTML = '';
+  mount.appendChild(buildPayoutModelEditor(conn, (m) => { BRIEF_EDITOR_CURRENT_MODEL = m; }, {
+    cpmNote: 'This is live — as soon as this brief saves, any tracked video (past or future) whose post date falls in its window is priced by this. Saving locks it again; unlock to change it.',
+    milestoneNote: 'This is live — as soon as this brief saves, any tracked video (past or future) whose post date falls in its window is priced by this. Saving locks it again; unlock to change it.',
+  }));
+}
+
+async function createPayoutBrief(){
+  const brandId = document.getElementById('briefFormBrand')?.value;
+  const startDate = document.getElementById('briefFormStart')?.value;
+  const model = BRIEF_EDITOR_CURRENT_MODEL || { type:'flat', basePay:0, viewRequirement:0 };
+  if(!brandId || !startDate) return;
+  const btn = document.getElementById('briefFormSave');
+  if(btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
+  try{
+    // Auto-close whichever brief is currently active for this brand, the day before this one
+    // starts — keeps "one active brief per brand" true without making the user do it by hand.
+    const currentActive = (PAYOUT_BRIEFS_DATA||[]).find(b => b.brand_id===brandId && !b.end_date);
+    if(currentActive){
+      const endDate = subOneDayUTC(startDate);
+      const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/payout_briefs?id=eq.${currentActive.id}`, {
+        method:'PATCH',
+        headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, 'Content-Type':'application/json', Prefer:'return=minimal' },
+        body: JSON.stringify({ end_date: endDate }),
+      });
+      if(patchRes.ok) currentActive.end_date = endDate;
+    }
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/payout_briefs`, {
+      method:'POST',
+      headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, 'Content-Type':'application/json', Prefer:'return=representation' },
+      body: JSON.stringify({ brand_id:brandId, start_date:startDate, end_date:null, payout_model:model, locked:true }),
+    });
+    if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+    const [row] = await res.json();
+    if(!PAYOUT_BRIEFS_DATA) PAYOUT_BRIEFS_DATA = [];
+    PAYOUT_BRIEFS_DATA.push(row);
+    BRIEFS_OPEN_EDITOR = null;
+    showToast('Brief created and locked');
+    render();
+  }catch(e){
+    alert('Could not create brief — ' + (e.message || e));
+    if(btn){ btn.disabled = false; btn.textContent = 'Create & activate'; }
+  }
+}
+
+async function updatePayoutBrief(briefId){
+  const startDate = document.getElementById('briefFormStart')?.value;
+  const model = BRIEF_EDITOR_CURRENT_MODEL;
+  if(!startDate || !model) return;
+  const btn = document.getElementById('briefFormSave');
+  if(btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
+  try{
+    const body = { start_date: startDate, payout_model: model, locked: true };
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/payout_briefs?id=eq.${briefId}`, {
+      method:'PATCH',
+      headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, 'Content-Type':'application/json', Prefer:'return=minimal' },
+      body: JSON.stringify(body),
+    });
+    if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+    const idx = (PAYOUT_BRIEFS_DATA||[]).findIndex(b=>b.id===briefId);
+    if(idx>=0) Object.assign(PAYOUT_BRIEFS_DATA[idx], body);
+    BRIEFS_OPEN_EDITOR = null;
+    showToast('Brief saved and locked');
+    render();
+  }catch(e){
+    alert('Could not save brief — ' + (e.message || e));
+    if(btn){ btn.disabled = false; btn.textContent = 'Save & lock'; }
+  }
+}
+
+// Flips a brief's safety lock. Locking (the common direction — after a create/save, or by hand)
+// also closes any editor left open for it, since an editor on a now-locked brief has nothing to
+// submit to. Unlocking is what reveals the Edit/End now/Delete actions on the card.
+async function togglePayoutBriefLock(briefId){
+  const b = (PAYOUT_BRIEFS_DATA||[]).find(x=>x.id===briefId);
+  if(!b) return;
+  const newLocked = !b.locked;
+  const prevLocked = b.locked;
+  b.locked = newLocked; // optimistic
+  if(newLocked && BRIEFS_OPEN_EDITOR?.type==='edit' && BRIEFS_OPEN_EDITOR.briefId===briefId) BRIEFS_OPEN_EDITOR = null;
+  render();
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/payout_briefs?id=eq.${briefId}`, {
+      method:'PATCH',
+      headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, 'Content-Type':'application/json', Prefer:'return=minimal' },
+      body: JSON.stringify({ locked: newLocked }),
+    });
+    if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+  }catch(e){
+    b.locked = prevLocked; // revert on failure
+    alert('Could not update the lock — ' + (e.message || e));
+    render();
+  }
+}
+
+// Manual "stop this brief now" for an unlocked, active brief — sets end_date to today without
+// requiring a replacement brief. Stays unlocked afterward so the same edit session can keep going.
+async function endPayoutBriefNow(briefId){
+  const b = (PAYOUT_BRIEFS_DATA||[]).find(x=>x.id===briefId);
+  if(!b) return;
+  const endDate = todayISO();
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/payout_briefs?id=eq.${briefId}`, {
+      method:'PATCH',
+      headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, 'Content-Type':'application/json', Prefer:'return=minimal' },
+      body: JSON.stringify({ end_date: endDate }),
+    });
+    if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+    b.end_date = endDate;
+    render();
+  }catch(e){
+    alert('Could not end the brief — ' + (e.message || e));
+  }
+}
+
+async function deletePayoutBrief(briefId){
+  if(!confirm('Delete this brief? Videos in its window fall back to whichever other brief covers them, or the brand\'s original rate if none do.')) return;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/payout_briefs?id=eq.${briefId}`, {
+      method:'DELETE',
+      headers:{ apikey:SUPABASE_KEY, Authorization:`Bearer ${SUPABASE_KEY}`, Prefer:'return=minimal' },
+    });
+    if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+    PAYOUT_BRIEFS_DATA = (PAYOUT_BRIEFS_DATA||[]).filter(b=>b.id!==briefId);
+    BRIEFS_OPEN_EDITOR = null;
+    render();
+  }catch(e){
+    alert('Could not delete brief — ' + (e.message || e));
+  }
+}
+
 /* ---------------- payments ---------------- */
 function renderPayments(){
   const filtered = PAYMENTS_FILTER.brandId ? DATA.payments.filter(p=>p.brandId===PAYMENTS_FILTER.brandId) : DATA.payments;
@@ -5389,6 +5745,16 @@ function pmMilestonePayout(tiers, afterTop, tailRate, tailPer, views){
   }
   return payout;
 }
+// Dispatches to whichever of the three shapes a payout model is — used by briefForVideo's caller
+// (tcAmount) since, unlike locked_payout_model (only ever cpm/milestones — flat used pay_amount
+// instead), a Brief's payout_model can genuinely be any of the three.
+function pmModelPayout(model, views){
+  if(!model) return 0;
+  if(model.type === 'cpm') return pmCpmPayout(model.rate, model.per, model.minViews||0, model.capEnabled?model.cap:null, views);
+  if(model.type === 'milestones') return pmMilestonePayout(model.tiers, model.afterTop, model.tailRate, model.tailPer, views);
+  if(model.type === 'flat') return Number(model.basePay)||0;
+  return 0;
+}
 // Samples a payout function densely across a views domain and draws it as a polyline — a CPM
 // function samples into a straight (now floored-to-steps) line, a milestone function samples
 // into a staircase, as long as the exact boundary x-values are passed in extraX so the jumps
@@ -5454,7 +5820,13 @@ const PM_MILESTONE_DEMO_VIEWS = [50000, 100000, 150000, 300000, 499000, 500000, 
 // a brand's payout_model was set to cpm/milestones, reopening this editor had no way left to
 // recover the real flat rate — the Flat tab would show $0/blank even though the brand's actual
 // live base_pay was untouched, and hitting Save from there would have wiped it for real.
-function buildPayoutModelEditor(conn, onChange){
+function buildPayoutModelEditor(conn, onChange, opts){
+  // Default note is right for the brand-connections context this was built for (see
+  // mountPayoutModelEditor) — configuring it there only seeds what a brand's *next* discovered
+  // video gets locked to, nothing already tracked. Briefs are different (a brief prices already-
+  // posted videos live, on purpose), so mountBriefEditor() passes opts.note to say so instead.
+  const cpmNote = (opts && opts.cpmNote) || 'Preview only — the automated scout still pays this brand\'s Flat rate until CPM is wired into the scouting jobs. Nothing about real payouts changes by configuring this.';
+  const milestoneNote = (opts && opts.milestoneNote) || 'Preview only — the automated scout still pays this brand\'s Flat rate until milestones are wired into the scouting jobs. Nothing about real payouts changes by configuring this.';
   const configured = (conn && conn.payout_model && conn.payout_model.type) ? conn.payout_model : null;
   const cache = {
     flat: { type:'flat', basePay: Number(conn?.base_pay)||0, viewRequirement: Number(conn?.view_requirement)||0 },
@@ -5501,7 +5873,7 @@ function buildPayoutModelEditor(conn, onChange){
 
   function renderCpmPanel(panel){
     panel.innerHTML = `
-      <div class="pm-note">Preview only — the automated scout still pays this brand's Flat rate until CPM is wired into the scouting jobs. Nothing about real payouts changes by configuring this.</div>
+      <div class="pm-note">${cpmNote}</div>
       <div class="field-row">
         <div class="field"><label>Rate ($)</label><input type="number" class="pm-rate" value="${model.rate}" min="0" step="0.5"></div>
         <div class="field"><label>Per (views)</label><input type="number" class="pm-per" value="${model.per}" min="1" step="100"></div>
@@ -5550,7 +5922,7 @@ function buildPayoutModelEditor(conn, onChange){
 
   function renderMilestonePanel(panel){
     panel.innerHTML = `
-      <div class="pm-note">Preview only — the automated scout still pays this brand's Flat rate until milestones are wired into the scouting jobs. Nothing about real payouts changes by configuring this.</div>
+      <div class="pm-note">${milestoneNote}</div>
       <div class="pm-tier-editor"></div>
       <button type="button" class="pm-add-tier">+ Add tier</button>
       <div class="pm-toggle">
@@ -6379,6 +6751,27 @@ function bindGlobalHandlers(){
   });
 
   mountPayoutModelEditor(); // no-op unless #pmEditorMount is on screen (the connected-brand rate editor)
+
+  // ---- Briefs tab ----
+  document.querySelectorAll('[data-briefs-status]').forEach(el => el.addEventListener('click', () => {
+    BRIEFS_FILTER.status = el.dataset.briefsStatus; render();
+  }));
+  const briefsBrandFilter = document.getElementById('briefsBrandFilter');
+  if(briefsBrandFilter) briefsBrandFilter.addEventListener('change', () => { BRIEFS_FILTER.brandId = briefsBrandFilter.value; render(); });
+  const btnNewBrief = document.getElementById('btnNewBrief');
+  if(btnNewBrief) btnNewBrief.addEventListener('click', () => { BRIEFS_OPEN_EDITOR = {type:'new'}; render(); });
+  document.querySelectorAll('[data-toggle-brief-lock]').forEach(el => el.addEventListener('click', () => togglePayoutBriefLock(el.dataset.toggleBriefLock)));
+  document.querySelectorAll('[data-edit-brief]').forEach(el => el.addEventListener('click', () => { BRIEFS_OPEN_EDITOR = {type:'edit', briefId: el.dataset.editBrief}; render(); }));
+  document.querySelectorAll('[data-end-brief-now]').forEach(el => el.addEventListener('click', () => endPayoutBriefNow(el.dataset.endBriefNow)));
+  document.querySelectorAll('[data-delete-brief]').forEach(el => el.addEventListener('click', () => deletePayoutBrief(el.dataset.deleteBrief)));
+  const briefFormSave = document.getElementById('briefFormSave');
+  if(briefFormSave) briefFormSave.addEventListener('click', () => {
+    if(BRIEFS_OPEN_EDITOR?.type==='new') createPayoutBrief();
+    else if(BRIEFS_OPEN_EDITOR?.type==='edit') updatePayoutBrief(BRIEFS_OPEN_EDITOR.briefId);
+  });
+  const briefFormCancel = document.getElementById('briefFormCancel');
+  if(briefFormCancel) briefFormCancel.addEventListener('click', () => { BRIEFS_OPEN_EDITOR = null; render(); });
+  mountBriefEditor(); // no-op unless #briefEditorMount is on screen (the new/edit brief form)
 
   const saveTrackingRate = document.getElementById('saveTrackingRate');
   if(saveTrackingRate) saveTrackingRate.addEventListener('click', async () => {
