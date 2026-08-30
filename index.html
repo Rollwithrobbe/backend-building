@@ -1638,18 +1638,20 @@ function brandTotals(brandId){
     const items = getDeliverables().filter(dv => !dv.excluded && dv.rows[0].brand_id === brand.supabaseBrandId);
     const hitItems = items.filter(dv=>dv.status==='hit');
     contentEarned = hitItems.reduce((s,dv)=>s+dv.payAmount,0);
-    // Of contentEarned, however much came from a video priced as Continuous CPM or Milestones —
-    // NOT the same thing as receivedCpm below (a manually-logged "CPM bonus" portion of a payment
-    // you've actually received). This one is the automated-tracking side: what a video's own rate
-    // computed it as worth, still gated by the same status==='hit' this whole total already is.
-    // Mirrors tcAmount()'s own priority: a covering Brief wins over the discovery-time
-    // locked_payout_model, which is what actually determined dv.payAmount for this row.
-    contentEarnedCpm = hitItems.filter(dv => {
+    // Of contentEarned, however much came specifically from the CPM/milestone *performance*
+    // portion of a video — NOT the same thing as receivedCpm below (a manually-logged "CPM
+    // bonus" portion of a payment you've actually received), and NOT the same as dv.payAmount for
+    // a hybrid model (which also includes its guaranteed base pay — see pmModelPayoutSplit). Using
+    // the full payAmount here used to overcount this badly: once one brief covered nearly every
+    // video, this read as almost the brand's entire Earned being "CPM," when most of it was really
+    // the ordinary base pay sitting right next to a much smaller real CPM number.
+    contentEarnedCpm = hitItems.reduce((s,dv) => {
       const rep = dv.repRow || dv.rows[0];
       const brief = briefForVideo(rep);
       const m = brief ? brief.payout_model : rep.locked_payout_model;
-      return m && (m.type==='cpm' || m.type==='milestones');
-    }).reduce((s,dv)=>s+dv.payAmount,0);
+      if(!m || (m.type!=='cpm' && m.type!=='milestones')) return s;
+      return s + pmModelPayoutSplit(m, Number(rep.view_count)||0).performance;
+    }, 0);
     pending = items.filter(dv=>dv.status==='tracking').reduce((s,dv)=>s+dv.payAmount,0);
     count = items.length;
   }
@@ -2505,13 +2507,15 @@ function brandComparisonRows(){
     const hitItems = items.filter(dv=>dv.status==='hit');
     const hitCount = hitItems.length;
     const earned = hitItems.reduce((s,dv)=>s+dv.payAmount,0);
-    // Same CPM/Milestones split as the linked-brand path above — see brandTotals()'s comment.
-    const earnedCpm = hitItems.filter(dv => {
+    // Same CPM/Milestones performance-only split as the linked-brand path above — see
+    // brandTotals()'s comment.
+    const earnedCpm = hitItems.reduce((s,dv) => {
       const rep = dv.repRow || dv.rows[0];
       const brief = briefForVideo(rep);
       const m = brief ? brief.payout_model : rep.locked_payout_model;
-      return m && (m.type==='cpm' || m.type==='milestones');
-    }).reduce((s,dv)=>s+dv.payAmount,0);
+      if(!m || (m.type!=='cpm' && m.type!=='milestones')) return s;
+      return s + pmModelPayoutSplit(m, Number(rep.view_count)||0).performance;
+    }, 0);
     const views30d = sumViews30d(r => r.brands?.name === name);
     const viewsAllTime = sumViewsAllTime(r => r.brands?.name === name);
     rows.push({
@@ -3570,7 +3574,7 @@ function renderTrackedContent(){
             <td class="mono">${isDynamic
               ? (split.base > 0 ? money(split.base) : '<span style="color:var(--text-faint)">—</span>')
               : (dv.status==='hit' && !dv.excluded ? money(dv.payAmount) : `<span style="color:var(--text-faint)">${money(dv.payAmount)}${dv.excluded?'':' pending'}</span>`)}</td>
-            <td class="mono">${isDynamic ? `<span style="color:var(--low);">${money(split.performance)}</span>${cpmRateLabel?`<div style="font-size:10px; color:var(--text-faint); margin-top:1px;">${cpmRateLabel}</div>`:''}` : '<span style="color:var(--text-faint)">—</span>'}</td>
+            <td class="mono">${isDynamic ? `<span style="color:${split.performance>0?'var(--low)':'var(--text-faint)'};">${money(split.performance)}</span>${cpmRateLabel?`<div style="font-size:10px; color:var(--text-faint); margin-top:1px;">${cpmRateLabel}</div>`:''}` : '<span style="color:var(--text-faint)">—</span>'}</td>
             <td class="mono">${dv.postedAt ? fmtDate(dv.postedAt.slice(0,10)) : '—'}</td>
             <td style="white-space:nowrap;">
               ${!dv.grouped && rep.url ? `<a href="${rep.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">View</a>` : ''}
