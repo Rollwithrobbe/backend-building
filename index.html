@@ -1104,9 +1104,19 @@ async function loadData(){
   if(!DATA.payments) DATA.payments = [];
   if(!DATA.tasks) DATA.tasks = [];
   if(CLOUD_MODE){
-    // once migrated, Supabase is the source of truth — overwrite whatever the local cache had
-    // with the live cloud copy, so the dashboard shows the same data on every device
-    try{ await loadFromSupabase(); }
+    // Push this device's local copy up FIRST, then pull the merged cloud state back down — never
+    // pull-without-push-first. Once migrated, Supabase is treated as the source of truth on load
+    // (overwriting whatever the local cache had), which is exactly what silently discarded a real
+    // payment logged on a phone that got backgrounded/closed right after: the upload from
+    // saveData() is fire-and-forget, so an edit can finish saving locally before it's finished
+    // reaching Supabase — and the very next load would then overwrite that local copy with an
+    // older cloud snapshot that never received it. Pushing first (upsert-only, same safe
+    // never-prune pattern as migrateToCloud() below) means whatever this device already has
+    // survives the round trip even if an earlier upload never completed.
+    try{
+      await pushLocalToCloud();
+      await loadFromSupabase();
+    }
     catch(e){ console.warn('Cloud load failed, showing the last local cache instead:', e); }
   }
   // migrate any content saved by an earlier build that dropped inactive platform slots
@@ -1186,11 +1196,18 @@ async function attemptSave(retryCount){
   try{
     const result = await storageSet(STORAGE_KEY, JSON.stringify(DATA), false);
     if(!result) throw new Error('Storage set returned no result');
+    // Awaited, not fire-and-forget — a save used to count as done the instant the LOCAL write
+    // landed, with the cloud upload kicked off in the background and never checked on. If the tab
+    // closed or backgrounded before that upload finished (extremely easy to do on mobile: log a
+    // payment, switch apps), the edit stayed local-only forever — the next load treats Supabase as
+    // the source of truth and silently overwrites the local copy that actually had it. Now a save
+    // isn't "Saved" until the cloud copy has it too, and a failed upload gets the exact same
+    // automatic retry-with-backoff treatment a failed local write already got below.
+    if(CLOUD_MODE) await syncToSupabase();
     SAVE_STATE = 'idle';
     updateStoragePill();
     showToast('Saved');
     writeBackupFile(); // mirror to the local backup file too, if one's connected — fire-and-forget
-    if(CLOUD_MODE) syncToSupabase(); // mirror brands/content/tasks/payments to Supabase too — fire-and-forget
   }catch(e){
     // expected + handled — retried automatically, so this isn't a real error, just noisy if logged as one
     console.warn('Save attempt failed, retrying:', e);
@@ -1273,15 +1290,21 @@ async function pruneDeletedRows(table, currentIds){
     headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'return=minimal' },
   });
 }
+// Push-only, never-prune upsert of local DATA to Supabase — the safe half of "push-then-pull,
+// never push-with-prune" (see migrateToCloud()'s comment for the full reasoning). Used both by
+// migrateToCloud() itself and by loadData() on every load, before it trusts the cloud copy.
+async function pushLocalToCloud(){
+  await upsertRows('brands', DATA.brands.map(brandToSupabaseRow), 'id');
+  await upsertRows('manual_content', DATA.content.map(contentToSupabaseRow), 'id');
+  await upsertRows('manual_tasks', DATA.tasks.map(taskToSupabaseRow), 'id');
+  await upsertRows('manual_payments', DATA.payments.map(paymentToSupabaseRow), 'id');
+}
 let SYNC_IN_FLIGHT = false;
 async function syncToSupabase(){
   if(SYNC_IN_FLIGHT) return; // a save that lands mid-sync gets its own call right after this one finishes, via the normal debounce
   SYNC_IN_FLIGHT = true;
   try{
-    await upsertRows('brands', DATA.brands.map(brandToSupabaseRow), 'id');
-    await upsertRows('manual_content', DATA.content.map(contentToSupabaseRow), 'id');
-    await upsertRows('manual_tasks', DATA.tasks.map(taskToSupabaseRow), 'id');
-    await upsertRows('manual_payments', DATA.payments.map(paymentToSupabaseRow), 'id');
+    await pushLocalToCloud();
     await pruneDeletedRows('manual_content', new Set(DATA.content.map(c=>c.id)));
     await pruneDeletedRows('manual_tasks', new Set(DATA.tasks.map(t=>t.id)));
     await pruneDeletedRows('manual_payments', new Set(DATA.payments.map(p=>p.id)));
@@ -1289,9 +1312,14 @@ async function syncToSupabase(){
     // have real automated-tracking history (tracked_videos) tied to it in Supabase; deleting the
     // row would orphan or destroy that. Removing a brand locally just leaves its backend row behind, harmlessly.
   }catch(e){
-    console.warn('Cloud sync failed (will retry on next save):', e);
+    console.warn('Cloud sync failed:', e);
+    // Rethrown on purpose — attemptSave() now awaits this call and needs to see the failure to
+    // retry it, same as a failed local write. Silently swallowing it here (the old behavior) is
+    // exactly what let a save claim "Saved" while the cloud copy quietly never got it.
+    throw e;
+  }finally{
+    SYNC_IN_FLIGHT = false;
   }
-  SYNC_IN_FLIGHT = false;
 }
 async function loadFromSupabase(){
   const [brandsRes, contentRes, tasksRes, paymentsRes] = await Promise.all([
@@ -1323,7 +1351,7 @@ async function loadFromSupabase(){
 // remapped along the way — Supabase's brands.id column needs a real UUID. Nothing about this
 // runs automatically; it only fires when the button below is clicked.
 //
-// Deliberately upserts directly instead of calling the normal syncToSupabase() — that function
+// Deliberately calls pushLocalToCloud() instead of the normal syncToSupabase() — that function
 // also prunes (deletes) any cloud content/task/payment row whose id isn't in the local set,
 // which is exactly right once a device is already fully cloud-synced, but wrong here: this is
 // very often run on a *second* device (or a browser that lost its local storage) whose local
@@ -1351,10 +1379,7 @@ async function migrateToCloud(){
       DATA.payments.forEach(p => { if(p.brandId && idMap[p.brandId]) p.brandId = idMap[p.brandId]; });
     }
     DATA.brands.forEach(b => { b.supabaseBrandId = b.id; });
-    await upsertRows('brands', DATA.brands.map(brandToSupabaseRow), 'id');
-    await upsertRows('manual_content', DATA.content.map(contentToSupabaseRow), 'id');
-    await upsertRows('manual_tasks', DATA.tasks.map(taskToSupabaseRow), 'id');
-    await upsertRows('manual_payments', DATA.payments.map(paymentToSupabaseRow), 'id');
+    await pushLocalToCloud();
     CLOUD_MODE = true;
     localStorage.setItem(CLOUD_MODE_KEY, '1');
     await loadFromSupabase(); // pull the merged truth back down so cloud-only rows (e.g. brands added from another device) show up here too, not just what this device happened to push
