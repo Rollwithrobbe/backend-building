@@ -3538,7 +3538,7 @@ function renderTrackedContent(){
     </div>
     ${deliverables.length===0 ? emptyState(allDeliverables.length===0 ? 'Nothing tracked yet' : 'No matches', allDeliverables.length===0 ? 'Connect a brand\'s channel and wait for the next scouting run.' : 'Try clearing a filter.') : `
     <div class="table-wrap" style="overflow-x:auto;"><table>
-      <thead><tr><th></th><th></th><th>Brand</th><th style="min-width:150px;">Platform(s) &amp; views</th><th>Title</th><th>Status</th><th>Payout</th><th>CPM</th><th>Posted</th><th></th></tr></thead>
+      <thead><tr><th></th><th></th><th>Brand</th><th style="min-width:150px;">Platform(s) &amp; views</th><th>Title</th><th>Status</th><th>Base pay</th><th>CPM</th><th>Posted</th><th></th></tr></thead>
       <tbody>
         ${deliverables.map(dv => {
           // dv.rows[0] is NOT reliably the row tcAmount priced this deliverable off of (see
@@ -3550,13 +3550,15 @@ function renderTrackedContent(){
           const allIds = dv.rows.map(r=>r.id);
           const allSelected = allIds.every(id => MERGE_SELECTED.has(id));
           // Whichever priced this deliverable — a covering Brief takes priority (same order as
-          // tcAmount), falling back to the discovery-time lock. Either way: a flat-model
-          // deliverable shows its usual Payout and nothing in the CPM column; a cpm/milestones one
-          // is the other way around, since it has no fixed dollar figure, only a live-recalculating
-          // one keyed off its current view count.
+          // tcAmount), falling back to the discovery-time lock. Split into its base and
+          // performance pieces (see pmModelPayoutSplit) so a hybrid model — base pay AND CPM on
+          // the same video — shows correctly across both columns instead of the whole total
+          // landing in one, which read as if CPM had replaced the base pay rather than sitting on
+          // top of it (a real video: $20 base + $30 CPM was showing as "$50 CPM").
           const activeBrief = briefForVideo(rep);
           const lockedModel = activeBrief ? activeBrief.payout_model : rep.locked_payout_model;
           const isDynamic = lockedModel && (lockedModel.type==='cpm' || lockedModel.type==='milestones');
+          const split = isDynamic ? pmModelPayoutSplit(lockedModel, Number(rep.view_count)||0) : null;
           const cpmRateLabel = lockedModel?.type==='cpm' ? `$${lockedModel.rate}/${pmFmtCompact(lockedModel.per)}` : '';
           return `<tr data-dv-key="${escapeHtml(String(dv.key))}" ${dv.excluded?'style="opacity:.5;"':''}>
             <td><input type="checkbox" class="checkbox" data-merge-check-ids="${allIds.join(',')}" ${allSelected?'checked':''} title="${dv.grouped ? 'Select this already-merged deliverable to add another platform to it' : 'Select to merge with another platform'}" /></td>
@@ -3565,8 +3567,10 @@ function renderTrackedContent(){
             <td>${dv.rows.map(platformPill).join('')}</td>
             <td style="max-width:260px;">${renderTitleCell(dv)}</td>
             <td>${dv.excluded ? '<span class="tag tag-neutral">Excluded</span>' : dv.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : dv.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : dv.status==='missing' ? '<span class="tag tag-danger" title="No longer showing up on the platform — deleted, archived, or made private before it hit its requirement">Missing</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
-            <td class="mono">${isDynamic ? '<span style="color:var(--text-faint)">—</span>' : (dv.status==='hit' && !dv.excluded ? money(dv.payAmount) : `<span style="color:var(--text-faint)">${money(dv.payAmount)}${dv.excluded?'':' pending'}</span>`)}</td>
-            <td class="mono">${isDynamic ? `<span style="color:var(--low);">${money(dv.payAmount)}</span>${cpmRateLabel?`<div style="font-size:10px; color:var(--text-faint); margin-top:1px;">${cpmRateLabel}</div>`:''}` : '<span style="color:var(--text-faint)">—</span>'}</td>
+            <td class="mono">${isDynamic
+              ? (split.base > 0 ? money(split.base) : '<span style="color:var(--text-faint)">—</span>')
+              : (dv.status==='hit' && !dv.excluded ? money(dv.payAmount) : `<span style="color:var(--text-faint)">${money(dv.payAmount)}${dv.excluded?'':' pending'}</span>`)}</td>
+            <td class="mono">${isDynamic ? `<span style="color:var(--low);">${money(split.performance)}</span>${cpmRateLabel?`<div style="font-size:10px; color:var(--text-faint); margin-top:1px;">${cpmRateLabel}</div>`:''}` : '<span style="color:var(--text-faint)">—</span>'}</td>
             <td class="mono">${dv.postedAt ? fmtDate(dv.postedAt.slice(0,10)) : '—'}</td>
             <td style="white-space:nowrap;">
               ${!dv.grouped && rep.url ? `<a href="${rep.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">View</a>` : ''}
@@ -5754,26 +5758,37 @@ function pmMilestonePayout(tiers, afterTop, tailRate, tailPer, views){
   }
   return payout;
 }
-// Dispatches to whichever of the three shapes a payout model is — used by briefForVideo's caller
-// (tcAmount) since, unlike locked_payout_model (only ever cpm/milestones — flat used pay_amount
-// instead), a Brief's payout_model can genuinely be any of the three.
-function pmModelPayout(model, views){
-  if(!model) return 0;
-  // Continuous CPM and Milestones can optionally carry their own guaranteed base pay on top —
-  // "twenty dollars a video no matter what, plus CPM on views" is a real, common deal shape, not
-  // just pure-performance pay. Unlike the CPM/milestone portion (gated by minViews / tier
-  // thresholds), the base — when turned on — always applies, since it's paid for delivering the
-  // video at all, not for how it performs.
+// Splits what a model pays at a given view count into its two conceptually different pieces —
+// base (guaranteed, paid for delivering the video at all — Flat's whole rate counts as base) and
+// performance (the CPM/milestone portion, gated by minViews/tier thresholds, zero for Flat and
+// for a cpm/milestones model with its optional base toggle off). Tracked Content's table reads
+// this directly so it can show each piece in its own column (Base pay vs CPM) instead of lumping
+// a hybrid model's total into one — see the bug this fixed: a $20 base + $30 CPM video was
+// showing as "$50 CPM" with no base pay visible, which read as if CPM had replaced the base
+// entirely rather than sitting on top of it.
+function pmModelPayoutSplit(model, views){
+  if(!model) return { base:0, performance:0 };
+  if(model.type === 'flat') return { base: Number(model.basePay)||0, performance:0 };
   if(model.type === 'cpm'){
     const base = model.basePayEnabled ? (Number(model.basePay)||0) : 0;
-    return base + pmCpmPayout(model.rate, model.per, model.minViews||0, model.capEnabled?model.cap:null, views);
+    const performance = pmCpmPayout(model.rate, model.per, model.minViews||0, model.capEnabled?model.cap:null, views);
+    return { base, performance };
   }
   if(model.type === 'milestones'){
     const base = model.basePayEnabled ? (Number(model.basePay)||0) : 0;
-    return base + pmMilestonePayout(model.tiers, model.afterTop, model.tailRate, model.tailPer, views);
+    const performance = pmMilestonePayout(model.tiers, model.afterTop, model.tailRate, model.tailPer, views);
+    return { base, performance };
   }
-  if(model.type === 'flat') return Number(model.basePay)||0;
-  return 0;
+  return { base:0, performance:0 };
+}
+// Dispatches to whichever of the three shapes a payout model is — used by briefForVideo's caller
+// (tcAmount) since, unlike locked_payout_model (only ever cpm/milestones — flat used pay_amount
+// instead), a Brief's payout_model can genuinely be any of the three. Just the sum of
+// pmModelPayoutSplit's two pieces — that's the single source of truth for the math, this is only
+// here because most callers (brand totals, brief stats, the chart) just want the one number.
+function pmModelPayout(model, views){
+  const { base, performance } = pmModelPayoutSplit(model, views);
+  return base + performance;
 }
 // Samples a payout function densely across a views domain and draws it as a polyline — a CPM
 // function samples into a straight (now floored-to-steps) line, a milestone function samples
