@@ -810,7 +810,10 @@
   .pm-toggle-btn{ flex:1; font-family:inherit; font-size:11.5px; font-weight:600; padding:7px 8px; border-radius:var(--radius-sm); border:1px solid var(--border); background:var(--surface); color:var(--text-dim); cursor:pointer; text-align:center; }
   .pm-toggle-btn.active{ background:var(--accent); border-color:var(--accent); color:var(--accent-text); }
   .pm-tier-row{ display:flex; align-items:center; gap:6px; margin-bottom:8px; }
-  .pm-tier-row input[type="number"]{ width:84px; }
+  .pm-tier-row input[type="number"]{
+    width:84px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); color:var(--text);
+    padding:8px 10px; font-family:inherit; font-size:13px;
+  }
   .pm-tier-row .pm-arrow{ color:var(--text-faint); font-size:12px; }
   .pm-tier-rm{ width:22px; height:22px; border-radius:5px; border:1px solid var(--border); background:var(--surface); color:var(--text-faint); cursor:pointer; font-size:13px; line-height:1; flex-shrink:0; }
   .pm-tier-rm:hover{ color:var(--text); border-color:var(--text-faint); }
@@ -1685,11 +1688,11 @@ function tcAmount(r){
   const brief = briefForVideo(r);
   if(brief) return pmModelPayout(brief.payout_model, Number(r.view_count)||0);
   const locked = r.locked_payout_model;
-  if(locked && locked.type === 'cpm'){
-    return pmCpmPayout(locked.rate, locked.per, locked.minViews||0, locked.capEnabled?locked.cap:null, Number(r.view_count)||0);
-  }
-  if(locked && locked.type === 'milestones'){
-    return pmMilestonePayout(locked.tiers, locked.afterTop, locked.tailRate, locked.tailPer, Number(r.view_count)||0);
+  // Routed through pmModelPayout (not pmCpmPayout/pmMilestonePayout directly) so a locked model
+  // gets the same optional hybrid base-pay-on-top behavior as a Brief does — one place defines
+  // what a cpm/milestones model actually pays, instead of two copies that could drift apart.
+  if(locked && (locked.type === 'cpm' || locked.type === 'milestones')){
+    return pmModelPayout(locked, Number(r.view_count)||0);
   }
   return Number(r.pay_amount ?? r.brands?.base_pay ?? 0);
 }
@@ -2088,15 +2091,15 @@ function undoBriefVideo(brandId){
   render();
 }
 function applyBriefDefaultsToDraft(draft, brandId){
-  // fills a NEW content draft from the brand's brief (rate, CPM, view requirement + window, platforms) —
-  // still fully editable afterward, this just saves re-typing the same numbers every time
+  // Fills a NEW content draft's default platforms from the brand's brief — still fully editable
+  // afterward, just saves re-checking the same boxes every time. Used to also default rate/CPM/
+  // view requirement from the brief, back when the brief was the only place those lived; the
+  // brief no longer carries those fields (see the Brand edit modal's Brief section) so there's
+  // nothing to default them from now — Content items just start blank/zero on those, same as
+  // always for a brand with no brief at all.
   const brand = brandById(brandId);
   if(!brand || !brand.brief) return;
   const brief = brand.brief;
-  draft.basePay = Number(brief.basePay)||0;
-  draft.cpmBonus = Number(brief.cpmBonus)||0;
-  draft.viewRequirement = brief.viewRequirement || null;
-  draft.viewRequirementWindowDays = brief.viewRequirementWindowDays || null;
   const activeIds = brief.platforms || [];
   draft.platforms = normalizePlatforms(draft.platforms).map(p => activeIds.includes(p.id) ? { ...p, active:true } : { ...p, active:false });
 }
@@ -4603,9 +4606,10 @@ function allTrackedBrandIds(){
 
 function briefModelSummary(m){
   if(!m || !m.type) return '—';
+  const baseSuffix = m.basePayEnabled ? ` + ${money(m.basePay)} base` : '';
   if(m.type==='flat') return `${money(m.basePay)} flat`;
-  if(m.type==='cpm') return `${money(m.rate)} / ${pmFmtCompact(m.per)} views${m.capEnabled ? ` (capped at ${pmFmtCompact(m.cap)})` : ''}`;
-  if(m.type==='milestones') return `Milestones — ${(m.tiers||[]).length} tier${(m.tiers||[]).length===1?'':'s'}`;
+  if(m.type==='cpm') return `${money(m.rate)} / ${pmFmtCompact(m.per)} views${m.capEnabled ? ` (capped at ${pmFmtCompact(m.cap)})` : ''}${baseSuffix}`;
+  if(m.type==='milestones') return `Milestones — ${(m.tiers||[]).length} tier${(m.tiers||[]).length===1?'':'s'}${baseSuffix}`;
   return '—';
 }
 
@@ -4701,7 +4705,7 @@ function renderBriefEditorForm(brief, brandOptions){
           ${brandOptions.map(b=>`<option value="${b.id}" ${(isNew ? BRIEFS_FILTER.brandId : brief.brand_id)===b.id?'selected':''}>${escapeHtml(b.name)}</option>`).join('')}
         </select>
       </div>
-      <div class="field"><label>Starts</label><input type="date" id="briefFormStart" value="${isNew ? todayISO() : brief.start_date}"></div>
+      <div class="field"><label>Starts</label><button type="button" class="date-trigger" style="width:100%; text-align:left;" data-datepicker="briefform:current">${fmtDate(BRIEFS_OPEN_EDITOR?.startDate)}</button></div>
     </div>
     <div id="briefEditorMount"></div>
     <div class="hint" style="margin-top:2px;">${isNew
@@ -4736,7 +4740,7 @@ function mountBriefEditor(){
 
 async function createPayoutBrief(){
   const brandId = document.getElementById('briefFormBrand')?.value;
-  const startDate = document.getElementById('briefFormStart')?.value;
+  const startDate = BRIEFS_OPEN_EDITOR?.startDate;
   const model = BRIEF_EDITOR_CURRENT_MODEL || { type:'flat', basePay:0, viewRequirement:0 };
   if(!brandId || !startDate) return;
   const btn = document.getElementById('briefFormSave');
@@ -4773,7 +4777,7 @@ async function createPayoutBrief(){
 }
 
 async function updatePayoutBrief(briefId){
-  const startDate = document.getElementById('briefFormStart')?.value;
+  const startDate = BRIEFS_OPEN_EDITOR?.startDate;
   const model = BRIEF_EDITOR_CURRENT_MODEL;
   if(!startDate || !model) return;
   const btn = document.getElementById('briefFormSave');
@@ -5177,7 +5181,7 @@ async function sendAI(question){
       body: JSON.stringify({
         model: modelToUse,
         max_tokens: 2200,
-        system: "You are a concise assistant embedded in a UGC creator's ops dashboard. Answer using ONLY the JSON data provided about their brands, content, payments, and tasks. Earnings come entirely from the separate automated tracker (Tracked Content, fed by each brand's connected platform accounts) \u2014 Content is pure production-status information now (what's being made, its status) and never affects Earned, Outstanding, or Pending. Content only shows in-progress items \u2014 once something is marked Published it drops out of Content entirely; Tracked Content is where it (and its real view counts) shows up from then on. Payments are logged in bulk against a brand (not per video) \u2014 a brand's Outstanding is its automated-tracked total earned minus everything logged for it in payments. Be direct, use short paragraphs or lists, use $ for money. Each brand may include a 'brief' object with defaults it already has on file (basePay, cpmBonus, viewRequirement, platforms, cadence) \u2014 this sets that brand's automated-tracking rate (and its own recurring-quota cadence), not anything on individual content items, which no longer carry pay fields at all. When adding content for a brand that has a brief, use its platforms as the default instead of asking \u2014 content items take a title, platforms, and status only (plus an optional view requirement, kept purely for the user's own reference, not money).\n\nYou can take actions on the user's behalf, and you can batch many actions into a single reply \u2014 this matters because the user may ask for hundreds of videos at once, and they should never have to confirm one at a time for a bulk request like that. End your reply with exactly one fenced block containing a JSON ARRAY of action objects, even if it's only one:\n```action\n[{...}, {...}]\n```\nOnly emit the block when the request is unambiguous \u2014 if you're missing a required detail (which brand, what amount, what title, how many), ask a plain question instead and wait for their answer. Never invent an id; always copy an 'id' field exactly from the data provided. For any delete action, only act after the user has explicitly confirmed in their own words that they want it deleted \u2014 never delete on the first ask.\n\nWhen the user asks you to log a payment, always ask whether a CPM bonus was included in that amount before logging it, unless they already said so unprompted (e.g. \"got $600, $100 of that was a CPM bonus\"). amount is always the total actually received; cpmBonus (optional, default 0) is just the portion of that total that was a bonus, for their own record-keeping \u2014 it does not add on top of amount.\n\nCRITICAL \u2014 never write more than about 15 individual add_content actions by hand in one reply. If a request needs more videos than that, it always fits one of the two batch actions below instead \u2014 use one of them, never enumerate videos one by one for a bulk request. Writing dozens of individual JSON objects risks the response being cut off mid-way, which silently fails the whole thing.\n\n- add_content_batch: many videos that all share the exact same post date (or are all still unposted):\n{\"type\":\"add_content_batch\",\"brandId\":\"<id>\",\"count\":50,\"titlePrefix\":\"PureFi Video\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null}\nThis creates videos titled \"PureFi Video 1\" through \"PureFi Video 50\" (or however many), all otherwise identical.\n\nviewRequirement/viewRequirementWindowDays are optional and purely informational now (not money) \u2014 a personal reference for whether a video hit whatever number the user cares about, on whatever window. Use a brand's brief.viewRequirement/viewRequirementWindowDays as the default when adding content for that brand if it has one.\n\n- add_content_daily_batch: for any cadence-based bulk request \u2014 'N videos a day for M days', 'backfill 37 videos, 2 a day since a date', 'X per week' converted to a daily count, etc. It spreads a fixed number per day across a date range automatically, incrementing the post date each day:\n{\"type\":\"add_content_daily_batch\",\"brandId\":\"<id>\",\"startDate\":\"YYYY-MM-DD\",\"perDay\":2,\"days\":18,\"platforms\":[\"tiktok\",\"instagram\"],\"status\":\"published\",\"viewRequirement\":300,\"viewRequirementMet\":true,\"viewRequirementWindowDays\":30,\"titlePrefix\":\"Amboras Ongoing\"}\nThis creates perDay*days videos total, dated startDate, startDate+1, startDate+2, ... with perDay videos sharing each date. Only sets a post date on items when status is 'published'. Use this for both backfilling known past history and for scheduling a fixed number of upcoming videos at a cadence.\n\nFor a truly open-ended, indefinite cadence ('ongoing forever until I say stop', no end date at all), a fixed batch isn't the right fit \u2014 tell the user you can add a bounded batch now (ask for a count or an end date), and mention they can also set up a recurring brief directly on the brand's edit screen for indefinite daily quotas, since that's built for exactly that case and isn't something you can configure yourself.\n\nIf a request needs a brand that doesn't exist yet AND a batch of content for it in the same reply, chain them: give the add_brand action a \"ref\" (any short label you pick), then use \"brandRef\" instead of \"brandId\" in the actions that follow it in the same array:\n[{\"type\":\"add_brand\",\"ref\":\"b1\",\"name\":\"New Brand\"},{\"type\":\"add_content_batch\",\"brandRef\":\"b1\",\"count\":20,\"titlePrefix\":\"New Brand Video\",\"platforms\":[\"tiktok\"],\"status\":\"idea\"}]\n\nOther action types and their exact shape:\n- Log a payment received for a brand: {\"type\":\"log_payment\",\"brandId\":\"<id>\",\"amount\":120,\"cpmBonus\":0,\"note\":\"optional\"}\n- Add a new brand: {\"type\":\"add_brand\",\"name\":\"Brand name\",\"status\":\"active\",\"notes\":\"optional\",\"ref\":\"optional label\"}\n- Add a single content item: {\"type\":\"add_content\",\"brandId\":\"<id>\",\"title\":\"Video title\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"postDate\":\"YYYY-MM-DD or omit\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null} (platforms are which of tiktok/instagram/youtube/facebook are active for this deliverable; no pay fields — content no longer carries money, only the brand's own brief does)\n- Change a content item's status: {\"type\":\"set_status\",\"id\":\"<content id>\",\"status\":\"published\"}\n- Mark a content item's view requirement as hit or not: {\"type\":\"set_requirement_met\",\"id\":\"<content id>\",\"met\":true}\n- Add a task: {\"type\":\"add_task\",\"title\":\"Task title\",\"brandId\":\"<id or null>\",\"priority\":\"high\",\"daily\":false,\"requiresTimer\":false,\"timerMinutes\":10} (timerMinutes only matters when requiresTimer is true \u2014 default 10, but a fresh account warm-up often needs 30\u201345)\n- Toggle a task done/undone (for daily tasks this only affects today): {\"type\":\"toggle_task\",\"id\":\"<task id>\"}\n- Delete a content item, brand, or task (only after explicit confirmation): {\"type\":\"delete_content\",\"id\":\"<id>\"} or {\"type\":\"delete_brand\",\"id\":\"<id>\"} or {\"type\":\"delete_task\",\"id\":\"<id>\"}\n- Set a brand's automated-tracking payout model — only possible when that brand's connectedForTracking is true (if it's false, tell the user to connect the brand for automated tracking first from its edit screen, don't emit this action): {\"type\":\"set_payout_model\",\"brandId\":\"<id>\",\"model\":{...}}, where model is exactly one of:\n  flat (today's default — one rate, paid once a video crosses a view count): {\"type\":\"flat\",\"basePay\":20,\"viewRequirement\":1000}\n  cpm (a rate per view, paid in whole blocks, optionally capped): {\"type\":\"cpm\",\"rate\":10,\"per\":10000,\"minViews\":0,\"capEnabled\":false,\"cap\":null} — capEnabled true + cap:1000000 means it stops paying anything above 1,000,000 views\n  milestones (a bonus ladder — payout is whichever tier's threshold was most recently crossed, not the sum of every tier passed): {\"type\":\"milestones\",\"tiers\":[{\"views\":100000,\"pay\":150},{\"views\":500000,\"pay\":750}],\"afterTop\":\"flat\",\"tailRate\":0,\"tailPer\":100000} — afterTop \"flat\" caps forever at the last tier's payout; \"cpm\" keeps earning tailRate per tailPer views above it\n  This only configures a live preview visible on the brand's edit screen — the automated scout jobs still pay every brand's Flat rate today regardless of what's set here, so say that plainly when confirming a cpm or milestones change (never imply real payouts changed).\n\nstatus must be one of: idea, scripting, filming, editing, ready, submitted, revision, approved, scheduled, published. \"scheduled\" means the user has a plan for when it will go out but hasn\u2019t posted it yet \u2014 use it, and set \"scheduledDate\" (YYYY-MM-DD) on the content item, whenever the user is batching/planning ahead rather than posting immediately (e.g. \"I filmed the next 10 for Amboras, starting the 21st\"). scheduledDate is the plan, separate from the real post date which only gets set once something is actually Published \u2014 never set both to the same thing unless it really did go live that day.\n\nIf the data can't answer a question, say so plainly.",
+        system: "You are a concise assistant embedded in a UGC creator's ops dashboard. Answer using ONLY the JSON data provided about their brands, content, payments, and tasks. Earnings come entirely from the separate automated tracker (Tracked Content, fed by each brand's connected platform accounts) \u2014 Content is pure production-status information now (what's being made, its status) and never affects Earned, Outstanding, or Pending. Content only shows in-progress items \u2014 once something is marked Published it drops out of Content entirely; Tracked Content is where it (and its real view counts) shows up from then on. Payments are logged in bulk against a brand (not per video) \u2014 a brand's Outstanding is its automated-tracked total earned minus everything logged for it in payments. Be direct, use short paragraphs or lists, use $ for money. Each brand may include a 'brief' object (platforms, cadence) \u2014 this is purely a content-quota planner (how many videos per day/week/month, plus its own recurring/trial status), not money; it has nothing to do with what a brand pays. When adding content for a brand that has a brief, use its platforms as the default instead of asking \u2014 content items take a title, platforms, and status only (plus an optional view requirement, kept purely for the user's own reference, not money). A connected brand's rate is set via set_payout_model below (see that action for the full explanation of how it interacts with Briefs) \u2014 you have no direct way to create or edit a Brief itself (a date-ranged payout period); if the user specifically asks for a new dated brief, tell them to use the Briefs tab.\n\nYou can take actions on the user's behalf, and you can batch many actions into a single reply \u2014 this matters because the user may ask for hundreds of videos at once, and they should never have to confirm one at a time for a bulk request like that. End your reply with exactly one fenced block containing a JSON ARRAY of action objects, even if it's only one:\n```action\n[{...}, {...}]\n```\nOnly emit the block when the request is unambiguous \u2014 if you're missing a required detail (which brand, what amount, what title, how many), ask a plain question instead and wait for their answer. Never invent an id; always copy an 'id' field exactly from the data provided. For any delete action, only act after the user has explicitly confirmed in their own words that they want it deleted \u2014 never delete on the first ask.\n\nWhen the user asks you to log a payment, always ask whether a CPM bonus was included in that amount before logging it, unless they already said so unprompted (e.g. \"got $600, $100 of that was a CPM bonus\"). amount is always the total actually received; cpmBonus (optional, default 0) is just the portion of that total that was a bonus, for their own record-keeping \u2014 it does not add on top of amount.\n\nCRITICAL \u2014 never write more than about 15 individual add_content actions by hand in one reply. If a request needs more videos than that, it always fits one of the two batch actions below instead \u2014 use one of them, never enumerate videos one by one for a bulk request. Writing dozens of individual JSON objects risks the response being cut off mid-way, which silently fails the whole thing.\n\n- add_content_batch: many videos that all share the exact same post date (or are all still unposted):\n{\"type\":\"add_content_batch\",\"brandId\":\"<id>\",\"count\":50,\"titlePrefix\":\"PureFi Video\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null}\nThis creates videos titled \"PureFi Video 1\" through \"PureFi Video 50\" (or however many), all otherwise identical.\n\nviewRequirement/viewRequirementWindowDays are optional and purely informational now (not money) \u2014 a personal reference for whether a video hit whatever number the user cares about, on whatever window. No brand-level default for these anymore \u2014 ask the user, or just leave them unset.\n\n- add_content_daily_batch: for any cadence-based bulk request \u2014 'N videos a day for M days', 'backfill 37 videos, 2 a day since a date', 'X per week' converted to a daily count, etc. It spreads a fixed number per day across a date range automatically, incrementing the post date each day:\n{\"type\":\"add_content_daily_batch\",\"brandId\":\"<id>\",\"startDate\":\"YYYY-MM-DD\",\"perDay\":2,\"days\":18,\"platforms\":[\"tiktok\",\"instagram\"],\"status\":\"published\",\"viewRequirement\":300,\"viewRequirementMet\":true,\"viewRequirementWindowDays\":30,\"titlePrefix\":\"Amboras Ongoing\"}\nThis creates perDay*days videos total, dated startDate, startDate+1, startDate+2, ... with perDay videos sharing each date. Only sets a post date on items when status is 'published'. Use this for both backfilling known past history and for scheduling a fixed number of upcoming videos at a cadence.\n\nFor a truly open-ended, indefinite cadence ('ongoing forever until I say stop', no end date at all), a fixed batch isn't the right fit \u2014 tell the user you can add a bounded batch now (ask for a count or an end date), and mention they can also set up a recurring brief directly on the brand's edit screen for indefinite daily quotas, since that's built for exactly that case and isn't something you can configure yourself.\n\nIf a request needs a brand that doesn't exist yet AND a batch of content for it in the same reply, chain them: give the add_brand action a \"ref\" (any short label you pick), then use \"brandRef\" instead of \"brandId\" in the actions that follow it in the same array:\n[{\"type\":\"add_brand\",\"ref\":\"b1\",\"name\":\"New Brand\"},{\"type\":\"add_content_batch\",\"brandRef\":\"b1\",\"count\":20,\"titlePrefix\":\"New Brand Video\",\"platforms\":[\"tiktok\"],\"status\":\"idea\"}]\n\nOther action types and their exact shape:\n- Log a payment received for a brand: {\"type\":\"log_payment\",\"brandId\":\"<id>\",\"amount\":120,\"cpmBonus\":0,\"note\":\"optional\"}\n- Add a new brand: {\"type\":\"add_brand\",\"name\":\"Brand name\",\"status\":\"active\",\"notes\":\"optional\",\"ref\":\"optional label\"}\n- Add a single content item: {\"type\":\"add_content\",\"brandId\":\"<id>\",\"title\":\"Video title\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"postDate\":\"YYYY-MM-DD or omit\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null} (platforms are which of tiktok/instagram/youtube/facebook are active for this deliverable; no pay fields — Content is pure production-status info, money comes entirely from the automated tracker)\n- Change a content item's status: {\"type\":\"set_status\",\"id\":\"<content id>\",\"status\":\"published\"}\n- Mark a content item's view requirement as hit or not: {\"type\":\"set_requirement_met\",\"id\":\"<content id>\",\"met\":true}\n- Add a task: {\"type\":\"add_task\",\"title\":\"Task title\",\"brandId\":\"<id or null>\",\"priority\":\"high\",\"daily\":false,\"requiresTimer\":false,\"timerMinutes\":10} (timerMinutes only matters when requiresTimer is true \u2014 default 10, but a fresh account warm-up often needs 30\u201345)\n- Toggle a task done/undone (for daily tasks this only affects today): {\"type\":\"toggle_task\",\"id\":\"<task id>\"}\n- Delete a content item, brand, or task (only after explicit confirmation): {\"type\":\"delete_content\",\"id\":\"<id>\"} or {\"type\":\"delete_brand\",\"id\":\"<id>\"} or {\"type\":\"delete_task\",\"id\":\"<id>\"}\n- Set a brand's automated-tracking payout model — only possible when that brand's connectedForTracking is true (if it's false, tell the user to connect the brand for automated tracking first from its edit screen, don't emit this action): {\"type\":\"set_payout_model\",\"brandId\":\"<id>\",\"model\":{...}}, where model is exactly one of:\n  flat (today's default — one rate, paid once a video crosses a view count): {\"type\":\"flat\",\"basePay\":20,\"viewRequirement\":1000}\n  cpm (a rate per view, paid in whole blocks, optionally capped): {\"type\":\"cpm\",\"rate\":10,\"per\":10000,\"minViews\":0,\"capEnabled\":false,\"cap\":null,\"basePayEnabled\":false,\"basePay\":0} — capEnabled true + cap:1000000 means it stops paying anything above 1,000,000 views; basePayEnabled true + basePay:20 adds a guaranteed $20 on every video regardless of views, on top of the CPM\n  milestones (a bonus ladder — payout is whichever tier's threshold was most recently crossed, not the sum of every tier passed): {\"type\":\"milestones\",\"tiers\":[{\"views\":100000,\"pay\":150},{\"views\":500000,\"pay\":750}],\"afterTop\":\"flat\",\"tailRate\":0,\"tailPer\":100000,\"basePayEnabled\":false,\"basePay\":0} — afterTop \"flat\" caps forever at the last tier's payout; \"cpm\" keeps earning tailRate per tailPer views above it; basePayEnabled/basePay work the same as on cpm, above\n  This is real, not a preview — it sets the brand's live rate, which any video discovered by the automated scout from then on locks in permanently (a video that's already being tracked keeps whatever rate it was found under, unless a Brief covers its post date — Briefs override this entirely and can retroactively reprice videos already tracked; you cannot create or edit a Brief, only tell the user to do it from the Briefs tab). Say plainly which of those applies when confirming a change: for a brand using Briefs, none of this action's effect applies at all as long as a Brief is active for the dates in question.\n\nstatus must be one of: idea, scripting, filming, editing, ready, submitted, revision, approved, scheduled, published. \"scheduled\" means the user has a plan for when it will go out but hasn\u2019t posted it yet \u2014 use it, and set \"scheduledDate\" (YYYY-MM-DD) on the content item, whenever the user is batching/planning ahead rather than posting immediately (e.g. \"I filmed the next 10 for Amboras, starting the 21st\"). scheduledDate is the plan, separate from the real post date which only gets set once something is actually Published \u2014 never set both to the same thing unless it really did go live that day.\n\nIf the data can't answer a question, say so plainly.",
         messages: messages
       })
     });
@@ -5434,20 +5438,23 @@ function pmNormalizeAiModel(raw){
   }
   if(raw.type === 'cpm'){
     const capEnabled = !!raw.capEnabled && Number(raw.cap) > 0;
-    return { type:'cpm', rate: Number(raw.rate)||0, per: Math.max(1,Number(raw.per)||1000), minViews: Number(raw.minViews)||0, capEnabled, cap: capEnabled ? Number(raw.cap) : null };
+    const basePayEnabled = !!raw.basePayEnabled && Number(raw.basePay) > 0;
+    return { type:'cpm', rate: Number(raw.rate)||0, per: Math.max(1,Number(raw.per)||1000), minViews: Number(raw.minViews)||0, capEnabled, cap: capEnabled ? Number(raw.cap) : null, basePayEnabled, basePay: basePayEnabled ? Number(raw.basePay) : 0 };
   }
   if(raw.type === 'milestones'){
     const tiers = Array.isArray(raw.tiers) ? raw.tiers.map(t=>({views:Number(t.views)||0, pay:Number(t.pay)||0})).filter(t=>t.views>0).sort((a,b)=>a.views-b.views) : [];
     if(!tiers.length) return null;
     const afterTop = raw.afterTop === 'cpm' ? 'cpm' : 'flat';
-    return { type:'milestones', tiers, afterTop, tailRate: Number(raw.tailRate)||0, tailPer: Math.max(1,Number(raw.tailPer)||100000) };
+    const basePayEnabled = !!raw.basePayEnabled && Number(raw.basePay) > 0;
+    return { type:'milestones', tiers, afterTop, tailRate: Number(raw.tailRate)||0, tailPer: Math.max(1,Number(raw.tailPer)||100000), basePayEnabled, basePay: basePayEnabled ? Number(raw.basePay) : 0 };
   }
   return null;
 }
 function pmDescribeModel(brandName, model){
+  const baseSuffix = model.basePayEnabled ? `, plus a guaranteed ${money(model.basePay)} base pay per video` : '';
   if(model.type==='flat') return `Set ${brandName} to a flat rate: ${money(model.basePay)} per video${model.viewRequirement?`, once it crosses ${model.viewRequirement.toLocaleString()} views`:''}.`;
-  if(model.type==='cpm') return `Set ${brandName} to $${model.rate} per ${model.per.toLocaleString()} views${model.capEnabled?`, capped at ${model.cap.toLocaleString()} views`:', uncapped'}.`;
-  return `Set ${brandName} to milestone tiers: ${model.tiers.map(t=>`${t.views.toLocaleString()} views → ${money(t.pay)}`).join(', ')}${model.afterTop==='cpm'?`, plus $${model.tailRate} per ${model.tailPer.toLocaleString()} views above the top tier`:''}.`;
+  if(model.type==='cpm') return `Set ${brandName} to $${model.rate} per ${model.per.toLocaleString()} views${model.capEnabled?`, capped at ${model.cap.toLocaleString()} views`:', uncapped'}${baseSuffix}.`;
+  return `Set ${brandName} to milestone tiers: ${model.tiers.map(t=>`${t.views.toLocaleString()} views → ${money(t.pay)}`).join(', ')}${model.afterTop==='cpm'?`, plus $${model.tailRate} per ${model.tailPer.toLocaleString()} views above the top tier`:''}${baseSuffix}.`;
 }
 // Writes straight to Supabase (fire-and-forget, same pattern as syncToSupabase/upsertRows) —
 // payout_model lives only in the cloud brands row (MODAL_BRAND_CONN when a modal has it open),
@@ -5516,6 +5523,7 @@ function getDPValue(key){
   if(type==='contentfilter'){ return a==='start' ? CONTENT_FILTER.customStart : CONTENT_FILTER.customEnd; }
   if(type==='scheduled'){ const target = a==='draft' ? MODAL_STATE.draft : DATA.content.find(x=>x.id===a); return target ? target.scheduledDate : ''; }
   if(type==='trialstart'){ return MODAL_STATE.draft && MODAL_STATE.draft.brief ? MODAL_STATE.draft.brief.trialStartDate : ''; }
+  if(type==='briefform'){ return BRIEFS_OPEN_EDITOR ? BRIEFS_OPEN_EDITOR.startDate : ''; }
   return '';
 }
 function setDPValue(key, val){
@@ -5526,6 +5534,7 @@ function setDPValue(key, val){
   if(type==='contentfilter'){ if(a==='start') CONTENT_FILTER.customStart = val; else CONTENT_FILTER.customEnd = val; }
   if(type==='scheduled'){ if(a==='draft'){ MODAL_STATE.draft.scheduledDate = val; } else { const c = DATA.content.find(x=>x.id===a); if(c){ c.scheduledDate = val; saveData(); } } }
   if(type==='trialstart'){ if(!MODAL_STATE.draft.brief) MODAL_STATE.draft.brief = {}; MODAL_STATE.draft.brief.trialStartDate = val; }
+  if(type==='briefform'){ if(BRIEFS_OPEN_EDITOR) BRIEFS_OPEN_EDITOR.startDate = val; }
 }
 function openDatePicker(key, anchorEl){
   const val = getDPValue(key);
@@ -5750,8 +5759,19 @@ function pmMilestonePayout(tiers, afterTop, tailRate, tailPer, views){
 // instead), a Brief's payout_model can genuinely be any of the three.
 function pmModelPayout(model, views){
   if(!model) return 0;
-  if(model.type === 'cpm') return pmCpmPayout(model.rate, model.per, model.minViews||0, model.capEnabled?model.cap:null, views);
-  if(model.type === 'milestones') return pmMilestonePayout(model.tiers, model.afterTop, model.tailRate, model.tailPer, views);
+  // Continuous CPM and Milestones can optionally carry their own guaranteed base pay on top —
+  // "twenty dollars a video no matter what, plus CPM on views" is a real, common deal shape, not
+  // just pure-performance pay. Unlike the CPM/milestone portion (gated by minViews / tier
+  // thresholds), the base — when turned on — always applies, since it's paid for delivering the
+  // video at all, not for how it performs.
+  if(model.type === 'cpm'){
+    const base = model.basePayEnabled ? (Number(model.basePay)||0) : 0;
+    return base + pmCpmPayout(model.rate, model.per, model.minViews||0, model.capEnabled?model.cap:null, views);
+  }
+  if(model.type === 'milestones'){
+    const base = model.basePayEnabled ? (Number(model.basePay)||0) : 0;
+    return base + pmMilestonePayout(model.tiers, model.afterTop, model.tailRate, model.tailPer, views);
+  }
   if(model.type === 'flat') return Number(model.basePay)||0;
   return 0;
 }
@@ -5830,8 +5850,8 @@ function buildPayoutModelEditor(conn, onChange, opts){
   const configured = (conn && conn.payout_model && conn.payout_model.type) ? conn.payout_model : null;
   const cache = {
     flat: { type:'flat', basePay: Number(conn?.base_pay)||0, viewRequirement: Number(conn?.view_requirement)||0 },
-    cpm: (configured && configured.type==='cpm') ? {...configured} : { type:'cpm', rate:5, per:1000, minViews:0, capEnabled:false, cap:1000000 },
-    milestones: (configured && configured.type==='milestones') ? { ...configured, tiers: configured.tiers.map(t=>({...t})) } : { type:'milestones', tiers:[{views:100000, pay:100}], afterTop:'flat', tailRate:100, tailPer:100000 },
+    cpm: (configured && configured.type==='cpm') ? { basePayEnabled:false, basePay:0, ...configured } : { type:'cpm', rate:5, per:1000, minViews:0, capEnabled:false, cap:1000000, basePayEnabled:false, basePay:0 },
+    milestones: (configured && configured.type==='milestones') ? { basePayEnabled:false, basePay:0, ...configured, tiers: configured.tiers.map(t=>({...t})) } : { type:'milestones', tiers:[{views:100000, pay:100}], afterTop:'flat', tailRate:100, tailPer:100000, basePayEnabled:false, basePay:0 },
   };
   let model = cache[configured ? configured.type : 'flat'];
   const root = document.createElement('div');
@@ -5874,6 +5894,12 @@ function buildPayoutModelEditor(conn, onChange, opts){
   function renderCpmPanel(panel){
     panel.innerHTML = `
       <div class="pm-note">${cpmNote}</div>
+      <div class="field"><label style="display:flex; align-items:center; gap:7px; font-weight:500;"><input type="checkbox" class="checkbox pm-basepay-toggle" ${model.basePayEnabled?'checked':''}/> Also pay a guaranteed base rate per video</label></div>
+      <div class="field-row pm-basepay-field" style="${model.basePayEnabled?'':'display:none;'} margin-bottom:2px;">
+        <div class="field"><label>Base pay per video ($)</label><input type="number" class="pm-basepay" value="${model.basePay||0}" min="0" step="0.01"></div>
+        <div></div>
+      </div>
+      <div class="hint" style="margin:-4px 0 10px;">Paid on every video regardless of views — the CPM below is on top of it, not instead of it.</div>
       <div class="field-row">
         <div class="field"><label>Rate ($)</label><input type="number" class="pm-rate" value="${model.rate}" min="0" step="0.5"></div>
         <div class="field"><label>Per (views)</label><input type="number" class="pm-per" value="${model.per}" min="1" step="100"></div>
@@ -5892,6 +5918,7 @@ function buildPayoutModelEditor(conn, onChange, opts){
     `;
     const rateI = panel.querySelector('.pm-rate'), perI = panel.querySelector('.pm-per'), minI = panel.querySelector('.pm-min'), capI = panel.querySelector('.pm-cap');
     const capField = panel.querySelector('.pm-cap-field');
+    const basePayToggle = panel.querySelector('.pm-basepay-toggle'), basePayField = panel.querySelector('.pm-basepay-field'), basePayI = panel.querySelector('.pm-basepay');
     panel.querySelector('[data-cap="off"]').addEventListener('click', () => { model.capEnabled=false; recompute(); renderToggleState(); });
     panel.querySelector('[data-cap="on"]').addEventListener('click', () => { model.capEnabled=true; recompute(); renderToggleState(); });
     function renderToggleState(){
@@ -5899,6 +5926,8 @@ function buildPayoutModelEditor(conn, onChange, opts){
       panel.querySelector('[data-cap="on"]').classList.toggle('active', model.capEnabled);
       capField.style.display = model.capEnabled ? '' : 'none';
     }
+    basePayToggle.addEventListener('change', () => { model.basePayEnabled = basePayToggle.checked; basePayField.style.display = model.basePayEnabled ? '' : 'none'; recompute(); });
+    basePayI.addEventListener('input', () => { model.basePay = Number(basePayI.value)||0; recompute(); });
     [rateI, perI, minI, capI].forEach(el => el.addEventListener('input', () => {
       model.rate = Number(rateI.value)||0; model.per = Math.max(1,Number(perI.value)||1);
       model.minViews = Number(minI.value)||0; model.cap = Math.max(1,Number(capI.value)||1);
@@ -5909,7 +5938,9 @@ function buildPayoutModelEditor(conn, onChange, opts){
     function recompute(){
       emit();
       const cap = model.capEnabled ? model.cap : null;
-      const fn = v => pmCpmPayout(model.rate, model.per, model.minViews, cap, v);
+      // Routed through pmModelPayout (not pmCpmPayout directly) so the demo table/chart reflect
+      // the optional base pay on top, exactly like the real payout will.
+      const fn = v => pmModelPayout(model, v);
       tbody.innerHTML = PM_CPM_DEMO_VIEWS.map(v => `<tr><td>${v.toLocaleString()}</td><td class="pm-pay">${money(Math.round(fn(v)))}</td></tr>`).join('');
       const xMax = 1000000;
       const stepPoints = [];
@@ -5923,6 +5954,12 @@ function buildPayoutModelEditor(conn, onChange, opts){
   function renderMilestonePanel(panel){
     panel.innerHTML = `
       <div class="pm-note">${milestoneNote}</div>
+      <div class="field"><label style="display:flex; align-items:center; gap:7px; font-weight:500;"><input type="checkbox" class="checkbox pm-basepay-toggle" ${model.basePayEnabled?'checked':''}/> Also pay a guaranteed base rate per video</label></div>
+      <div class="field-row pm-basepay-field" style="${model.basePayEnabled?'':'display:none;'} margin-bottom:2px;">
+        <div class="field"><label>Base pay per video ($)</label><input type="number" class="pm-basepay" value="${model.basePay||0}" min="0" step="0.01"></div>
+        <div></div>
+      </div>
+      <div class="hint" style="margin:-4px 0 10px;">Paid on every video regardless of views — the tiers below are on top of it, not instead of it.</div>
       <div class="pm-tier-editor"></div>
       <button type="button" class="pm-add-tier">+ Add tier</button>
       <div class="pm-toggle">
@@ -5939,6 +5976,9 @@ function buildPayoutModelEditor(conn, onChange, opts){
     const tierEditor = panel.querySelector('.pm-tier-editor');
     const tailField = panel.querySelector('.pm-tail-field');
     const tailRateI = panel.querySelector('.pm-tail-rate'), tailPerI = panel.querySelector('.pm-tail-per');
+    const basePayToggle = panel.querySelector('.pm-basepay-toggle'), basePayField = panel.querySelector('.pm-basepay-field'), basePayI = panel.querySelector('.pm-basepay');
+    basePayToggle.addEventListener('change', () => { model.basePayEnabled = basePayToggle.checked; basePayField.style.display = model.basePayEnabled ? '' : 'none'; recompute(); });
+    basePayI.addEventListener('input', () => { model.basePay = Number(basePayI.value)||0; recompute(); });
     const chartWrap = panel.querySelector('.pm-chart-wrap');
     const tbody = panel.querySelector('tbody');
 
@@ -5973,7 +6013,9 @@ function buildPayoutModelEditor(conn, onChange, opts){
     function recompute(){
       emit();
       const sortedTiers = [...model.tiers].sort((a,b)=>a.views-b.views);
-      const fn = v => pmMilestonePayout(model.tiers, model.afterTop, model.tailRate, model.tailPer, v);
+      // Routed through pmModelPayout (not pmMilestonePayout directly) so the demo table/chart
+      // reflect the optional base pay on top, exactly like the real payout will.
+      const fn = v => pmModelPayout(model, v);
       tbody.innerHTML = PM_MILESTONE_DEMO_VIEWS.map(v => {
         const isEdge = v===499000 || v===500000;
         return `<tr style="${isEdge?`background:var(--surface-2);`:''}"><td>${v.toLocaleString()}${v===499000?' <span style="color:var(--text-faint);">(edge case)</span>':''}</td><td class="pm-pay">${money(Math.round(fn(v)))}</td></tr>`;
@@ -6136,21 +6178,9 @@ function renderBrandModal(){
             </select>
           </div>
         </div>
-        <div class="field"><label>Base pay per video ($)</label><input type="number" id="f-briefBasePay" value="${brief?brief.basePay:20}" /></div>
-      </div>
-      <div class="field-row">
-        <div class="field"><label>CPM bonus ($, optional)</label><input type="number" id="f-briefCpmBonus" value="${brief?brief.cpmBonus:0}" /></div>
         <div></div>
       </div>
-      <div class="field-row">
-        <div class="field"><label>Minimum view requirement (optional — applied to every auto-created video)</label><input type="number" id="f-briefViewReq" value="${brief && brief.viewRequirement ? brief.viewRequirement : ''}" placeholder="e.g. 1000 — leave blank for none" /></div>
-        <div class="field"><label>Requirement window</label>
-          <select id="f-briefViewReqWindow">
-            ${[7,14,30,60,90,180].map(d => `<option value="${d}" ${(brief && Number(brief.viewRequirementWindowDays)===d) || (!brief?.viewRequirementWindowDays && d===30) ? 'selected' : ''}>${d} days${d===180?' (6 months)':''}</option>`).join('')}
-          </select>
-        </div>
-      </div>
-      <div class="hint" style="margin-top:-6px;">If a video misses its view requirement within this window, it drops out of Pending instead of sitting there forever. This is the same window the automated scouting job actually tracks against — up to day 30 it's checked daily, then weekly to day 90, then monthly out to 180, so a longer window costs very little extra. (There's no true "track forever" anymore — even a brand that pays out no matter how long it takes still needs a cutoff on our end, 180 days max.)</div>
+      <div class="hint" style="margin-top:-6px;">Rate and view requirement live on the <b>Briefs</b> tab now, not here — this section is purely about how many videos you're planning to make, not what they pay. (If this brand already had a rate saved here from before, it's kept in its data but nothing reads it anymore — set the real one up as a brief instead.)</div>
       <div class="field"><label>Daily warm-up tasks (off by default — turn these on when you're ready)</label>
         <div style="display:flex; gap:16px; padding:4px 0;">
           <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:500; color:var(--text);"><input type="checkbox" class="checkbox" id="f-briefWarmupTT" ${brief && brief.warmupTikTok ? 'checked' : ''}/> TikTok — 10 min</label>
@@ -6637,10 +6667,6 @@ function bindGlobalHandlers(){
         status: document.getElementById('f-briefStatus').value,
         cadenceType: document.getElementById('f-briefType').value,
         cadenceCount: Number(document.getElementById('f-briefCount').value)||0,
-        basePay: Number(document.getElementById('f-briefBasePay').value)||0,
-        cpmBonus: Number(document.getElementById('f-briefCpmBonus').value)||0,
-        viewRequirement: Number(document.getElementById('f-briefViewReq').value) || null,
-        viewRequirementWindowDays: Number(document.getElementById('f-briefViewReqWindow').value) || 30,
         trialStartDate: kind==='trial' ? ((d.brief && d.brief.trialStartDate) || todayISO()) : null,
         trialDurationDays: kind==='trial' ? (Number(document.getElementById('f-briefTrialDays').value) || 30) : null,
         platforms,
@@ -6667,21 +6693,13 @@ function bindGlobalHandlers(){
     }
     const idx = DATA.brands.findIndex(b=>b.id===d.id);
     if(idx>=0) DATA.brands[idx]=d; else DATA.brands.push(d);
-    // keep the linked backend brand's automated-tracking rate in sync with this brief — so
-    // editing the rate here is the one place that changes it. Only ever affects *future*
-    // discoveries (each tracked video snapshots its own rate the moment it's found — see
-    // getDeliverables()/pay_amount), so this never silently changes what's already been earned.
-    if(d.supabaseBrandId && d.brief){
-      fetch(`${SUPABASE_URL}/rest/v1/brands?id=eq.${encodeURIComponent(d.supabaseBrandId)}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({
-          base_pay: Number(d.brief.basePay)||0,
-          view_requirement: d.brief.viewRequirement ? Number(d.brief.viewRequirement) : 0,
-          eligibility_window_days: d.brief.viewRequirementWindowDays ? Number(d.brief.viewRequirementWindowDays) : 30,
-        }),
-      }).catch(e => console.warn('Could not sync brief rate to backend brand:', e));
-    }
+    // Used to also PATCH base_pay/view_requirement/eligibility_window_days to the linked backend
+    // brand here, straight from this local brief — removed. That was a leftover from before the
+    // Payout Model editor (saveTrackingRate, below on the Connected accounts section) existed to
+    // do this properly; having two separate places silently write the same live Supabase columns
+    // is exactly how an old brief value (e.g. a stale $20 saved here while testing) could stomp a
+    // rate you'd since set correctly through Briefs/the Payout Model editor. That's the single
+    // source of truth for a connected brand's live rate now — this brief is cadence/quota only.
     saveData(); closeModal();
   });
   const deleteBrand = document.getElementById('deleteBrand');
@@ -6759,9 +6777,14 @@ function bindGlobalHandlers(){
   const briefsBrandFilter = document.getElementById('briefsBrandFilter');
   if(briefsBrandFilter) briefsBrandFilter.addEventListener('change', () => { BRIEFS_FILTER.brandId = briefsBrandFilter.value; render(); });
   const btnNewBrief = document.getElementById('btnNewBrief');
-  if(btnNewBrief) btnNewBrief.addEventListener('click', () => { BRIEFS_OPEN_EDITOR = {type:'new'}; render(); });
+  if(btnNewBrief) btnNewBrief.addEventListener('click', () => { BRIEFS_OPEN_EDITOR = {type:'new', startDate: todayISO()}; render(); });
   document.querySelectorAll('[data-toggle-brief-lock]').forEach(el => el.addEventListener('click', () => togglePayoutBriefLock(el.dataset.toggleBriefLock)));
-  document.querySelectorAll('[data-edit-brief]').forEach(el => el.addEventListener('click', () => { BRIEFS_OPEN_EDITOR = {type:'edit', briefId: el.dataset.editBrief}; render(); }));
+  document.querySelectorAll('[data-edit-brief]').forEach(el => el.addEventListener('click', () => {
+    const briefId = el.dataset.editBrief;
+    const brief = (PAYOUT_BRIEFS_DATA||[]).find(b=>b.id===briefId);
+    BRIEFS_OPEN_EDITOR = {type:'edit', briefId, startDate: brief ? brief.start_date : todayISO()};
+    render();
+  }));
   document.querySelectorAll('[data-end-brief-now]').forEach(el => el.addEventListener('click', () => endPayoutBriefNow(el.dataset.endBriefNow)));
   document.querySelectorAll('[data-delete-brief]').forEach(el => el.addEventListener('click', () => deletePayoutBrief(el.dataset.deleteBrief)));
   const briefFormSave = document.getElementById('briefFormSave');
