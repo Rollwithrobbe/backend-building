@@ -254,9 +254,9 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
     const anchor = media.timestamp ? new Date(media.timestamp).getTime() : Date.now();
     const eligibleUntil = new Date(anchor + brand.eligibility_window_days * 86400000).toISOString();
     const alreadyHit = viewCount >= brand.view_requirement;
-    await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos`, {
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos`, {
       method: 'POST',
-      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=representation' },
       body: JSON.stringify({
         brand_id: brand.id,
         platform: 'instagram',
@@ -282,6 +282,22 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
         facebook_views_component: facebookComponent,
       }),
     });
+    // Same idea as pay_amount above, but for the richer CPM/milestone shapes — see
+    // scout-tiktok.js's identical comment for the full rationale. Separate, best-effort PATCH:
+    // locked_payout_model is a newer column, and the video actually getting tracked matters far
+    // more than this one field, so a missing column just no-ops here instead of failing the insert.
+    if (brand.payout_model) {
+      try {
+        const [insertedRow] = await insertRes.json();
+        if (insertedRow?.id) {
+          await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${insertedRow.id}`, {
+            method: 'PATCH',
+            headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+            body: JSON.stringify({ locked_payout_model: brand.payout_model }),
+          });
+        }
+      } catch (e) { /* best-effort — see comment above */ }
+    }
     return { id: media.id, action: 'discovered', views: viewCount, status: alreadyHit ? 'hit' : 'tracking' };
   }
 

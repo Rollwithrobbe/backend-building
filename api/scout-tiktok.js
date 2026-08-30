@@ -218,9 +218,9 @@ async function processOneVideo(video, brand, SUPABASE_URL, sbHeaders) {
     const anchor = video.create_time ? video.create_time * 1000 : Date.now();
     const eligibleUntil = new Date(anchor + brand.eligibility_window_days * 86400000).toISOString();
     const alreadyHit = viewCount >= brand.view_requirement;
-    await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos`, {
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos`, {
       method: 'POST',
-      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=representation' },
       body: JSON.stringify({
         brand_id: brand.id,
         platform: 'tiktok',
@@ -240,6 +240,25 @@ async function processOneVideo(video, brand, SUPABASE_URL, sbHeaders) {
         thumbnail_url: video.cover_image_url || null,
       }),
     });
+    // Snapshot the brand's current payout model onto this video, permanently — if the brand's
+    // rate changes later (CPM/milestones, or just a new base pay), only videos discovered from
+    // then on pick up the new one; this one keeps whatever applied the moment it was found, same
+    // idea as pay_amount above but for the richer CPM/milestone shapes. Separate, best-effort
+    // PATCH rather than part of the insert body above — locked_payout_model is a newer column,
+    // and a video actually getting tracked matters far more than this one field; if the column
+    // isn't there yet (migration not run) this just no-ops instead of failing the whole insert.
+    if (brand.payout_model) {
+      try {
+        const [insertedRow] = await insertRes.json();
+        if (insertedRow?.id) {
+          await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${insertedRow.id}`, {
+            method: 'PATCH',
+            headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+            body: JSON.stringify({ locked_payout_model: brand.payout_model }),
+          });
+        }
+      } catch (e) { /* best-effort — see comment above */ }
+    }
     return { id: video.id, action: 'discovered', views: viewCount, status: alreadyHit ? 'hit' : 'tracking' };
   }
 

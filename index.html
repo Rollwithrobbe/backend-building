@@ -1609,10 +1609,20 @@ function cpmBonusInRange(start, end, brandId){
 // "Connected accounts" section).
 function brandTotals(brandId){
   const brand = brandById(brandId);
-  let contentEarned = 0, pending = 0, count = 0;
+  let contentEarned = 0, contentEarnedCpm = 0, pending = 0, count = 0;
   if(brand && brand.supabaseBrandId && TRACKED_CONTENT_DATA){
     const items = getDeliverables().filter(dv => !dv.excluded && dv.rows[0].brand_id === brand.supabaseBrandId);
-    contentEarned = items.filter(dv=>dv.status==='hit').reduce((s,dv)=>s+dv.payAmount,0);
+    const hitItems = items.filter(dv=>dv.status==='hit');
+    contentEarned = hitItems.reduce((s,dv)=>s+dv.payAmount,0);
+    // Of contentEarned, however much came from a video whose locked payout model was Continuous
+    // CPM or Milestones — NOT the same thing as receivedCpm below (a manually-logged "CPM bonus"
+    // portion of a payment you've actually received). This one is the automated-tracking side:
+    // what a video's own locked rate computed it as worth, still gated by the same status==='hit'
+    // this whole total already is — see tcAmount()'s comment for why locked_payout_model exists.
+    contentEarnedCpm = hitItems.filter(dv => {
+      const m = dv.rows[0].locked_payout_model;
+      return m && (m.type==='cpm' || m.type==='milestones');
+    }).reduce((s,dv)=>s+dv.payAmount,0);
     pending = items.filter(dv=>dv.status==='tracking').reduce((s,dv)=>s+dv.payAmount,0);
     count = items.length;
   }
@@ -1623,16 +1633,31 @@ function brandTotals(brandId){
   // a CPM bonus is realized the moment it's paid — you don't know the amount until the brand tells
   // you, so unlike base pay it never sits "pending" against a video; it counts straight to Earned
   const totalEarned = contentEarned + receivedCpm;
-  return { count, contentEarned, totalEarned, pending, received, receivedBase, receivedCpm, outstanding: totalEarned - received };
+  return { count, contentEarned, contentEarnedCpm, totalEarned, pending, received, receivedBase, receivedCpm, outstanding: totalEarned - received };
 }
 // A tracked video's payout is whatever was snapshotted onto it when the scouting job first
-// discovered it (r.pay_amount = that brand's base_pay at the time) — not a live join to the
-// brand's current rate. That's deliberate: if a brand's deal changes later (e.g. a warm-up
-// brief ending and a new rate starting), older videos keep the rate that applied when they
-// were found, and only newly-discovered videos pick up the new one. It can also be edited by
-// hand per-video (see the Edit button in the Tracked Content table) for one-off exceptions —
-// a differently-priced video, or one that shouldn't count/be tracked at all (r.excluded).
-function tcAmount(r){ return Number(r.pay_amount ?? r.brands?.base_pay ?? 0); }
+// discovered it — not a live join to the brand's current rate. That's deliberate: if a brand's
+// deal changes later (e.g. a warm-up brief ending and a new rate starting), older videos keep
+// the rate that applied when they were found, and only newly-discovered videos pick up the new
+// one. Two different shapes of "what was snapshotted," depending on the brand's payout model at
+// discovery time:
+//   flat (r.pay_amount = that brand's base_pay at the time) — a locked dollar figure, unchanged
+//   by anything that happens to the video afterward. Can also be edited by hand per-video (see
+//   the Edit button in the Tracked Content table) for one-off exceptions.
+//   cpm/milestones (r.locked_payout_model) — the whole model gets locked instead of one number,
+//   because unlike flat there's no single bar to clear — the payout is meant to keep growing
+//   with the video for as long as it's tracked, so this recomputes live off the video's current
+//   view_count on every call instead of freezing the first time it's shown.
+function tcAmount(r){
+  const locked = r.locked_payout_model;
+  if(locked && locked.type === 'cpm'){
+    return pmCpmPayout(locked.rate, locked.per, locked.minViews||0, locked.capEnabled?locked.cap:null, Number(r.view_count)||0);
+  }
+  if(locked && locked.type === 'milestones'){
+    return pmMilestonePayout(locked.tiers, locked.afterTop, locked.tailRate, locked.tailPer, Number(r.view_count)||0);
+  }
+  return Number(r.pay_amount ?? r.brands?.base_pay ?? 0);
+}
 // Rows sharing a group_id are the same piece of content crossposted to multiple platforms
 // (set manually — see the Merge picker in the Tracked Content tab) and must be paid ONCE, not
 // once per platform. This is the single place that turns raw tracked_videos rows into "deliverable"
@@ -2420,7 +2445,7 @@ function brandComparisonRows(){
     rows.push({
       id: b.id, name: b.name, color: b.color,
       count: items.length, hitRate: hitCount/items.length*100, views30d, viewsAllTime,
-      avgPayout: hitCount ? bt.contentEarned/hitCount : 0, earned: bt.totalEarned, received: bt.received, outstanding: bt.outstanding,
+      avgPayout: hitCount ? bt.contentEarned/hitCount : 0, earned: bt.totalEarned, earnedCpm: bt.contentEarnedCpm, received: bt.received, outstanding: bt.outstanding,
     });
   });
   let fallbackIdx = 0;
@@ -2430,8 +2455,14 @@ function brandComparisonRows(){
     (byName[dv.brandName] = byName[dv.brandName] || []).push(dv);
   });
   Object.entries(byName).forEach(([name, items]) => {
-    const hitCount = items.filter(dv=>dv.status==='hit').length;
-    const earned = items.filter(dv=>dv.status==='hit').reduce((s,dv)=>s+dv.payAmount,0);
+    const hitItems = items.filter(dv=>dv.status==='hit');
+    const hitCount = hitItems.length;
+    const earned = hitItems.reduce((s,dv)=>s+dv.payAmount,0);
+    // Same CPM/Milestones split as the linked-brand path above — see brandTotals()'s comment.
+    const earnedCpm = hitItems.filter(dv => {
+      const m = dv.rows[0].locked_payout_model;
+      return m && (m.type==='cpm' || m.type==='milestones');
+    }).reduce((s,dv)=>s+dv.payAmount,0);
     const views30d = sumViews30d(r => r.brands?.name === name);
     const viewsAllTime = sumViewsAllTime(r => r.brands?.name === name);
     rows.push({
@@ -2439,7 +2470,7 @@ function brandComparisonRows(){
       count: items.length, hitRate: hitCount/items.length*100, views30d, viewsAllTime,
       // no local brand link means no local payment record can exist for this name, so nothing's
       // ever been marked "received" — outstanding is simply everything earned so far.
-      avgPayout: hitCount ? earned/hitCount : 0, earned, received: 0, outstanding: earned,
+      avgPayout: hitCount ? earned/hitCount : 0, earned, earnedCpm, received: 0, outstanding: earned,
     });
   });
   return rows;
@@ -2481,6 +2512,7 @@ function renderBrandComparisonTable(){
   };
 
   const totalEarned = sorted.reduce((s,r)=>s+r.earned,0);
+  const totalEarnedCpm = sorted.reduce((s,r)=>s+(r.earnedCpm||0),0);
   const totalReceived = sorted.reduce((s,r)=>s+r.received,0);
   const totalOutstanding = sorted.reduce((s,r)=>s+r.outstanding,0);
   const collapsed = localStorage.getItem(BRAND_CMP_COLLAPSED_KEY) === '1';
@@ -2524,7 +2556,7 @@ function renderBrandComparisonTable(){
           <td class="mono" style="text-align:right;">${Math.round(r.views30d).toLocaleString()}</td>
           <td class="mono" style="text-align:right;">${Math.round(r.viewsAllTime).toLocaleString()}</td>
           <td class="mono" style="text-align:right;">${money(r.avgPayout)}</td>
-          <td class="mono fx-green" style="text-align:right;">${money(r.earned)}</td>
+          <td class="mono fx-green" style="text-align:right;">${money(r.earned)}${r.earnedCpm>0?`<div class="mono" style="font-size:10px; color:var(--text); font-weight:400; margin-top:2px;">${money(r.earnedCpm)} CPM</div>`:''}</td>
           <td class="mono" style="text-align:right;">${money(r.received)}</td>
           <td class="mono ${r.outstanding>0?'fx-red':''}" style="text-align:right;">${money(r.outstanding)}</td>
         </tr>`).join('')}
@@ -2534,7 +2566,7 @@ function renderBrandComparisonTable(){
           <td></td>
           <td style="font-weight:700; color:var(--text-dim);">Total</td>
           <td></td><td></td><td></td><td></td><td></td>
-          <td class="mono fx-green" style="text-align:right; font-weight:700;">${money(totalEarned)}</td>
+          <td class="mono fx-green" style="text-align:right; font-weight:700;">${money(totalEarned)}${totalEarnedCpm>0?`<div class="mono" style="font-size:10px; color:var(--text); font-weight:400; margin-top:2px;">${money(totalEarnedCpm)} CPM</div>`:''}</td>
           <td class="mono" style="text-align:right; font-weight:700;">${money(totalReceived)}</td>
           <td class="mono fx-red" style="text-align:right; font-weight:700;">${money(totalOutstanding)}</td>
         </tr>
@@ -3364,12 +3396,19 @@ function renderTrackedContent(){
     </div>
     ${deliverables.length===0 ? emptyState(allDeliverables.length===0 ? 'Nothing tracked yet' : 'No matches', allDeliverables.length===0 ? 'Connect a brand\'s channel and wait for the next scouting run.' : 'Try clearing a filter.') : `
     <div class="table-wrap" style="overflow-x:auto;"><table>
-      <thead><tr><th></th><th></th><th>Brand</th><th style="min-width:150px;">Platform(s) &amp; views</th><th>Title</th><th>Status</th><th>Payout</th><th>Posted</th><th></th></tr></thead>
+      <thead><tr><th></th><th></th><th>Brand</th><th style="min-width:150px;">Platform(s) &amp; views</th><th>Title</th><th>Status</th><th>Payout</th><th>CPM</th><th>Posted</th><th></th></tr></thead>
       <tbody>
         ${deliverables.map(dv => {
           const rep = dv.rows[0];
           const allIds = dv.rows.map(r=>r.id);
           const allSelected = allIds.every(id => MERGE_SELECTED.has(id));
+          // Locked at discovery time (see tcAmount's comment) — a flat-model deliverable shows
+          // its usual locked Payout and nothing in the new CPM column; a cpm/milestones one is
+          // the other way around, since it has no locked dollar figure, only a live-recalculating
+          // one keyed off its current view count.
+          const lockedModel = rep.locked_payout_model;
+          const isDynamic = lockedModel && (lockedModel.type==='cpm' || lockedModel.type==='milestones');
+          const cpmRateLabel = lockedModel?.type==='cpm' ? `$${lockedModel.rate}/${pmFmtCompact(lockedModel.per)}` : '';
           return `<tr data-dv-key="${escapeHtml(String(dv.key))}" ${dv.excluded?'style="opacity:.5;"':''}>
             <td><input type="checkbox" class="checkbox" data-merge-check-ids="${allIds.join(',')}" ${allSelected?'checked':''} title="${dv.grouped ? 'Select this already-merged deliverable to add another platform to it' : 'Select to merge with another platform'}" /></td>
             <td>${dv.thumbnail ? `<img src="${dv.thumbnail}" alt="" style="width:40px; height:40px; object-fit:cover; border-radius:6px; display:block;" />` : `<div style="width:40px; height:40px; border-radius:6px; background:var(--surface);"></div>`}</td>
@@ -3377,7 +3416,8 @@ function renderTrackedContent(){
             <td>${dv.rows.map(platformPill).join('')}</td>
             <td style="max-width:260px;">${renderTitleCell(dv)}</td>
             <td>${dv.excluded ? '<span class="tag tag-neutral">Excluded</span>' : dv.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : dv.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : dv.status==='missing' ? '<span class="tag tag-danger" title="No longer showing up on the platform — deleted, archived, or made private before it hit its requirement">Missing</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
-            <td class="mono">${dv.status==='hit' && !dv.excluded ? money(dv.payAmount) : `<span style="color:var(--text-faint)">${money(dv.payAmount)}${dv.excluded?'':' pending'}</span>`}</td>
+            <td class="mono">${isDynamic ? '<span style="color:var(--text-faint)">—</span>' : (dv.status==='hit' && !dv.excluded ? money(dv.payAmount) : `<span style="color:var(--text-faint)">${money(dv.payAmount)}${dv.excluded?'':' pending'}</span>`)}</td>
+            <td class="mono">${isDynamic ? `<span style="color:var(--low);">${money(dv.payAmount)}</span>${cpmRateLabel?`<div style="font-size:10px; color:var(--text-faint); margin-top:1px;">${cpmRateLabel}</div>`:''}` : '<span style="color:var(--text-faint)">—</span>'}</td>
             <td class="mono">${dv.postedAt ? fmtDate(dv.postedAt.slice(0,10)) : '—'}</td>
             <td style="white-space:nowrap;">
               ${!dv.grouped && rep.url ? `<a href="${rep.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">View</a>` : ''}
@@ -5248,6 +5288,13 @@ function pmCpmPayout(rate, per, minViews, cap, views){
   if(views < minViews) return 0;
   const effectiveViews = cap ? Math.min(views, cap) : views;
   return Math.floor(effectiveViews / per) * rate;
+}
+// Compact scale for CPM rate labels — 10k, 100k, 1M — same shorthand used in the payout-model
+// mockups, so a rate reads as "$10/10k" instead of "$10/10,000" wherever CPM shows up.
+function pmFmtCompact(n){
+  if(n >= 1000000){ const v = n/1000000; return (Number.isInteger(v) ? v : v.toFixed(1)) + 'M'; }
+  if(n >= 1000){ const v = n/1000; return (Number.isInteger(v) ? v : v.toFixed(1)) + 'k'; }
+  return String(n);
 }
 function pmMilestonePayout(tiers, afterTop, tailRate, tailPer, views){
   const sorted = [...tiers].sort((a,b)=>a.views-b.views);
