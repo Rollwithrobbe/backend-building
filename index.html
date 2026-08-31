@@ -3564,6 +3564,16 @@ function renderTrackedContent(){
           const isDynamic = lockedModel && (lockedModel.type==='cpm' || lockedModel.type==='milestones');
           const split = isDynamic ? pmModelPayoutSplit(lockedModel, Number(rep.view_count)||0) : null;
           const cpmRateLabel = lockedModel?.type==='cpm' ? `$${lockedModel.rate}/${pmFmtCompact(lockedModel.per)}` : '';
+          // Base pay — hybrid or plain Flat — is a guaranteed-once-qualified amount, same as Flat
+          // always was: green once dv.status is 'hit', muted-with-"pending" while still tracking.
+          // (Unlike the CPM/milestone performance number, which is intentionally status-agnostic —
+          // it's a live, continuously-recalculating figure keyed off current views, not a
+          // pass/fail the way "hit" is — so that one doesn't get this same gating.)
+          const baseAmount = isDynamic ? split.base : dv.payAmount;
+          const baseDisplay = (isDynamic && split.base === 0) ? '<span style="color:var(--text-faint)">—</span>'
+            : dv.excluded ? `<span style="color:var(--text-faint)">${money(baseAmount)}</span>`
+            : dv.status==='hit' ? `<span style="color:var(--fx-green);">${money(baseAmount)}</span>`
+            : `<span style="color:var(--text-faint)">${money(baseAmount)} pending</span>`;
           return `<tr data-dv-key="${escapeHtml(String(dv.key))}" ${dv.excluded?'style="opacity:.5;"':''}>
             <td><input type="checkbox" class="checkbox" data-merge-check-ids="${allIds.join(',')}" ${allSelected?'checked':''} title="${dv.grouped ? 'Select this already-merged deliverable to add another platform to it' : 'Select to merge with another platform'}" /></td>
             <td>${dv.thumbnail ? `<img src="${dv.thumbnail}" alt="" style="width:40px; height:40px; object-fit:cover; border-radius:6px; display:block;" />` : `<div style="width:40px; height:40px; border-radius:6px; background:var(--surface);"></div>`}</td>
@@ -3571,10 +3581,8 @@ function renderTrackedContent(){
             <td>${dv.rows.map(platformPill).join('')}</td>
             <td style="max-width:260px;">${renderTitleCell(dv)}</td>
             <td>${dv.excluded ? '<span class="tag tag-neutral">Excluded</span>' : dv.status==='hit' ? '<span class="tag tag-good">Hit ✓</span>' : dv.status==='expired' ? '<span class="tag tag-neutral">Expired</span>' : dv.status==='missing' ? '<span class="tag tag-danger" title="No longer showing up on the platform — deleted, archived, or made private before it hit its requirement">Missing</span>' : '<span class="tag tag-warn">Tracking</span>'}</td>
-            <td class="mono">${isDynamic
-              ? (split.base > 0 ? money(split.base) : '<span style="color:var(--text-faint)">—</span>')
-              : (dv.status==='hit' && !dv.excluded ? money(dv.payAmount) : `<span style="color:var(--text-faint)">${money(dv.payAmount)}${dv.excluded?'':' pending'}</span>`)}</td>
-            <td class="mono">${isDynamic ? `<span style="color:${split.performance>0?'var(--low)':'var(--text-faint)'};">${money(split.performance)}</span>${cpmRateLabel?`<div style="font-size:10px; color:var(--text-faint); margin-top:1px;">${cpmRateLabel}</div>`:''}` : '<span style="color:var(--text-faint)">—</span>'}</td>
+            <td class="mono">${baseDisplay}</td>
+            <td class="mono">${isDynamic ? `<span style="color:${split.performance>0?'var(--fx-green)':'var(--text-faint)'};">${money(split.performance)}</span>${cpmRateLabel?`<div style="font-size:10px; color:var(--text-faint); margin-top:1px;">${cpmRateLabel}</div>`:''}` : '<span style="color:var(--text-faint)">—</span>'}</td>
             <td class="mono">${dv.postedAt ? fmtDate(dv.postedAt.slice(0,10)) : '—'}</td>
             <td style="white-space:nowrap;">
               ${!dv.grouped && rep.url ? `<a href="${rep.url}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">View</a>` : ''}
