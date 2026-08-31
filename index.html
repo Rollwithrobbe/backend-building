@@ -1714,10 +1714,10 @@ function brandTotals(brandId){
     // the ordinary base pay sitting right next to a much smaller real CPM number.
     contentEarnedCpm = hitItems.reduce((s,dv) => {
       const rep = dv.repRow || dv.rows[0];
-      const brief = briefForVideo(rep);
-      const m = brief ? brief.payout_model : rep.locked_payout_model;
+      const m = resolveActiveModel(rep);
       if(!m || (m.type!=='cpm' && m.type!=='milestones')) return s;
-      return s + pmModelPayoutSplit(m, Number(rep.view_count)||0).performance;
+      const activeRows = dv.rows.filter(r=>!r.excluded);
+      return s + pmModelPayoutSplitForRows(m, activeRows.length ? activeRows : dv.rows).performance;
     }, 0);
     pending = items.filter(dv=>dv.status==='tracking').reduce((s,dv)=>s+dv.payAmount,0);
     count = items.length;
@@ -1753,16 +1753,25 @@ function briefForVideo(r){
 //      (r.pay_amount, a locked dollar figure) or cpm/milestones (r.locked_payout_model, the whole
 //      model locked instead of one number, recomputed off current view_count but never
 //      reassigned to a different model after discovery).
-function tcAmount(r){
+// Whichever cpm/milestones model actually prices this row right now — a covering Brief first,
+// else the discovery-time lock — or null if neither applies (flat, priced by pay_amount instead,
+// which doesn't need a "model" at all). Shared by tcAmount (single row) and getDeliverables()'s
+// grouped-deliverable path (which needs the model itself, not just one row's payout, to apply
+// platformMode across every platform in the group) so there's one place that decides which model
+// is live for a video, not two copies that could drift apart.
+function resolveActiveModel(r){
   const brief = briefForVideo(r);
-  if(brief) return pmModelPayout(brief.payout_model, Number(r.view_count)||0);
+  if(brief) return brief.payout_model;
   const locked = r.locked_payout_model;
+  if(locked && (locked.type === 'cpm' || locked.type === 'milestones')) return locked;
+  return null;
+}
+function tcAmount(r){
+  const model = resolveActiveModel(r);
   // Routed through pmModelPayout (not pmCpmPayout/pmMilestonePayout directly) so a locked model
   // gets the same optional hybrid base-pay-on-top behavior as a Brief does — one place defines
   // what a cpm/milestones model actually pays, instead of two copies that could drift apart.
-  if(locked && (locked.type === 'cpm' || locked.type === 'milestones')){
-    return pmModelPayout(locked, Number(r.view_count)||0);
-  }
+  if(model) return pmModelPayout(model, Number(r.view_count)||0);
   return Number(r.pay_amount ?? r.brands?.base_pay ?? 0);
 }
 // Rows sharing a group_id are the same piece of content crossposted to multiple platforms
@@ -1812,11 +1821,23 @@ function getDeliverables(){
     // missing its thumbnail (e.g. Instagram mid-API-block) — even though TikTok or YouTube's
     // thumbnail for the same piece of content was sitting right there in the same group.
     const thumbnail = rep.thumbnail_url || rows.map(r=>r.thumbnail_url).find(Boolean) || null;
+    // A crossposted deliverable's cpm/milestones model (if it has one) has its OWN choice of how
+    // to treat multiple platforms — see pmModelPayoutSplitForRows for the two modes. rep is still
+    // used to resolve WHICH model applies (a brief/lock is keyed by brand+date, same across every
+    // platform in the group, so any row would resolve the same one) — it's only the view-count
+    // input to that model that differs between "one platform" (rep alone, the old behavior) and
+    // "every platform" (perPlatform/combined, below). Flat pay (no model at all) doesn't depend on
+    // views either way, so it still just reads straight off rep via tcAmount.
+    const activeModel = resolveActiveModel(rep);
+    const payAmount = activeModel ? (() => {
+      const { base, performance } = pmModelPayoutSplitForRows(activeModel, consider);
+      return base + performance;
+    })() : tcAmount(rep);
     deliverables.push({
       key: gid, rows, grouped: true, repRow: rep,
       brand: rep.brands, brandName: rep.brands?.name || 'Unassigned (automated)',
       excluded: allExcluded, status,
-      payAmount: tcAmount(rep), earnedAt: hitRow ? hitRow.posted_at : null,
+      payAmount, earnedAt: hitRow ? hitRow.posted_at : null,
       postedAt, title: rep.title, thumbnail,
     });
   });
@@ -2578,10 +2599,10 @@ function brandComparisonRows(){
     // brandTotals()'s comment.
     const earnedCpm = hitItems.reduce((s,dv) => {
       const rep = dv.repRow || dv.rows[0];
-      const brief = briefForVideo(rep);
-      const m = brief ? brief.payout_model : rep.locked_payout_model;
+      const m = resolveActiveModel(rep);
       if(!m || (m.type!=='cpm' && m.type!=='milestones')) return s;
-      return s + pmModelPayoutSplit(m, Number(rep.view_count)||0).performance;
+      const activeRows = dv.rows.filter(r=>!r.excluded);
+      return s + pmModelPayoutSplitForRows(m, activeRows.length ? activeRows : dv.rows).performance;
     }, 0);
     const views30d = sumViews30d(r => r.brands?.name === name);
     const viewsAllTime = sumViewsAllTime(r => r.brands?.name === name);
@@ -3622,14 +3643,20 @@ function renderTrackedContent(){
           const allSelected = allIds.every(id => MERGE_SELECTED.has(id));
           // Whichever priced this deliverable — a covering Brief takes priority (same order as
           // tcAmount), falling back to the discovery-time lock. Split into its base and
-          // performance pieces (see pmModelPayoutSplit) so a hybrid model — base pay AND CPM on
-          // the same video — shows correctly across both columns instead of the whole total
-          // landing in one, which read as if CPM had replaced the base pay rather than sitting on
-          // top of it (a real video: $20 base + $30 CPM was showing as "$50 CPM").
-          const activeBrief = briefForVideo(rep);
-          const lockedModel = activeBrief ? activeBrief.payout_model : rep.locked_payout_model;
+          // performance pieces (see pmModelPayoutSplitForRows) so a hybrid model — base pay AND
+          // CPM on the same video — shows correctly across both columns instead of the whole
+          // total landing in one, which read as if CPM had replaced the base pay rather than
+          // sitting on top of it (a real video: $20 base + $30 CPM was showing as "$50 CPM"). Uses
+          // every platform row in the deliverable (not just rep), same "consider" set
+          // getDeliverables() used to compute dv.payAmount, so this matches it exactly regardless
+          // of the model's platformMode (perPlatform sums each platform's own CPM; combined sums
+          // the views first) — showing just rep's own number here would silently disagree with
+          // the real total whenever the deliverable spans more than one platform.
+          const lockedModel = resolveActiveModel(rep);
           const isDynamic = lockedModel && (lockedModel.type==='cpm' || lockedModel.type==='milestones');
-          const split = isDynamic ? pmModelPayoutSplit(lockedModel, Number(rep.view_count)||0) : null;
+          const activeGroupRows = dv.rows.filter(r=>!r.excluded);
+          const considerRows = activeGroupRows.length ? activeGroupRows : dv.rows;
+          const split = isDynamic ? pmModelPayoutSplitForRows(lockedModel, considerRows) : null;
           const cpmRateLabel = lockedModel?.type==='cpm' ? `$${lockedModel.rate}/${pmFmtCompact(lockedModel.per)}` : '';
           // Base pay — hybrid or plain Flat — is a guaranteed-once-qualified amount, same as Flat
           // always was: green once dv.status is 'hit', muted-with-"pending" while still tracking.
@@ -4712,9 +4739,12 @@ function allTrackedBrandIds(){
 function briefModelSummary(m){
   if(!m || !m.type) return '—';
   const baseSuffix = m.basePayEnabled ? ` + ${money(m.basePay)} base` : '';
+  // Only worth calling out when it's the non-default choice — perPlatform (the common case) stays
+  // implicit, same as every other default in this summary line.
+  const platformSuffix = (m.type==='cpm' || m.type==='milestones') && m.platformMode==='combined' ? ' (combined across platforms)' : '';
   if(m.type==='flat') return `${money(m.basePay)} flat`;
-  if(m.type==='cpm') return `${money(m.rate)} / ${pmFmtCompact(m.per)} views${m.capEnabled ? ` (capped at ${pmFmtCompact(m.cap)})` : ''}${baseSuffix}`;
-  if(m.type==='milestones') return `Milestones — ${(m.tiers||[]).length} tier${(m.tiers||[]).length===1?'':'s'}${baseSuffix}`;
+  if(m.type==='cpm') return `${money(m.rate)} / ${pmFmtCompact(m.per)} views${m.capEnabled ? ` (capped at ${pmFmtCompact(m.cap)})` : ''}${baseSuffix}${platformSuffix}`;
+  if(m.type==='milestones') return `Milestones — ${(m.tiers||[]).length} tier${(m.tiers||[]).length===1?'':'s'}${baseSuffix}${platformSuffix}`;
   return '—';
 }
 
@@ -5286,7 +5316,7 @@ async function sendAI(question){
       body: JSON.stringify({
         model: modelToUse,
         max_tokens: 2200,
-        system: "You are a concise assistant embedded in a UGC creator's ops dashboard. Answer using ONLY the JSON data provided about their brands, content, payments, and tasks. Earnings come entirely from the separate automated tracker (Tracked Content, fed by each brand's connected platform accounts) \u2014 Content is pure production-status information now (what's being made, its status) and never affects Earned, Outstanding, or Pending. Content only shows in-progress items \u2014 once something is marked Published it drops out of Content entirely; Tracked Content is where it (and its real view counts) shows up from then on. Payments are logged in bulk against a brand (not per video) \u2014 a brand's Outstanding is its automated-tracked total earned minus everything logged for it in payments. Be direct, use short paragraphs or lists, use $ for money. Each brand may include a 'brief' object (platforms, cadence) \u2014 this is purely a content-quota planner (how many videos per day/week/month, plus its own recurring/trial status), not money; it has nothing to do with what a brand pays. When adding content for a brand that has a brief, use its platforms as the default instead of asking \u2014 content items take a title, platforms, and status only (plus an optional view requirement, kept purely for the user's own reference, not money). A connected brand's rate is set via set_payout_model below (see that action for the full explanation of how it interacts with Briefs) \u2014 you have no direct way to create or edit a Brief itself (a date-ranged payout period); if the user specifically asks for a new dated brief, tell them to use the Briefs tab.\n\nYou can take actions on the user's behalf, and you can batch many actions into a single reply \u2014 this matters because the user may ask for hundreds of videos at once, and they should never have to confirm one at a time for a bulk request like that. End your reply with exactly one fenced block containing a JSON ARRAY of action objects, even if it's only one:\n```action\n[{...}, {...}]\n```\nOnly emit the block when the request is unambiguous \u2014 if you're missing a required detail (which brand, what amount, what title, how many), ask a plain question instead and wait for their answer. Never invent an id; always copy an 'id' field exactly from the data provided. For any delete action, only act after the user has explicitly confirmed in their own words that they want it deleted \u2014 never delete on the first ask.\n\nWhen the user asks you to log a payment, always ask whether a CPM bonus was included in that amount before logging it, unless they already said so unprompted (e.g. \"got $600, $100 of that was a CPM bonus\"). amount is always the total actually received; cpmBonus (optional, default 0) is just the portion of that total that was a bonus, for their own record-keeping \u2014 it does not add on top of amount.\n\nCRITICAL \u2014 never write more than about 15 individual add_content actions by hand in one reply. If a request needs more videos than that, it always fits one of the two batch actions below instead \u2014 use one of them, never enumerate videos one by one for a bulk request. Writing dozens of individual JSON objects risks the response being cut off mid-way, which silently fails the whole thing.\n\n- add_content_batch: many videos that all share the exact same post date (or are all still unposted):\n{\"type\":\"add_content_batch\",\"brandId\":\"<id>\",\"count\":50,\"titlePrefix\":\"PureFi Video\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null}\nThis creates videos titled \"PureFi Video 1\" through \"PureFi Video 50\" (or however many), all otherwise identical.\n\nviewRequirement/viewRequirementWindowDays are optional and purely informational now (not money) \u2014 a personal reference for whether a video hit whatever number the user cares about, on whatever window. No brand-level default for these anymore \u2014 ask the user, or just leave them unset.\n\n- add_content_daily_batch: for any cadence-based bulk request \u2014 'N videos a day for M days', 'backfill 37 videos, 2 a day since a date', 'X per week' converted to a daily count, etc. It spreads a fixed number per day across a date range automatically, incrementing the post date each day:\n{\"type\":\"add_content_daily_batch\",\"brandId\":\"<id>\",\"startDate\":\"YYYY-MM-DD\",\"perDay\":2,\"days\":18,\"platforms\":[\"tiktok\",\"instagram\"],\"status\":\"published\",\"viewRequirement\":300,\"viewRequirementMet\":true,\"viewRequirementWindowDays\":30,\"titlePrefix\":\"Amboras Ongoing\"}\nThis creates perDay*days videos total, dated startDate, startDate+1, startDate+2, ... with perDay videos sharing each date. Only sets a post date on items when status is 'published'. Use this for both backfilling known past history and for scheduling a fixed number of upcoming videos at a cadence.\n\nFor a truly open-ended, indefinite cadence ('ongoing forever until I say stop', no end date at all), a fixed batch isn't the right fit \u2014 tell the user you can add a bounded batch now (ask for a count or an end date), and mention they can also set up a recurring brief directly on the brand's edit screen for indefinite daily quotas, since that's built for exactly that case and isn't something you can configure yourself.\n\nIf a request needs a brand that doesn't exist yet AND a batch of content for it in the same reply, chain them: give the add_brand action a \"ref\" (any short label you pick), then use \"brandRef\" instead of \"brandId\" in the actions that follow it in the same array:\n[{\"type\":\"add_brand\",\"ref\":\"b1\",\"name\":\"New Brand\"},{\"type\":\"add_content_batch\",\"brandRef\":\"b1\",\"count\":20,\"titlePrefix\":\"New Brand Video\",\"platforms\":[\"tiktok\"],\"status\":\"idea\"}]\n\nOther action types and their exact shape:\n- Log a payment received for a brand: {\"type\":\"log_payment\",\"brandId\":\"<id>\",\"amount\":120,\"cpmBonus\":0,\"note\":\"optional\"}\n- Add a new brand: {\"type\":\"add_brand\",\"name\":\"Brand name\",\"status\":\"active\",\"notes\":\"optional\",\"ref\":\"optional label\"}\n- Add a single content item: {\"type\":\"add_content\",\"brandId\":\"<id>\",\"title\":\"Video title\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"postDate\":\"YYYY-MM-DD or omit\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null} (platforms are which of tiktok/instagram/youtube/facebook are active for this deliverable; no pay fields — Content is pure production-status info, money comes entirely from the automated tracker)\n- Change a content item's status: {\"type\":\"set_status\",\"id\":\"<content id>\",\"status\":\"published\"}\n- Mark a content item's view requirement as hit or not: {\"type\":\"set_requirement_met\",\"id\":\"<content id>\",\"met\":true}\n- Add a task: {\"type\":\"add_task\",\"title\":\"Task title\",\"brandId\":\"<id or null>\",\"priority\":\"high\",\"daily\":false,\"requiresTimer\":false,\"timerMinutes\":10} (timerMinutes only matters when requiresTimer is true \u2014 default 10, but a fresh account warm-up often needs 30\u201345)\n- Toggle a task done/undone (for daily tasks this only affects today): {\"type\":\"toggle_task\",\"id\":\"<task id>\"}\n- Delete a content item, brand, or task (only after explicit confirmation): {\"type\":\"delete_content\",\"id\":\"<id>\"} or {\"type\":\"delete_brand\",\"id\":\"<id>\"} or {\"type\":\"delete_task\",\"id\":\"<id>\"}\n- Set a brand's automated-tracking payout model — only possible when that brand's connectedForTracking is true (if it's false, tell the user to connect the brand for automated tracking first from its edit screen, don't emit this action): {\"type\":\"set_payout_model\",\"brandId\":\"<id>\",\"model\":{...}}, where model is exactly one of:\n  flat (today's default — one rate, paid once a video crosses a view count): {\"type\":\"flat\",\"basePay\":20,\"viewRequirement\":1000}\n  cpm (a rate per view, paid in whole blocks, optionally capped): {\"type\":\"cpm\",\"rate\":10,\"per\":10000,\"minViews\":0,\"capEnabled\":false,\"cap\":null,\"basePayEnabled\":false,\"basePay\":0} — capEnabled true + cap:1000000 means it stops paying anything above 1,000,000 views; basePayEnabled true + basePay:20 adds a guaranteed $20 on every video regardless of views, on top of the CPM\n  milestones (a bonus ladder — payout is whichever tier's threshold was most recently crossed, not the sum of every tier passed): {\"type\":\"milestones\",\"tiers\":[{\"views\":100000,\"pay\":150},{\"views\":500000,\"pay\":750}],\"afterTop\":\"flat\",\"tailRate\":0,\"tailPer\":100000,\"basePayEnabled\":false,\"basePay\":0} — afterTop \"flat\" caps forever at the last tier's payout; \"cpm\" keeps earning tailRate per tailPer views above it; basePayEnabled/basePay work the same as on cpm, above\n  This is real, not a preview — it sets the brand's live rate, which any video discovered by the automated scout from then on locks in permanently (a video that's already being tracked keeps whatever rate it was found under, unless a Brief covers its post date — Briefs override this entirely and can retroactively reprice videos already tracked; you cannot create or edit a Brief, only tell the user to do it from the Briefs tab). Say plainly which of those applies when confirming a change: for a brand using Briefs, none of this action's effect applies at all as long as a Brief is active for the dates in question.\n\nstatus must be one of: idea, scripting, filming, editing, ready, submitted, revision, approved, scheduled, published. \"scheduled\" means the user has a plan for when it will go out but hasn\u2019t posted it yet \u2014 use it, and set \"scheduledDate\" (YYYY-MM-DD) on the content item, whenever the user is batching/planning ahead rather than posting immediately (e.g. \"I filmed the next 10 for Amboras, starting the 21st\"). scheduledDate is the plan, separate from the real post date which only gets set once something is actually Published \u2014 never set both to the same thing unless it really did go live that day.\n\nIf the data can't answer a question, say so plainly.",
+        system: "You are a concise assistant embedded in a UGC creator's ops dashboard. Answer using ONLY the JSON data provided about their brands, content, payments, and tasks. Earnings come entirely from the separate automated tracker (Tracked Content, fed by each brand's connected platform accounts) \u2014 Content is pure production-status information now (what's being made, its status) and never affects Earned, Outstanding, or Pending. Content only shows in-progress items \u2014 once something is marked Published it drops out of Content entirely; Tracked Content is where it (and its real view counts) shows up from then on. Payments are logged in bulk against a brand (not per video) \u2014 a brand's Outstanding is its automated-tracked total earned minus everything logged for it in payments. Be direct, use short paragraphs or lists, use $ for money. Each brand may include a 'brief' object (platforms, cadence) \u2014 this is purely a content-quota planner (how many videos per day/week/month, plus its own recurring/trial status), not money; it has nothing to do with what a brand pays. When adding content for a brand that has a brief, use its platforms as the default instead of asking \u2014 content items take a title, platforms, and status only (plus an optional view requirement, kept purely for the user's own reference, not money). A connected brand's rate is set via set_payout_model below (see that action for the full explanation of how it interacts with Briefs) \u2014 you have no direct way to create or edit a Brief itself (a date-ranged payout period); if the user specifically asks for a new dated brief, tell them to use the Briefs tab.\n\nYou can take actions on the user's behalf, and you can batch many actions into a single reply \u2014 this matters because the user may ask for hundreds of videos at once, and they should never have to confirm one at a time for a bulk request like that. End your reply with exactly one fenced block containing a JSON ARRAY of action objects, even if it's only one:\n```action\n[{...}, {...}]\n```\nOnly emit the block when the request is unambiguous \u2014 if you're missing a required detail (which brand, what amount, what title, how many), ask a plain question instead and wait for their answer. Never invent an id; always copy an 'id' field exactly from the data provided. For any delete action, only act after the user has explicitly confirmed in their own words that they want it deleted \u2014 never delete on the first ask.\n\nWhen the user asks you to log a payment, always ask whether a CPM bonus was included in that amount before logging it, unless they already said so unprompted (e.g. \"got $600, $100 of that was a CPM bonus\"). amount is always the total actually received; cpmBonus (optional, default 0) is just the portion of that total that was a bonus, for their own record-keeping \u2014 it does not add on top of amount.\n\nCRITICAL \u2014 never write more than about 15 individual add_content actions by hand in one reply. If a request needs more videos than that, it always fits one of the two batch actions below instead \u2014 use one of them, never enumerate videos one by one for a bulk request. Writing dozens of individual JSON objects risks the response being cut off mid-way, which silently fails the whole thing.\n\n- add_content_batch: many videos that all share the exact same post date (or are all still unposted):\n{\"type\":\"add_content_batch\",\"brandId\":\"<id>\",\"count\":50,\"titlePrefix\":\"PureFi Video\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null}\nThis creates videos titled \"PureFi Video 1\" through \"PureFi Video 50\" (or however many), all otherwise identical.\n\nviewRequirement/viewRequirementWindowDays are optional and purely informational now (not money) \u2014 a personal reference for whether a video hit whatever number the user cares about, on whatever window. No brand-level default for these anymore \u2014 ask the user, or just leave them unset.\n\n- add_content_daily_batch: for any cadence-based bulk request \u2014 'N videos a day for M days', 'backfill 37 videos, 2 a day since a date', 'X per week' converted to a daily count, etc. It spreads a fixed number per day across a date range automatically, incrementing the post date each day:\n{\"type\":\"add_content_daily_batch\",\"brandId\":\"<id>\",\"startDate\":\"YYYY-MM-DD\",\"perDay\":2,\"days\":18,\"platforms\":[\"tiktok\",\"instagram\"],\"status\":\"published\",\"viewRequirement\":300,\"viewRequirementMet\":true,\"viewRequirementWindowDays\":30,\"titlePrefix\":\"Amboras Ongoing\"}\nThis creates perDay*days videos total, dated startDate, startDate+1, startDate+2, ... with perDay videos sharing each date. Only sets a post date on items when status is 'published'. Use this for both backfilling known past history and for scheduling a fixed number of upcoming videos at a cadence.\n\nFor a truly open-ended, indefinite cadence ('ongoing forever until I say stop', no end date at all), a fixed batch isn't the right fit \u2014 tell the user you can add a bounded batch now (ask for a count or an end date), and mention they can also set up a recurring brief directly on the brand's edit screen for indefinite daily quotas, since that's built for exactly that case and isn't something you can configure yourself.\n\nIf a request needs a brand that doesn't exist yet AND a batch of content for it in the same reply, chain them: give the add_brand action a \"ref\" (any short label you pick), then use \"brandRef\" instead of \"brandId\" in the actions that follow it in the same array:\n[{\"type\":\"add_brand\",\"ref\":\"b1\",\"name\":\"New Brand\"},{\"type\":\"add_content_batch\",\"brandRef\":\"b1\",\"count\":20,\"titlePrefix\":\"New Brand Video\",\"platforms\":[\"tiktok\"],\"status\":\"idea\"}]\n\nOther action types and their exact shape:\n- Log a payment received for a brand: {\"type\":\"log_payment\",\"brandId\":\"<id>\",\"amount\":120,\"cpmBonus\":0,\"note\":\"optional\"}\n- Add a new brand: {\"type\":\"add_brand\",\"name\":\"Brand name\",\"status\":\"active\",\"notes\":\"optional\",\"ref\":\"optional label\"}\n- Add a single content item: {\"type\":\"add_content\",\"brandId\":\"<id>\",\"title\":\"Video title\",\"platforms\":[\"tiktok\",\"instagram\",\"youtube\"],\"status\":\"idea\",\"postDate\":\"YYYY-MM-DD or omit\",\"viewRequirement\":null,\"viewRequirementWindowDays\":null} (platforms are which of tiktok/instagram/youtube/facebook are active for this deliverable; no pay fields — Content is pure production-status info, money comes entirely from the automated tracker)\n- Change a content item's status: {\"type\":\"set_status\",\"id\":\"<content id>\",\"status\":\"published\"}\n- Mark a content item's view requirement as hit or not: {\"type\":\"set_requirement_met\",\"id\":\"<content id>\",\"met\":true}\n- Add a task: {\"type\":\"add_task\",\"title\":\"Task title\",\"brandId\":\"<id or null>\",\"priority\":\"high\",\"daily\":false,\"requiresTimer\":false,\"timerMinutes\":10} (timerMinutes only matters when requiresTimer is true \u2014 default 10, but a fresh account warm-up often needs 30\u201345)\n- Toggle a task done/undone (for daily tasks this only affects today): {\"type\":\"toggle_task\",\"id\":\"<task id>\"}\n- Delete a content item, brand, or task (only after explicit confirmation): {\"type\":\"delete_content\",\"id\":\"<id>\"} or {\"type\":\"delete_brand\",\"id\":\"<id>\"} or {\"type\":\"delete_task\",\"id\":\"<id>\"}\n- Set a brand's automated-tracking payout model — only possible when that brand's connectedForTracking is true (if it's false, tell the user to connect the brand for automated tracking first from its edit screen, don't emit this action): {\"type\":\"set_payout_model\",\"brandId\":\"<id>\",\"model\":{...}}, where model is exactly one of:\n  flat (today's default — one rate, paid once a video crosses a view count): {\"type\":\"flat\",\"basePay\":20,\"viewRequirement\":1000}\n  cpm (a rate per view, paid in whole blocks, optionally capped): {\"type\":\"cpm\",\"rate\":10,\"per\":10000,\"minViews\":0,\"capEnabled\":false,\"cap\":null,\"basePayEnabled\":false,\"basePay\":0,\"platformMode\":\"perPlatform\"} — capEnabled true + cap:1000000 means it stops paying anything above 1,000,000 views; basePayEnabled true + basePay:20 adds a guaranteed $20 on every video regardless of views, on top of the CPM; platformMode governs a video crossposted to more than one platform — \"perPlatform\" (the default — omit it or set it explicitly, either is fine) prices each platform's own views separately and adds the results (39k on Instagram + 1k on TikTok pays whatever 39k alone earns, plus whatever 1k alone earns), \"combined\" adds every platform's views together first and prices that one number once (the same video priced as a single 40k view count)\n  milestones (a bonus ladder — payout is whichever tier's threshold was most recently crossed, not the sum of every tier passed): {\"type\":\"milestones\",\"tiers\":[{\"views\":100000,\"pay\":150},{\"views\":500000,\"pay\":750}],\"afterTop\":\"flat\",\"tailRate\":0,\"tailPer\":100000,\"basePayEnabled\":false,\"basePay\":0,\"platformMode\":\"perPlatform\"} — afterTop \"flat\" caps forever at the last tier's payout; \"cpm\" keeps earning tailRate per tailPer views above it; basePayEnabled/basePay/platformMode all work the same as on cpm, above\n  This is real, not a preview — it sets the brand's live rate, which any video discovered by the automated scout from then on locks in permanently (a video that's already being tracked keeps whatever rate it was found under, unless a Brief covers its post date — Briefs override this entirely and can retroactively reprice videos already tracked; you cannot create or edit a Brief, only tell the user to do it from the Briefs tab). Say plainly which of those applies when confirming a change: for a brand using Briefs, none of this action's effect applies at all as long as a Brief is active for the dates in question.\n\nstatus must be one of: idea, scripting, filming, editing, ready, submitted, revision, approved, scheduled, published. \"scheduled\" means the user has a plan for when it will go out but hasn\u2019t posted it yet \u2014 use it, and set \"scheduledDate\" (YYYY-MM-DD) on the content item, whenever the user is batching/planning ahead rather than posting immediately (e.g. \"I filmed the next 10 for Amboras, starting the 21st\"). scheduledDate is the plan, separate from the real post date which only gets set once something is actually Published \u2014 never set both to the same thing unless it really did go live that day.\n\nIf the data can't answer a question, say so plainly.",
         messages: messages
       })
     });
@@ -5544,22 +5574,29 @@ function pmNormalizeAiModel(raw){
   if(raw.type === 'cpm'){
     const capEnabled = !!raw.capEnabled && Number(raw.cap) > 0;
     const basePayEnabled = !!raw.basePayEnabled && Number(raw.basePay) > 0;
-    return { type:'cpm', rate: Number(raw.rate)||0, per: Math.max(1,Number(raw.per)||1000), minViews: Number(raw.minViews)||0, capEnabled, cap: capEnabled ? Number(raw.cap) : null, basePayEnabled, basePay: basePayEnabled ? Number(raw.basePay) : 0 };
+    const platformMode = raw.platformMode === 'combined' ? 'combined' : 'perPlatform';
+    return { type:'cpm', rate: Number(raw.rate)||0, per: Math.max(1,Number(raw.per)||1000), minViews: Number(raw.minViews)||0, capEnabled, cap: capEnabled ? Number(raw.cap) : null, basePayEnabled, basePay: basePayEnabled ? Number(raw.basePay) : 0, platformMode };
   }
   if(raw.type === 'milestones'){
     const tiers = Array.isArray(raw.tiers) ? raw.tiers.map(t=>({views:Number(t.views)||0, pay:Number(t.pay)||0})).filter(t=>t.views>0).sort((a,b)=>a.views-b.views) : [];
     if(!tiers.length) return null;
     const afterTop = raw.afterTop === 'cpm' ? 'cpm' : 'flat';
     const basePayEnabled = !!raw.basePayEnabled && Number(raw.basePay) > 0;
-    return { type:'milestones', tiers, afterTop, tailRate: Number(raw.tailRate)||0, tailPer: Math.max(1,Number(raw.tailPer)||100000), basePayEnabled, basePay: basePayEnabled ? Number(raw.basePay) : 0 };
+    const platformMode = raw.platformMode === 'combined' ? 'combined' : 'perPlatform';
+    return { type:'milestones', tiers, afterTop, tailRate: Number(raw.tailRate)||0, tailPer: Math.max(1,Number(raw.tailPer)||100000), basePayEnabled, basePay: basePayEnabled ? Number(raw.basePay) : 0, platformMode };
   }
   return null;
 }
 function pmDescribeModel(brandName, model){
   const baseSuffix = model.basePayEnabled ? `, plus a guaranteed ${money(model.basePay)} base pay per video` : '';
+  // Only worth spelling out for a model that actually depends on views — a crossposted video's
+  // platform split never comes up for Flat, which pays the same fixed amount either way.
+  const platformSuffix = (model.type==='cpm' || model.type==='milestones')
+    ? (model.platformMode==='combined' ? ' Platforms crossposted together are combined into one view count before pricing.' : ' Each platform a video is crossposted to is priced separately and added up.')
+    : '';
   if(model.type==='flat') return `Set ${brandName} to a flat rate: ${money(model.basePay)} per video${model.viewRequirement?`, once it crosses ${model.viewRequirement.toLocaleString()} views`:''}.`;
-  if(model.type==='cpm') return `Set ${brandName} to $${model.rate} per ${model.per.toLocaleString()} views${model.capEnabled?`, capped at ${model.cap.toLocaleString()} views`:', uncapped'}${baseSuffix}.`;
-  return `Set ${brandName} to milestone tiers: ${model.tiers.map(t=>`${t.views.toLocaleString()} views → ${money(t.pay)}`).join(', ')}${model.afterTop==='cpm'?`, plus $${model.tailRate} per ${model.tailPer.toLocaleString()} views above the top tier`:''}${baseSuffix}.`;
+  if(model.type==='cpm') return `Set ${brandName} to $${model.rate} per ${model.per.toLocaleString()} views${model.capEnabled?`, capped at ${model.cap.toLocaleString()} views`:', uncapped'}${baseSuffix}.${platformSuffix}`;
+  return `Set ${brandName} to milestone tiers: ${model.tiers.map(t=>`${t.views.toLocaleString()} views → ${money(t.pay)}`).join(', ')}${model.afterTop==='cpm'?`, plus $${model.tailRate} per ${model.tailPer.toLocaleString()} views above the top tier`:''}${baseSuffix}.${platformSuffix}`;
 }
 // Writes straight to Supabase (fire-and-forget, same pattern as syncToSupabase/upsertRows) —
 // payout_model lives only in the cloud brands row (MODAL_BRAND_CONN when a modal has it open),
@@ -5891,6 +5928,33 @@ function pmModelPayout(model, views){
   const { base, performance } = pmModelPayoutSplit(model, views);
   return base + performance;
 }
+// Same split as pmModelPayoutSplit, but for a crossposted deliverable's whole set of platform
+// rows rather than one view-count number — this is where model.platformMode actually matters:
+//   'perPlatform' (default): each platform's own view count is run through the model SEPARATELY
+//     and the results added — a video at 39k views on Instagram and 1k on TikTok earns whatever
+//     39k alone earns PLUS whatever 1k alone earns, exactly as if they were two independent
+//     videos being paid the same rate. This is the everyday case: a CPM/milestone deal is a rate
+//     per view wherever those views happen, not a single combined number.
+//   'combined': every platform's views are summed into ONE number first, then the model runs
+//     once on that total — three platforms at ~33.3k each (100k combined) pays the 100k tier/rate
+//     as one deliverable, not three separate ~33k calculations. Some brand deals are actually
+//     structured this way — hence a per-brief toggle rather than picking one behavior for good.
+// Base pay is unaffected by either mode either way — it's paid once for delivering the video at
+// all, never once per platform, so it's computed separately here and never fed through the
+// per-row loop (which would otherwise multiply it by however many platforms the video is on).
+function pmModelPayoutSplitForRows(model, rows){
+  if(!model) return { base:0, performance:0 };
+  if(model.type === 'flat') return { base: Number(model.basePay)||0, performance:0 };
+  const base = model.basePayEnabled ? (Number(model.basePay)||0) : 0;
+  let performance;
+  if(model.platformMode === 'combined'){
+    const totalViews = rows.reduce((s,r)=>s+(Number(r.view_count)||0),0);
+    performance = pmModelPayoutSplit(model, totalViews).performance;
+  } else {
+    performance = rows.reduce((s,r)=>s + pmModelPayoutSplit(model, Number(r.view_count)||0).performance, 0);
+  }
+  return { base, performance };
+}
 // Samples a payout function densely across a views domain and draws it as a polyline — a CPM
 // function samples into a straight (now floored-to-steps) line, a milestone function samples
 // into a staircase, as long as the exact boundary x-values are passed in extraX so the jumps
@@ -5966,8 +6030,8 @@ function buildPayoutModelEditor(conn, onChange, opts){
   const configured = (conn && conn.payout_model && conn.payout_model.type) ? conn.payout_model : null;
   const cache = {
     flat: { type:'flat', basePay: Number(conn?.base_pay)||0, viewRequirement: Number(conn?.view_requirement)||0 },
-    cpm: (configured && configured.type==='cpm') ? { basePayEnabled:false, basePay:0, ...configured } : { type:'cpm', rate:5, per:1000, minViews:0, capEnabled:false, cap:1000000, basePayEnabled:false, basePay:0 },
-    milestones: (configured && configured.type==='milestones') ? { basePayEnabled:false, basePay:0, ...configured, tiers: configured.tiers.map(t=>({...t})) } : { type:'milestones', tiers:[{views:100000, pay:100}], afterTop:'flat', tailRate:100, tailPer:100000, basePayEnabled:false, basePay:0 },
+    cpm: (configured && configured.type==='cpm') ? { basePayEnabled:false, basePay:0, platformMode:'perPlatform', ...configured } : { type:'cpm', rate:5, per:1000, minViews:0, capEnabled:false, cap:1000000, basePayEnabled:false, basePay:0, platformMode:'perPlatform' },
+    milestones: (configured && configured.type==='milestones') ? { basePayEnabled:false, basePay:0, platformMode:'perPlatform', ...configured, tiers: configured.tiers.map(t=>({...t})) } : { type:'milestones', tiers:[{views:100000, pay:100}], afterTop:'flat', tailRate:100, tailPer:100000, basePayEnabled:false, basePay:0, platformMode:'perPlatform' },
   };
   let model = cache[configured ? configured.type : 'flat'];
   const root = document.createElement('div');
@@ -6029,6 +6093,12 @@ function buildPayoutModelEditor(conn, onChange, opts){
         <div class="field"><label>Stop paying above (views)</label><input type="number" class="pm-cap" value="${model.cap||1000000}" min="1" step="10000"></div>
         <div></div>
       </div>
+      <div class="field" style="margin-top:12px;"><label>When a video is posted to more than one platform</label></div>
+      <div class="pm-toggle">
+        <button type="button" class="pm-toggle-btn ${model.platformMode!=='combined'?'active':''}" data-platform-mode="perPlatform">Per platform</button>
+        <button type="button" class="pm-toggle-btn ${model.platformMode==='combined'?'active':''}" data-platform-mode="combined">Combined across platforms</button>
+      </div>
+      <div class="hint" style="margin-top:4px;">Per platform: each platform's own views run through this rate separately and add up — 39k on Instagram plus 1k on TikTok pays whatever 39k earns, plus whatever 1k earns. Combined: every platform's views are added together first, then priced once — the same video would be priced as one 40k view count instead.</div>
       <div class="pm-chart-wrap"></div>
       <table class="pm-demo-tbl"><thead><tr><th>Views</th><th>Payout</th></tr></thead><tbody></tbody></table>
     `;
@@ -6044,6 +6114,14 @@ function buildPayoutModelEditor(conn, onChange, opts){
     }
     basePayToggle.addEventListener('change', () => { model.basePayEnabled = basePayToggle.checked; basePayField.style.display = model.basePayEnabled ? '' : 'none'; recompute(); });
     basePayI.addEventListener('input', () => { model.basePay = Number(basePayI.value)||0; recompute(); });
+    // platformMode doesn't change what this preview chart/table show (both only ever model one
+    // hypothetical view-count stream — the split across real platforms only shows up once this
+    // model is actually applied to a crossposted deliverable), so no recompute() call needed here.
+    panel.querySelectorAll('[data-platform-mode]').forEach(btn => btn.addEventListener('click', () => {
+      model.platformMode = btn.dataset.platformMode;
+      emit();
+      panel.querySelectorAll('[data-platform-mode]').forEach(b => b.classList.toggle('active', b.dataset.platformMode===model.platformMode));
+    }));
     [rateI, perI, minI, capI].forEach(el => el.addEventListener('input', () => {
       model.rate = Number(rateI.value)||0; model.per = Math.max(1,Number(perI.value)||1);
       model.minViews = Number(minI.value)||0; model.cap = Math.max(1,Number(capI.value)||1);
@@ -6086,12 +6164,23 @@ function buildPayoutModelEditor(conn, onChange, opts){
         <div class="field"><label>Tail rate ($)</label><input type="number" class="pm-tail-rate" value="${model.tailRate||100}" min="0" step="1"></div>
         <div class="field"><label>Per (views, above top tier)</label><input type="number" class="pm-tail-per" value="${model.tailPer||100000}" min="1" step="1000"></div>
       </div>
+      <div class="field" style="margin-top:12px;"><label>When a video is posted to more than one platform</label></div>
+      <div class="pm-toggle">
+        <button type="button" class="pm-toggle-btn ${model.platformMode!=='combined'?'active':''}" data-platform-mode="perPlatform">Per platform</button>
+        <button type="button" class="pm-toggle-btn ${model.platformMode==='combined'?'active':''}" data-platform-mode="combined">Combined across platforms</button>
+      </div>
+      <div class="hint" style="margin-top:4px;">Per platform: each platform's own views cross tiers separately and the payouts add up — 39k on Instagram plus 1k on TikTok pays whatever tier 39k reaches, plus whatever tier 1k reaches. Combined: every platform's views are added together first, then priced once against the tiers — the same video would be priced as one 40k view count instead.</div>
       <div class="pm-chart-wrap"></div>
       <table class="pm-demo-tbl"><thead><tr><th>Views</th><th>Payout</th></tr></thead><tbody></tbody></table>
     `;
     const tierEditor = panel.querySelector('.pm-tier-editor');
     const tailField = panel.querySelector('.pm-tail-field');
     const tailRateI = panel.querySelector('.pm-tail-rate'), tailPerI = panel.querySelector('.pm-tail-per');
+    panel.querySelectorAll('[data-platform-mode]').forEach(btn => btn.addEventListener('click', () => {
+      model.platformMode = btn.dataset.platformMode;
+      emit();
+      panel.querySelectorAll('[data-platform-mode]').forEach(b => b.classList.toggle('active', b.dataset.platformMode===model.platformMode));
+    }));
     const basePayToggle = panel.querySelector('.pm-basepay-toggle'), basePayField = panel.querySelector('.pm-basepay-field'), basePayI = panel.querySelector('.pm-basepay');
     basePayToggle.addEventListener('change', () => { model.basePayEnabled = basePayToggle.checked; basePayField.style.display = model.basePayEnabled ? '' : 'none'; recompute(); });
     basePayI.addEventListener('input', () => { model.basePay = Number(basePayI.value)||0; recompute(); });
