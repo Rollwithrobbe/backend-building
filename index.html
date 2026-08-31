@@ -613,7 +613,11 @@
   .fx-red{ color:var(--fx-red) !important; }
   .delta{ font-size:12px; font-weight:600; display:inline-flex; align-items:center; gap:3px; }
 
-  .range-pills{ display:flex; gap:6px; margin-bottom:18px; flex-wrap:wrap; }
+  .range-pills{ display:flex; gap:6px; margin-bottom:18px; flex-wrap:wrap; align-items:center; }
+  .range-pills select{
+    background:var(--surface); border:1px solid var(--border); color:var(--text); border-radius:var(--radius-sm);
+    padding:7px 10px; font-family:inherit; font-size:13px;
+  }
   .range-pill{ font-size:12px; font-weight:600; padding:6px 13px; border-radius:20px; border:1px solid var(--border); background:var(--surface); color:var(--text-dim); cursor:pointer; font-family:inherit; transition:transform 100ms ease-out, border-color 150ms ease; }
   .range-pill:hover{ border-color:var(--accent-dim); }
   .range-pill:active{ transform:scale(0.95); }
@@ -3692,7 +3696,7 @@ function emptyState(title, sub){
    curve depend on the EXPERIMENTAL view_snapshots table having 2+ days of history for a video —
    gracefully absent (not broken) until then, same as the brand-breakdown sparkline already is. */
 let CA_STATE = { range:'30', nearMiss:false, trending:false, brand:'all', dateGroup:'overall', sort:'top', tableExpanded:false };
-const CA_RANGES = [ {id:'30',label:'30d'}, {id:'60',label:'60d'}, {id:'90',label:'90d'}, {id:'9999',label:'All time'} ];
+const CA_RANGES = [ {id:'7',label:'7d'}, {id:'30',label:'30d'}, {id:'60',label:'60d'}, {id:'90',label:'90d'}, {id:'9999',label:'All time'} ];
 
 // Flat solid-fill glyphs (no stroke/outline, no gradient shading) replacing 🔥/🎯 — those render
 // as full-color glossy OS emoji, not a clean flat icon. iconTarget uses currentColor (it's meant
@@ -3852,7 +3856,16 @@ function caCumulativeSeries(){
   const platforms = ['tiktok','instagram','youtube'];
   const empty = { days: [], byPlatform: {} };
   if(!TRACKED_CONTENT_DATA) return empty;
-  const rows = TRACKED_CONTENT_DATA.filter(r => !r.excluded && r.posted_at && platforms.includes(r.platform));
+  // Same brandLocalId resolution caAllDeliverables() uses (linked brand's local id, else a
+  // 'name:'+brandName fallback key) — reads raw tracked_videos rows directly rather than going
+  // through getDeliverables()/caAllDeliverables(), so it needs its own copy of that resolution to
+  // filter by CA_STATE.brand consistently with the rest of the page. A platform this brand
+  // doesn't use just never gets an entry in byPlatform below (caChartCardHtml already only draws
+  // platforms with real data), which is what makes it "just show zero" rather than error.
+  const bySupabaseId = new Map(DATA.brands.filter(b=>b.supabaseBrandId).map(b=>[b.supabaseBrandId, b]));
+  const rowBrandLocalId = r => { const local = bySupabaseId.get(r.brand_id); return local ? local.id : 'name:'+(r.brands?.name||'Unknown'); };
+  const rows = TRACKED_CONTENT_DATA.filter(r => !r.excluded && r.posted_at && platforms.includes(r.platform)
+    && (CA_STATE.brand==='all' || rowBrandLocalId(r)===CA_STATE.brand));
   if(rows.length === 0) return empty;
 
   const DAY = 86400000;
@@ -3909,13 +3922,17 @@ function caVideoDailySeries(trackedVideoId){
 function caRangeCutoff(){ return CA_STATE.range==='9999' ? 0 : Date.now() - Number(CA_STATE.range)*86400000; }
 function caPassesPageFilters(dv, velocityByBrand){
   if(dv.postedAt && new Date(dv.postedAt).getTime() < caRangeCutoff()) return false;
+  // Brand lives here (not just on the table below) so the summary cards, Breaking Out, and the
+  // views-over-time chart all re-scope to one brand too — used to only filter the Content table,
+  // which meant "switch to Amboras" looked like it worked but the cards above still silently
+  // reflected every brand combined.
+  if(CA_STATE.brand !== 'all' && dv.brandLocalId !== CA_STATE.brand) return false;
   if(CA_STATE.nearMiss && !caIsNearMiss(dv)) return false;
   if(CA_STATE.trending && !caIsTrending(dv, velocityByBrand)) return false;
   return true;
 }
 function caPassesTableFilters(dv, velocityByBrand){
   if(!caPassesPageFilters(dv, velocityByBrand)) return false;
-  if(CA_STATE.brand !== 'all' && dv.brandLocalId !== CA_STATE.brand) return false;
   if(CA_STATE.dateGroup !== 'overall'){
     const days = CA_STATE.dateGroup === 'weekly' ? 7 : 30;
     if(!dv.postedAt || (Date.now() - new Date(dv.postedAt).getTime())/86400000 > days) return false;
@@ -3934,6 +3951,13 @@ function renderContentAnalytics(){
   const allDv = caAllDeliverables();
   const velocityByBrand = caBrandVelocityMap(allDv);
   const rows = allDv.filter(dv => caPassesPageFilters(dv, velocityByBrand));
+  // Computed once here, off the FULL unfiltered set — so switching the brand filter doesn't make
+  // its own dropdown shrink to just the currently-selected option — then reused by both this
+  // select and the Content table below (which used to have its own separate, easy-to-get-out-of-
+  // sync copy of the exact same dropdown).
+  const brandOptions = [...new Map(allDv.map(dv => [dv.brandLocalId, dv])).values()]
+    .map(dv => ({ key: dv.brandLocalId, label: dv.brandName }))
+    .sort((a,b)=>a.label.localeCompare(b.label));
 
   const totalV = rows.reduce((s,dv)=>s+dv.views,0);
   const hitCount = rows.filter(dv=>dv.status==='hit').length;
@@ -3949,6 +3973,10 @@ function renderContentAnalytics(){
 
     <div class="range-pills">
       ${CA_RANGES.map(r=>`<button class="range-pill ${CA_STATE.range===r.id?'active':''}" data-ca-range="${r.id}">${r.label}</button>`).join('')}
+      <select id="caBrandFilterTop">
+        <option value="all">All brands</option>
+        ${brandOptions.map(b=>`<option value="${escapeHtml(b.key)}" ${CA_STATE.brand===b.key?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
+      </select>
       <span style="flex:1;"></span>
       <button class="ca-chip ${CA_STATE.nearMiss?'active':''}" id="caChipNearMiss">${iconTarget(12)} Near miss</button>
       <button class="ca-chip ${CA_STATE.trending?'active':''}" id="caChipTrending">${iconFlame(12)} Trending</button>
@@ -3964,7 +3992,7 @@ function renderContentAnalytics(){
     <div class="section-title" style="margin-top:0; display:flex; align-items:center; gap:8px;">${iconFlame(14)}Breaking out right now</div>
     ${caBreakoutRowHtml(rows, velocityByBrand)}
 
-    ${caChartCardHtml()}
+    ${caChartCardHtml(allDv)}
 
     ${caTableSectionHtml(allDv, velocityByBrand)}
 
@@ -3990,13 +4018,18 @@ function caBreakoutRowHtml(rows, velocityByBrand){
     </div>`).join('')}</div>`;
 }
 
-function caChartCardHtml(){
+function caChartCardHtml(allDv){
   const { days, byPlatform } = caCumulativeSeries();
+  // A platform with zero real data for the current brand filter just doesn't appear here — same
+  // "no meaningless flat line" behavior as before brand filtering existed, it just also now means
+  // "this brand doesn't post to this platform" rather than only "nobody does yet."
   const shown = ['tiktok','instagram','youtube'].filter(p => (byPlatform[p]||[]).length >= 2 && byPlatform[p].some(d => d.value > 0));
   const rangeLabel = (CA_RANGES.find(r=>r.id===CA_STATE.range)||{}).label || '';
+  const brandDv = CA_STATE.brand !== 'all' ? allDv.find(dv => dv.brandLocalId === CA_STATE.brand) : null;
+  const titleSuffix = rangeLabel + (brandDv ? ` · ${brandDv.brandName}` : '');
   return `<div class="chart-card">
     <div class="chart-head">
-      <div class="label" style="margin:0;">Total views over time — ${escapeHtml(rangeLabel)}</div>
+      <div class="label" style="margin:0;">Total views over time — ${escapeHtml(titleSuffix)}</div>
       <div class="chart-legend" id="caChartLegend">${shown.map(p=>`<div class="chart-legend-item">${caPlatformPillHtml(p)}</div>`).join('')}</div>
     </div>
     ${shown.length>0 && days.length>=2
@@ -4011,9 +4044,6 @@ function caChartCardHtml(){
 }
 
 function caTableSectionHtml(allDv, velocityByBrand){
-  const brandOptions = [...new Map(allDv.map(dv => [dv.brandLocalId, dv])).values()]
-    .map(dv => ({ key: dv.brandLocalId, label: dv.brandName }))
-    .sort((a,b)=>a.label.localeCompare(b.label));
   const rows = allDv.filter(dv => caPassesTableFilters(dv, velocityByBrand))
     .sort((a,b) => CA_STATE.sort==='top' ? b.views-a.views : a.views-b.views);
   // Weekly/Monthly/Overall can easily turn into hundreds of rows — collapsed to the top 9 by
@@ -4027,10 +4057,6 @@ function caTableSectionHtml(allDv, velocityByBrand){
     <div class="section-title" style="flex-wrap:wrap; gap:10px;">
       <span>Content</span>
       <div class="filter-bar" style="margin-bottom:0; align-items:center;">
-        <select id="caBrandFilter">
-          <option value="all">All brands</option>
-          ${brandOptions.map(b=>`<option value="${escapeHtml(b.key)}" ${CA_STATE.brand===b.key?'selected':''}>${escapeHtml(b.label)}</option>`).join('')}
-        </select>
         <div class="ca-sort-toggle" id="caDateGroup">
           <button class="ca-sort-btn ${CA_STATE.dateGroup==='weekly'?'active':''}" data-ca-date-group="weekly">Weekly</button>
           <button class="ca-sort-btn ${CA_STATE.dateGroup==='monthly'?'active':''}" data-ca-date-group="monthly">Monthly</button>
@@ -6514,9 +6540,9 @@ function bindGlobalHandlers(){
   const caChipTrending = document.getElementById('caChipTrending');
   if(caChipTrending) caChipTrending.addEventListener('click', () => { CA_STATE.trending = !CA_STATE.trending; render(); });
   const caClearFilters = document.getElementById('caClearFilters');
-  if(caClearFilters) caClearFilters.addEventListener('click', () => { CA_STATE.nearMiss=false; CA_STATE.trending=false; render(); });
-  const caBrandFilter = document.getElementById('caBrandFilter');
-  if(caBrandFilter) caBrandFilter.addEventListener('change', () => { CA_STATE.brand = caBrandFilter.value; render(); });
+  if(caClearFilters) caClearFilters.addEventListener('click', () => { CA_STATE.nearMiss=false; CA_STATE.trending=false; CA_STATE.brand='all'; render(); });
+  const caBrandFilterTop = document.getElementById('caBrandFilterTop');
+  if(caBrandFilterTop) caBrandFilterTop.addEventListener('change', () => { CA_STATE.brand = caBrandFilterTop.value; render(); });
   document.querySelectorAll('[data-ca-date-group]').forEach(el => el.addEventListener('click', () => { CA_STATE.dateGroup = el.dataset.caDateGroup; render(); }));
   const caSortTop = document.getElementById('caSortTop');
   if(caSortTop) caSortTop.addEventListener('click', () => { CA_STATE.sort='top'; render(); });
