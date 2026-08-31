@@ -852,6 +852,13 @@
   .brief-stat-value{ font-family:'IBM Plex Mono',monospace; font-size:13.5px; font-weight:600; }
   .brief-editor-form{ background:var(--surface); border:1px dashed var(--border); border-radius:var(--radius); padding:16px 18px; margin-bottom:14px; }
   .brief-editor-title{ font-weight:700; font-size:13.5px; margin-bottom:12px; }
+
+  .cloud-restore-banner{
+    display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;
+    background:var(--warn-bg); border:1px solid var(--warn); border-radius:var(--radius);
+    padding:14px 16px; margin:0 0 18px;
+  }
+  .cloud-restore-banner b{ color:var(--text); font-size:13.5px; }
 </style>
 </head>
 <body>
@@ -1176,6 +1183,12 @@ async function loadData(){
       await loadFromSupabase();
     }
     catch(e){ console.warn('Cloud load failed, showing the last local cache instead:', e); }
+  } else if(!DATA.brands.length && !DATA.content.length && !DATA.tasks.length && !DATA.payments.length){
+    // CLOUD_MODE is false AND this device's own local cache is empty — either genuinely a brand
+    // new device, or one that already migrated before and had its localStorage cleared by the
+    // browser since (see CLOUD_RESTORE_CHECK's declaration). Only fires in this narrow case —
+    // never for a device with its own real local data, which might be deliberately kept separate.
+    checkForOrphanedCloudData(); // fire-and-forget, read-only
   }
   // migrate any content saved by an earlier build that dropped inactive platform slots
   DATA.content.forEach(c => {
@@ -1448,6 +1461,56 @@ async function migrateToCloud(){
     alert('Could not move to the cloud — ' + e.message + '. Your data is untouched — try again.');
     if(btn){ btn.disabled = false; btn.textContent = '☁ Move my data to the cloud'; }
   }
+}
+
+// CLOUD_MODE lives only in this browser's localStorage — a flag, not a real link to the cloud
+// data itself. A phone that already migrated once can still have that flag (and its whole local
+// cache) silently cleared by the browser well before a week of real use — iOS Safari does this
+// under storage pressure or its own tracking-prevention rules, no code here involved. When that
+// happens the device looks exactly like it was never migrated: CLOUD_MODE reads false, local DATA
+// is empty, and without this check the person just sees "Stored in this browser" with nothing in
+// it — reading as "my data is gone" even though it's sitting untouched in Supabase the whole time.
+// Fires only from loadData()'s narrow "local cache looks genuinely empty" branch, and is
+// read-only (a HEAD-style count against each table, nothing written) — it can only ever surface a
+// banner offering to restore, never make a bad situation worse on its own.
+let CLOUD_RESTORE_CHECK = null; // null (not checked / nothing found) | {available:true, counts:{brands,content,tasks,payments}}
+let CLOUD_RESTORE_DISMISSED = false;
+async function checkForOrphanedCloudData(){
+  try{
+    const tables = ['brands','manual_content','manual_tasks','manual_payments'];
+    const counts = await Promise.all(tables.map(t =>
+      fetch(`${SUPABASE_URL}/rest/v1/${t}?select=id&limit=1`, {
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, Prefer: 'count=exact' },
+      }).then(res => {
+        const range = res.headers.get('content-range'); // "0-0/7" (has rows) or "*/0" (empty)
+        return range ? Number(range.split('/')[1]) || 0 : 0;
+      }).catch(() => 0)
+    ));
+    const [brands, content, tasks, payments] = counts;
+    if(brands + content + tasks + payments > 0){
+      CLOUD_RESTORE_CHECK = { available: true, counts: { brands, content, tasks, payments } };
+      render();
+    }
+  }catch(e){ /* best-effort — never blocks anything else if this fails */ }
+}
+function renderCloudRestoreBanner(){
+  const c = CLOUD_RESTORE_CHECK.counts;
+  const parts = [
+    c.brands ? `${c.brands} brand${c.brands===1?'':'s'}` : '',
+    c.content ? `${c.content} content item${c.content===1?'':'s'}` : '',
+    c.tasks ? `${c.tasks} task${c.tasks===1?'':'s'}` : '',
+    c.payments ? `${c.payments} payment${c.payments===1?'':'s'}` : '',
+  ].filter(Boolean).join(', ');
+  return `<div class="cloud-restore-banner">
+    <div>
+      <b>This looks like a fresh device, but there's existing cloud data</b>
+      <div class="hint" style="margin-top:2px;">${escapeHtml(parts)} already saved from another device. This device's local storage looks empty — most likely cleared by the browser, not deleted on purpose.</div>
+    </div>
+    <div style="display:flex; gap:8px; flex-shrink:0;">
+      <button class="btn btn-primary btn-sm" id="btnRestoreFromCloud" type="button">Restore from cloud</button>
+      <button class="btn btn-ghost btn-sm" id="btnDismissCloudRestore" type="button">Dismiss</button>
+    </div>
+  </div>`;
 }
 
 function showToast(msg){
@@ -2990,7 +3053,7 @@ function render(){
       ${renderMobileTopbar()}
       ${renderSidebar()}
       <div class="mobile-nav-scrim ${MOBILE_NAV_OPEN ? 'visible' : ''}" id="mobileNavScrim"></div>
-      <div class="main">${renderView()}</div>
+      <div class="main">${!CLOUD_MODE && CLOUD_RESTORE_CHECK?.available && !CLOUD_RESTORE_DISMISSED ? renderCloudRestoreBanner() : ''}${renderView()}</div>
       <div class="alerts-bell-desktop">${renderAlertsBell()}</div>
       ${renderModals()}
       ${renderAIDrawer()}
@@ -7071,6 +7134,13 @@ function bindGlobalHandlers(){
   if(btnMigrateCloud) btnMigrateCloud.addEventListener('click', () => {
     askConfirm('Move your Brands, Content, Tasks, and Payments to the cloud? This uploads everything currently here to Supabase — the same place your tracked-content data already lives — and switches this dashboard to read from there from now on, so it stays in sync across every device. Your local copy stays as a backup either way.', migrateToCloud);
   });
+  // No confirm step here (unlike btnMigrateCloud above) — this device's local data is already
+  // empty, so there's nothing of this device's own that restoring could lose; migrateToCloud()'s
+  // push is a safe no-op and the pull is exactly the recovery being asked for.
+  const btnRestoreFromCloud = document.getElementById('btnRestoreFromCloud');
+  if(btnRestoreFromCloud) btnRestoreFromCloud.addEventListener('click', migrateToCloud);
+  const btnDismissCloudRestore = document.getElementById('btnDismissCloudRestore');
+  if(btnDismissCloudRestore) btnDismissCloudRestore.addEventListener('click', () => { CLOUD_RESTORE_DISMISSED = true; render(); });
   const btnExport = document.getElementById('btnExport');
   if(btnExport) btnExport.addEventListener('click', exportData);
   const importFile = document.getElementById('importFile');
