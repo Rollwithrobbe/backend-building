@@ -2609,7 +2609,7 @@ function renderBrandComparisonTable(){
           <td class="mono" style="text-align:right;">${Math.round(r.views30d).toLocaleString()}</td>
           <td class="mono" style="text-align:right;">${Math.round(r.viewsAllTime).toLocaleString()}</td>
           <td class="mono" style="text-align:right;">${money(r.avgPayout)}</td>
-          <td class="mono fx-green" style="text-align:right;">${money(r.earned)}${r.earnedCpm>0?`<div class="mono" style="font-size:10px; color:var(--text); font-weight:400; margin-top:2px;">${money(r.earnedCpm)} CPM</div>`:''}</td>
+          <td class="mono fx-green" style="text-align:right;">${money(r.earned)}${r.earnedCpm>0?`<div class="mono" style="font-size:10px; color:var(--text-dim); font-weight:400; margin-top:2px;">incl. ${money(r.earnedCpm)} CPM</div>`:''}</td>
           <td class="mono" style="text-align:right;">${money(r.received)}</td>
           <td class="mono ${r.outstanding>0?'fx-red':''}" style="text-align:right;">${money(r.outstanding)}</td>
         </tr>`).join('')}
@@ -2619,7 +2619,7 @@ function renderBrandComparisonTable(){
           <td></td>
           <td style="font-weight:700; color:var(--text-dim);">Total</td>
           <td></td><td></td><td></td><td></td><td></td>
-          <td class="mono fx-green" style="text-align:right; font-weight:700;">${money(totalEarned)}${totalEarnedCpm>0?`<div class="mono" style="font-size:10px; color:var(--text); font-weight:400; margin-top:2px;">${money(totalEarnedCpm)} CPM</div>`:''}</td>
+          <td class="mono fx-green" style="text-align:right; font-weight:700;">${money(totalEarned)}${totalEarnedCpm>0?`<div class="mono" style="font-size:10px; color:var(--text-dim); font-weight:400; margin-top:2px;">incl. ${money(totalEarnedCpm)} CPM</div>`:''}</td>
           <td class="mono" style="text-align:right; font-weight:700;">${money(totalReceived)}</td>
           <td class="mono fx-red" style="text-align:right; font-weight:700;">${money(totalOutstanding)}</td>
         </tr>
