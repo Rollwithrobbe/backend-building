@@ -122,6 +122,22 @@ async function scoutBrandAccount(brand, guard, SUPABASE_URL, sbHeaders) {
     return { error: 'no instagram_access_token stored for this brand — reconnect Instagram' };
   }
 
+  // Account-level follower count — one cheap extra call, logged as its own snapshot (see
+  // logFollowerSnapshot) rather than folded into any one video. Best-effort: never worth failing
+  // or blocking the rest of this run over.
+  if (!guard.stop) {
+    try {
+      const followerRes = await igFetch(
+        `https://graph.instagram.com/me?fields=followers_count&access_token=${encodeURIComponent(token)}`,
+        guard
+      );
+      const followerData = await followerRes.json();
+      if (typeof followerData.followers_count === 'number') {
+        logFollowerSnapshot(brand.id, 'instagram', followerData.followers_count, SUPABASE_URL, sbHeaders);
+      }
+    } catch (e) { /* best-effort */ }
+  }
+
   // 1. Pull recent media, paginating until either the brand's own eligibility window is fully
   // covered or a safety cap is hit — not just a single fixed 50-item page. A single page is fine
   // at low posting volume, but a creator posting near/above roughly (window days × 1.6/day) can
@@ -237,7 +253,7 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
     return { id: media.id, action: 'skipped', reason: 'could not read view count', debug: debug[0] };
   }
   const { total: viewCount, facebookComponent } = views;
-  const { likes, comments, shares } = engagement;
+  const { likes, comments, shares, saves } = engagement;
 
   const existingRes = await fetch(
     `${SUPABASE_URL}/rest/v1/tracked_videos?platform=eq.instagram&external_video_id=eq.${media.id}&select=*`,
@@ -265,7 +281,7 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
         title: media.caption ? media.caption.slice(0, 200) : '',
         posted_at: media.timestamp || null,
         view_count: viewCount,
-        likes, comments, shares,
+        likes, comments, shares, saves,
         last_checked_at: new Date().toISOString(),
         eligible_until: eligibleUntil,
         status: alreadyHit ? 'hit' : 'tracking',
@@ -335,7 +351,7 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
       // thumbnail capture was added. Every video's thumbnail backfills itself the next time
       // it's touched by a scouting run — no separate migration needed.
       body: JSON.stringify({
-        view_count: viewCount, likes, comments, shares,
+        view_count: viewCount, likes, comments, shares, saves,
         last_checked_at: new Date().toISOString(), status, earned,
         thumbnail_url: media.thumbnail_url || media.media_url || null, facebook_views_component: facebookComponent,
         // Set only on the exact PATCH where status actually flips to 'hit' — see scout-tiktok.js
@@ -393,6 +409,14 @@ function logViewSnapshot(trackedVideoId, brandId, platform, viewCount, SUPABASE_
     body: JSON.stringify({ tracked_video_id: trackedVideoId, brand_id: brandId, platform, view_count: viewCount }),
   }).catch(() => {});
 }
+// See scout-youtube.js for the full rationale (identical here) — account-level, one row per run.
+function logFollowerSnapshot(brandId, platform, followerCount, SUPABASE_URL, sbHeaders) {
+  fetch(`${SUPABASE_URL}/rest/v1/follower_snapshots`, {
+    method: 'POST',
+    headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify({ brand_id: brandId, platform, follower_count: followerCount }),
+  }).catch(() => {});
+}
 
 async function flagMissingVideos(brand, platform, seenIds, SUPABASE_URL, sbHeaders) {
   const res = await fetch(
@@ -440,14 +464,17 @@ async function fetchMetric(mediaId, metric, token, guard) {
 // comma-separated metric list in a single call. Any of the three can legitimately come back
 // missing (e.g. a creator hid like counts) — null in that case, never a false zero.
 async function fetchEngagement(mediaId, token, guard) {
-  if (guard.stop) return { likes: null, comments: null, shares: null };
-  const data = await fetchMetric(mediaId, 'likes,comments,shares', token, guard);
+  if (guard.stop) return { likes: null, comments: null, shares: null, saves: null };
+  // 'saved' added alongside the others (2026-09-01) — a stronger buying-intent signal than likes
+  // for commerce UGC, and it rides in this same request for free (Meta's insights endpoint
+  // accepts a comma-separated metric list), so no extra Graph API call needed.
+  const data = await fetchMetric(mediaId, 'likes,comments,shares,saved', token, guard);
   const valueFor = (name) => {
     const entry = data?.data?.find((d) => d.name === name);
     const v = entry?.values?.[0]?.value;
     return typeof v === 'number' ? v : null;
   };
-  return { likes: valueFor('likes'), comments: valueFor('comments'), shares: valueFor('shares') };
+  return { likes: valueFor('likes'), comments: valueFor('comments'), shares: valueFor('shares'), saves: valueFor('saved') };
 }
 // Returns { total, facebookComponent } — total is native + facebook_views combined (what
 // actually gets compared against the brand's requirement and stored as view_count, matching

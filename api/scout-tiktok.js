@@ -115,6 +115,27 @@ async function scoutBrandAccount(brand, callGuard, CLIENT_KEY, CLIENT_SECRET, SU
     token = refreshed.access_token;
   }
 
+  // Account-level follower count — best-effort, and genuinely may not work: follower_count sits
+  // behind TikTok's user.info.stats field group, which this app's current OAuth scope
+  // (user.info.profile + video.list, see api/auth/tiktok/start.js) was never granted. Wrapped so
+  // a scope rejection here just silently skips the snapshot rather than failing the whole run —
+  // surfaced back to the caller as followerCountError so it's visible in the run's own response
+  // without needing a log dive.
+  let followerCountError = null;
+  try {
+    const profileRes = await fetch(
+      'https://open.tiktokapis.com/v2/user/info/?fields=follower_count',
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    const profileData = await profileRes.json();
+    const followerCount = profileData?.data?.user?.follower_count;
+    if (typeof followerCount === 'number') {
+      logFollowerSnapshot(brand.id, 'tiktok', followerCount, SUPABASE_URL, sbHeaders);
+    } else {
+      followerCountError = profileData?.error?.message || 'follower_count not returned — likely needs a broader OAuth scope (user.info.stats)';
+    }
+  } catch (e) { followerCountError = String(e); }
+
   // Pull recent videos, paginating until either the brand's own eligibility window is fully
   // covered or a safety cap is hit — not just a fixed page count. A fixed cap is fine at low
   // posting volume, but a creator posting near/above roughly (window days × 1.6/day) can push an
@@ -178,7 +199,7 @@ async function scoutBrandAccount(brand, callGuard, CLIENT_KEY, CLIENT_SECRET, SU
     missingCount = await flagMissingVideos(brand, 'tiktok', seenIds, SUPABASE_URL, sbHeaders);
   }
 
-  return { checked: results.length, results, flaggedMissing: missingCount };
+  return { checked: results.length, results, flaggedMissing: missingCount, ...(followerCountError ? { followerCountError } : {}) };
 }
 
 // Everything one video needs, start to finish — either inserts it (first time seen) or patches
@@ -353,6 +374,14 @@ function logViewSnapshot(trackedVideoId, brandId, platform, viewCount, SUPABASE_
     method: 'POST',
     headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
     body: JSON.stringify({ tracked_video_id: trackedVideoId, brand_id: brandId, platform, view_count: viewCount }),
+  }).catch(() => {});
+}
+// See scout-youtube.js for the full rationale (identical here) — account-level, one row per run.
+function logFollowerSnapshot(brandId, platform, followerCount, SUPABASE_URL, sbHeaders) {
+  fetch(`${SUPABASE_URL}/rest/v1/follower_snapshots`, {
+    method: 'POST',
+    headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify({ brand_id: brandId, platform, follower_count: followerCount }),
   }).catch(() => {});
 }
 

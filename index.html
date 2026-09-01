@@ -2070,9 +2070,7 @@ function syncAlertsLog(){
     const id = 'cadence-' + brand.id;
     currentCadenceIds.add(id);
     if(byId.has(id)) return;
-    const detail = cadence.consecutive >= 1
-      ? `Missed ${cadence.consecutive} day${cadence.consecutive===1?'':'s'} in a row`
-      : `${cadence.madeTotal}/${cadence.quotaTotal} videos this week (${Math.round(cadence.ratio*100)}%)`;
+    const detail = cadenceReasonText(cadence);
     const entry = {
       id, type:'cadence-miss', ts:now, read:false, cleared:false, videoId:null, brandId: brand.id,
       title: `${brand.name} is falling behind on cadence`,
@@ -2211,8 +2209,9 @@ function activeBriefBrands(){
 function briefTodayInfo(brand){
   const brief = brand.brief;
   const quota = briefDayQuota(brief, new Date().getDay());
-  const progress = (brief.progress && brief.progress[todayISO()]) || 0;
-  return { quota, progress, remaining: Math.max(0, quota - progress) };
+  const real = realMadeCountForBrandOnDate(brand, todayISO());
+  const progress = real != null ? real : ((brief.progress && brief.progress[todayISO()]) || 0);
+  return { quota, progress, remaining: Math.max(0, quota - progress), verified: real != null };
 }
 function briefTrialInfo(brief){
   // trial briefs run for a fixed window (e.g. a 30-day trial) rather than indefinitely — this
@@ -2234,6 +2233,21 @@ function isoFromDate(d){
   const day = String(d.getDate()).padStart(2,'0');
   return `${y}-${m}-${day}`;
 }
+// The real, verified count of videos actually posted for a brand on one LOCAL date — read
+// straight off Tracked Content (Supabase), not the manual "+1 Made" counter. Only meaningful for
+// a brand actually linked to automated tracking (brand.supabaseBrandId); returns null (not 0)
+// when there's nothing to verify against yet — TRACKED_CONTENT_DATA still loading, or this brand
+// was never connected — so callers can fall back to the manual counter instead of reporting a
+// false "0 made". A crossposted video counts once (by deliverable/group), not once per platform,
+// same as every other "how many videos" count in the app.
+function realMadeCountForBrandOnDate(brand, dateISO){
+  if(!brand.supabaseBrandId || !TRACKED_CONTENT_DATA) return null;
+  return getDeliverables().filter(dv => {
+    if(dv.excluded || !dv.postedAt) return false;
+    if((dv.rows[0]?.brand_id) !== brand.supabaseBrandId) return false;
+    return isoFromDate(new Date(dv.postedAt)) === dateISO;
+  }).length;
+}
 // How this brand's actual posting has tracked its brief's quota over the last N *completed*
 // days (today is deliberately excluded — it isn't over yet, so it can't be "missed" yet).
 // Walks backward from yesterday, comparing each day's real progress against that weekday's own
@@ -2252,8 +2266,10 @@ function brandCadenceStatus(brand, lookbackDays){
   let quotaTotal = 0, madeTotal = 0, missedDays = 0;
   for(let i=1; i<=lookbackDays; i++){
     const d = new Date(today.getFullYear(), today.getMonth(), today.getDate()-i);
+    const iso = isoFromDate(d);
     const quota = briefDayQuota(brief, d.getDay());
-    const made = (brief.progress && brief.progress[isoFromDate(d)]) || 0;
+    const real = realMadeCountForBrandOnDate(brand, iso);
+    const made = real != null ? real : ((brief.progress && brief.progress[iso]) || 0);
     const missed = made < quota;
     quotaTotal += quota; madeTotal += made;
     if(missed) missedDays++;
@@ -2264,7 +2280,9 @@ function brandCadenceStatus(brand, lookbackDays){
     if(day.quota <= 0) continue; // nothing owed that day — doesn't break or extend the streak
     if(day.missed) consecutive++; else break;
   }
-  return { quotaTotal, madeTotal, missedDays, consecutive, ratio: quotaTotal>0 ? madeTotal/quotaTotal : 1, deficit: Math.max(0, quotaTotal-madeTotal) };
+  // days[0] is yesterday's own {quota, made, missed} — kept on the returned object so callers can
+  // show a precise "2/3 yesterday, 1 short" instead of only the window-wide aggregate.
+  return { quotaTotal, madeTotal, missedDays, consecutive, ratio: quotaTotal>0 ? madeTotal/quotaTotal : 1, deficit: Math.max(0, quotaTotal-madeTotal), yesterday: days[0] || null };
 }
 // The urgent, "get going with it" signal for Tasks + the bell — a short 7-day window, flagged
 // either for missing yesterday outright (consecutive>=1) or for running under 70% of quota over
@@ -2277,6 +2295,18 @@ function detectCadenceMisses(){
 // The longer-horizon, "is this brand's deal still worth it" signal for the Brands page — a
 // 30-day window, flagged at a stricter 60% threshold (a brand can have an off week without being
 // "drifting"; a month of running under 60% of quota is a real pattern).
+// Shared wording for both the alert log and the Tasks/Dashboard banner, so the two never drift
+// out of sync with each other. A single missed day (the common case — "3 a day, only did 2")
+// names the exact shortfall using that day's own numbers; a longer streak or an inconsistent-but-
+// no-single-hard-miss week falls back to the window-wide aggregate instead.
+function cadenceReasonText(cadence){
+  if(cadence.consecutive === 1 && cadence.yesterday){
+    const short = cadence.yesterday.quota - cadence.yesterday.made;
+    return `${short} missed yesterday (${cadence.yesterday.made}/${cadence.yesterday.quota})`;
+  }
+  if(cadence.consecutive >= 2) return `Missed ${cadence.consecutive} days in a row`;
+  return `${cadence.madeTotal}/${cadence.quotaTotal} this week (${Math.round(cadence.ratio*100)}%)`;
+}
 function detectCadenceDrift(brand){
   const cadence = brandCadenceStatus(brand, 30);
   if(!cadence || cadence.quotaTotal <= 0 || cadence.ratio >= 0.6) return null;
@@ -2360,27 +2390,35 @@ function renderBriefQuotas(){
       const trialBadge = trial
         ? `<span class="tag ${trial.expired ? 'tag-danger' : 'tag-warn'}" style="font-size:9.5px;">${trial.expired ? `Trial ended ${Math.abs(trial.daysRemaining)}d ago` : `Trial — ${trial.daysRemaining}d left`}</span>`
         : '';
-      // The actual videos this brand's count refers to today (created via "+1 Made", or any other
-      // way) — shown as clickable chips so "2/3 today" isn't just an abstract number: you can see
-      // exactly which titles it means and jump straight into editing one (film/edit/schedule it)
-      // without leaving the dashboard. Each disappears from here on its own once published — it's
-      // reading straight off DATA.content, the same list In Progress shows.
-      const madeToday = DATA.content.filter(c => c.brandId===b.id && (c.createdAt||'').slice(0,10)===todayISO());
+      // The actual videos this brand's count refers to today — for a brand linked to automated
+      // tracking (info.verified), these are the REAL deliverables Tracked Content picked up today
+      // (deduplicated by group, matching realMadeCountForBrandOnDate exactly), so the number above
+      // and the chips below can never disagree with each other. For an unlinked/fully-manual
+      // brand, falls back to the old manual-Content-list chips — the only source of truth that
+      // exists for a brand with no automated tracking at all.
+      const madeToday = info.verified
+        ? getDeliverables().filter(dv => !dv.excluded && dv.postedAt && (dv.rows[0]?.brand_id)===b.supabaseBrandId && isoFromDate(new Date(dv.postedAt))===todayISO())
+        : DATA.content.filter(c => c.brandId===b.id && (c.createdAt||'').slice(0,10)===todayISO());
+      const verifiedTag = info.verified
+        ? `<span class="tag tag-good" style="font-size:9px;" title="Counted from Tracked Content — not a manual entry">Verified ✓</span>`
+        : '';
       return `<div style="padding:12px 16px; border-bottom:1px solid var(--border-soft);">
         <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
           <div style="display:flex; align-items:center; gap:10px;">
             <span class="swatch" style="background:${b.color}"></span>
             <span style="font-size:13.5px;">${escapeHtml(b.name)}</span>
-            ${trialBadge}
+            ${trialBadge}${verifiedTag}
             <span class="mono" style="font-size:12px; color:var(--text-dim);">${info.progress}/${info.quota} today</span>
           </div>
-          <div style="display:flex; align-items:center; gap:6px;">
+          ${info.verified ? '' : `<div style="display:flex; align-items:center; gap:6px;">
             <button class="btn btn-ghost btn-sm" data-undo-brief="${b.id}" type="button" title="Correct today's count down by 1 (e.g. after deleting a video)" ${info.progress<=0?'disabled':''}>−1</button>
             <button class="btn btn-sm ${done?'btn-primary':'btn-ghost'}" data-make-brief="${b.id}" type="button" ${done?'disabled':''}>${done?'Done ✓':'+1 Made'}</button>
-          </div>
+          </div>`}
         </div>
         ${madeToday.length ? `<div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; padding-left:24px;">
-          ${madeToday.map(c => `<button type="button" class="tag tag-neutral" data-open-content="${c.id}" style="cursor:pointer; border:none; font-family:inherit;" title="Edit this video">${escapeHtml(c.title)}</button>`).join('')}
+          ${info.verified
+            ? madeToday.map(dv => `<button type="button" class="tag tag-neutral" data-goto-dv="${dv.key}" style="cursor:pointer; border:none; font-family:inherit;" title="Open in Tracked Content">${escapeHtml(dv.title||'Untitled')}</button>`).join('')
+            : madeToday.map(c => `<button type="button" class="tag tag-neutral" data-open-content="${c.id}" style="cursor:pointer; border:none; font-family:inherit;" title="Edit this video">${escapeHtml(c.title)}</button>`).join('')}
         </div>` : ''}
       </div>`;
     }).join('')}
@@ -2399,16 +2437,20 @@ function renderCadenceBanner(){
   return `<div class="table-wrap" style="margin-bottom:22px; border-color:var(--danger);">
     <div class="tw-head" style="color:var(--danger);">⚠️ Falling behind on posting cadence</div>
     ${flagged.map(({brand, cadence}) => {
-      const reason = cadence.consecutive >= 1
-        ? `Missed ${cadence.consecutive} day${cadence.consecutive===1?'':'s'} in a row`
-        : `${cadence.madeTotal}/${cadence.quotaTotal} this week (${Math.round(cadence.ratio*100)}%)`;
+      // Same verified check as renderBriefQuotas() (reused, not re-derived, so the two widgets
+      // can never disagree) — a brand linked to automated tracking has no manual counter to bump,
+      // so "+1 Made" would be a dead click there; the only real fix is actually posting, so this
+      // points at Tracked Content instead.
+      const verified = briefTodayInfo(brand).verified;
       return `<div style="padding:12px 16px; border-bottom:1px solid var(--border-soft); display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
         <div style="display:flex; align-items:center; gap:10px;">
           <span class="swatch" style="background:${brand.color}"></span>
           <span style="font-size:13.5px;">${escapeHtml(brand.name)}</span>
-          <span class="tag tag-danger" style="font-size:9.5px;">${reason}</span>
+          <span class="tag tag-danger" style="font-size:9.5px;">${cadenceReasonText(cadence)}</span>
         </div>
-        <button class="btn btn-sm btn-primary" data-make-brief="${brand.id}" type="button">+1 Made</button>
+        ${verified
+          ? `<button class="btn btn-sm btn-ghost" data-goto-brand-tc="${brand.id}" type="button">View in Tracked Content</button>`
+          : `<button class="btn btn-sm btn-primary" data-make-brief="${brand.id}" type="button">+1 Made</button>`}
       </div>`;
     }).join('')}
   </div>`;
@@ -3441,6 +3483,12 @@ let TRACKED_CONTENT_ERROR = null;
 // and the matching logViewSnapshot()/call-site pieces in all three api/scout-*.js files, then
 // drop the view_snapshots Supabase table. Nothing else reads this variable or depends on it.
 let VIEW_SNAPSHOTS_DATA = null;
+// Account-level follower-count history — one row per brand+platform per scout run (see
+// logFollowerSnapshot in the scout-*.js files and add-follower-snapshots.sql). Powers Analytics'
+// "Audience growth" section: latest count, % change vs. a prior period, and a trend line. null
+// until loaded; every reader of this treats null/empty the same as "nothing to show yet" rather
+// than an error, same as VIEW_SNAPSHOTS_DATA.
+let FOLLOWER_SNAPSHOTS_DATA = null;
 // One row per scout-*.js run (success, per-brand error, or full crash) — written by the jobs
 // themselves (see logScoutRun() in each api/scout-*.js file), read here purely to power the
 // alerts bell's system-health entries (see syncAlertsLog()'s run-error/run-missing section):
@@ -3492,6 +3540,7 @@ async function loadTrackedContent(){
   TRACKED_CONTENT_LOADING = false;
   renderWithChartEnter();
   loadViewSnapshots(); // fire-and-forget — see its own comment; never blocks the main dashboard
+  loadFollowerSnapshots(); // fire-and-forget — see its own comment; never blocks the main dashboard
   loadScoutRuns(); // fire-and-forget — see its own comment; never blocks the main dashboard
   loadPayoutBriefs(); // fire-and-forget — see its own comment; never blocks the main dashboard
 }
@@ -3540,6 +3589,24 @@ async function loadScoutRuns(){
 // already existed on every row (see logViewSnapshot in the scout-*.js files), just wasn't being
 // read. Without it there's no way to build a per-video growth curve or per-video velocity, only
 // the brand+platform-level daily total the sparkline already used.
+// See FOLLOWER_SNAPSHOTS_DATA's declaration. No cutoff filter (unlike loadViewSnapshots' 14-day
+// window) — this is one row per brand+platform per day, not per video, so even a couple of
+// years of history stays a tiny fetch, and the whole point is supporting "all time" in the
+// range comparison below, not just a short recent window. Same silent-give-up-on-failure
+// pattern as loadViewSnapshots/loadScoutRuns — including if the migration hasn't been run yet.
+async function loadFollowerSnapshots(){
+  try{
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/follower_snapshots?select=brand_id,platform,follower_count,checked_at&order=checked_at.asc`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
+    FOLLOWER_SNAPSHOTS_DATA = await res.json();
+    render();
+  }catch(e){
+    console.warn('loadFollowerSnapshots failed (Audience growth just won\'t show) —', e);
+  }
+}
 async function loadViewSnapshots(){
   try{
     const cutoff = new Date(Date.now() - 14*86400000).toISOString();
@@ -3921,6 +3988,8 @@ function renderDashboard(){
       </div>
     </div>
 
+    ${renderCadenceBanner()}
+
     <div class="range-pills">
       ${RANGES.map(r=>`<button class="range-pill ${DASH_RANGE===r.id?'active':''}" data-range="${r.id}">${r.label}</button>`).join('')}
     </div>
@@ -4046,14 +4115,18 @@ function caAllDeliverables(){
     const hasLikes = dv.rows.some(r => r.likes != null);
     const hasComments = dv.rows.some(r => r.comments != null);
     const hasShares = dv.rows.some(r => r.shares != null);
+    // Instagram-only (see fetchEngagement in scout-instagram.js) — never captured for
+    // TikTok/YouTube, same "genuinely doesn't exist there" distinction as hasShares for YouTube.
+    const hasSaves = dv.rows.some(r => r.saves != null);
     const hasEngagement = hasLikes || hasComments || hasShares;
     const likes = dv.rows.reduce((s,r)=>s+(Number(r.likes)||0),0);
     const comments = dv.rows.reduce((s,r)=>s+(Number(r.comments)||0),0);
     const shares = dv.rows.reduce((s,r)=>s+(Number(r.shares)||0),0);
+    const saves = dv.rows.reduce((s,r)=>s+(Number(r.saves)||0),0);
     const views = dv.rows.reduce((s,r)=>s+(Number(r.view_count)||0),0);
     return {
       ...dv, brandLocalId, brandColor, views, tags: caExtractTags(dv.title),
-      hasEngagement, hasLikes, hasComments, hasShares, likes, comments, shares,
+      hasEngagement, hasLikes, hasComments, hasShares, hasSaves, likes, comments, shares, saves,
       engRate: hasEngagement && views>0 ? (likes+comments+shares)/views*100 : null,
     };
   });
@@ -4226,6 +4299,38 @@ function caVideoDailySeries(trackedVideoId){
   const byDay = caLatestSnapshotPerDay(trackedVideoId);
   return Object.keys(byDay).sort().map(d => ({ day: d, value: Number(byDay[d].view_count)||0 }));
 }
+// Same dedup pattern as caLatestSnapshotPerDay, one level up (brand+platform, not per-video) —
+// a manual re-run of a scout job, or normal cron timing variance, can log more than one snapshot
+// on the same calendar day; only the latest one that day should count.
+function caLatestFollowerSnapshotPerDay(supabaseBrandId, platform){
+  const byDay = {};
+  (FOLLOWER_SNAPSHOTS_DATA||[]).forEach(s => {
+    if(s.brand_id !== supabaseBrandId || s.platform !== platform) return;
+    const d = s.checked_at.slice(0,10);
+    if(!byDay[d] || s.checked_at > byDay[d].checked_at) byDay[d] = s;
+  });
+  return byDay;
+}
+function caFollowerSeries(supabaseBrandId, platform){
+  if(!FOLLOWER_SNAPSHOTS_DATA) return [];
+  const byDay = caLatestFollowerSnapshotPerDay(supabaseBrandId, platform);
+  return Object.keys(byDay).sort().map(d => ({ day: d, value: Number(byDay[d].follower_count)||0 }));
+}
+// % change vs. the closest available snapshot at/before `rangeDays` ago — snapshots land once a
+// day at an irregular real-world time, so this is a nearest-available match, not an exact one.
+// Returns null (not 0%) when there's fewer than 2 real days of history to compare against, so the
+// UI can say "not enough history yet" instead of a misleading 0%/∞% off a single data point.
+function caFollowerDelta(series, rangeDays){
+  if(series.length < 2) return null;
+  const latest = series[series.length-1];
+  const cutoff = new Date(Date.now() - rangeDays*86400000).toISOString().slice(0,10);
+  // Last entry at/before the cutoff date; if every entry is after it (not enough history yet for
+  // this exact range), fall back to the earliest entry — the longest comparison actually available.
+  const prev = [...series].reverse().find(s => s.day <= cutoff) || series[0];
+  if(prev.day === latest.day) return null;
+  const pct = prev.value > 0 ? ((latest.value - prev.value) / prev.value) * 100 : (latest.value > 0 ? 100 : null);
+  return { latest: latest.value, prev: prev.value, pct, prevDay: prev.day };
+}
 function caRangeCutoff(){ return CA_STATE.range==='9999' ? 0 : Date.now() - Number(CA_STATE.range)*86400000; }
 function caPassesPageFilters(dv, velocityByBrand){
   if(dv.postedAt && new Date(dv.postedAt).getTime() < caRangeCutoff()) return false;
@@ -4297,6 +4402,8 @@ function renderContentAnalytics(){
       <div class="card"><div class="label">Best platform</div><div class="big">${bestPlat?(PLATFORM_DISPLAY_NAME[bestPlat[0]]||bestPlat[0]):'—'}</div><div class="foot">${bestPlat?bestPlat[1].toLocaleString()+' views in range':'No data in range'}</div></div>
       <div class="card"><div class="label">Avg days to hit</div><div class="big mono">${velocity?velocity.avg.toFixed(1):'—'}</div><div class="foot">${velocity?`based on ${velocity.count} video${velocity.count===1?'':'s'} in range`:'Tracking starts once a video hits'}</div></div>
     </div>
+
+    ${renderAudienceGrowth()}
 
     <div class="section-title" style="margin-top:0; display:flex; align-items:center; gap:8px;">${iconFlame(14)}Breaking out right now</div>
     ${caBreakoutRowHtml(rows, velocityByBrand)}
@@ -4677,9 +4784,11 @@ function renderContentVideoModal(){
         <div class="card"><div class="label">Likes</div><div class="big mono" ${dv.hasLikes?'':'style="color:var(--text-faint);"'}>${dv.hasLikes ? dv.likes.toLocaleString() : '—'}</div></div>
         <div class="card"><div class="label">Comments</div><div class="big mono" ${dv.hasComments?'':'style="color:var(--text-faint);"'}>${dv.hasComments ? dv.comments.toLocaleString() : '—'}</div></div>
         <div class="card"><div class="label">Shares</div><div class="big mono" ${dv.hasShares?'':'style="color:var(--text-faint);"'}>${dv.hasShares ? dv.shares.toLocaleString() : '—'}</div></div>
+        <div class="card"><div class="label">Saves</div><div class="big mono" ${dv.hasSaves?'':'style="color:var(--text-faint);"'}>${dv.hasSaves ? dv.saves.toLocaleString() : '—'}</div></div>
       </div>
       <div class="ca-progress-label"><span>Engagement rate</span><span>${dv.engRate!=null ? dv.engRate.toFixed(1)+'%' : '—'}</span></div>
       ${dv.rows.some(r=>r.platform==='youtube') && !dv.hasShares ? `<div class="hint" style="margin-top:6px;">YouTube has no share-count field at all — a real platform gap, not missing data.</div>` : ''}
+      ${!dv.rows.some(r=>r.platform==='instagram') && !dv.hasSaves ? `<div class="hint" style="margin-top:6px;">Saves is Instagram-only — TikTok and YouTube don't expose an equivalent metric.</div>` : ''}
       ` : `<div class="hint">Not captured yet for this video — it'll fill in the next time a scouting run touches it.</div>`}
     </div>
 
@@ -4716,6 +4825,62 @@ function renderContentVideoModal(){
       <div class="right"><button class="btn btn-primary" id="cancelModal" type="button">Close</button></div>
     </div>
   </div>`;
+}
+// A slightly smaller, color-parametrized version of caVideoCurveSvg below (that one hard-codes
+// tiktok's color and renders one at a time in a modal; this renders several side by side, one
+// per brand+platform card, so it needs its own color per call and a unique gradient id per card
+// to avoid SVG id collisions when more than one is on screen at once).
+function caAudienceCurveSvg(series, color){
+  const W = 260, H = 64, padT = 6, padB = 6;
+  const vals = series.map(s=>s.value);
+  const maxV = Math.max(...vals, 1) * 1.05;
+  const minV = Math.min(...vals) * 0.97;
+  const range = (maxV - minV) || 1;
+  const n = series.length;
+  const xy = series.map((s,i) => ({ x: n>1 ? (i/(n-1))*W : 0, y: padT + (1 - (s.value-minV)/range) * (H-padT-padB) }));
+  const linePath = smoothPath(xy);
+  const areaPath = `${linePath} L${W},${H} L0,${H} Z`;
+  const gradId = 'caAudGrad' + Math.random().toString(36).slice(2,8);
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" style="display:block; overflow:visible;">
+    <defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${color}" stop-opacity="0.30"/><stop offset="100%" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
+    <path d="${areaPath}" fill="url(#${gradId})" stroke="none"/>
+    <path d="${linePath}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="${xy[n-1].x.toFixed(1)}" cy="${xy[n-1].y.toFixed(1)}" r="3" fill="${color}"/>
+  </svg>`;
+}
+// One card per (brand, platform) that actually has follower history — respects the same brand
+// filter as the rest of the Analytics page (CA_STATE.brand) and the same range pills for the %
+// comparison, so switching either updates this section along with everything else. Returns ''
+// (renders nothing) rather than an empty-state block when there's no data at all yet — this is a
+// bonus section, not a core stat the page should apologize for not having.
+function renderAudienceGrowth(){
+  if(!FOLLOWER_SNAPSHOTS_DATA || FOLLOWER_SNAPSHOTS_DATA.length===0) return '';
+  const rangeDays = CA_STATE.range==='9999' ? 36500 : Number(CA_STATE.range);
+  const linkedBrands = DATA.brands.filter(b => b.supabaseBrandId && (CA_STATE.brand==='all' || CA_STATE.brand===b.id));
+  const cards = [];
+  linkedBrands.forEach(b => {
+    ['tiktok','instagram','youtube'].forEach(platform => {
+      const series = caFollowerSeries(b.supabaseBrandId, platform);
+      if(series.length===0) return;
+      cards.push({ brand:b, platform, series, delta: caFollowerDelta(series, rangeDays) });
+    });
+  });
+  if(cards.length===0) return '';
+  return `
+    <div class="section-title" style="display:flex; align-items:center; gap:8px;">Audience growth</div>
+    <div style="display:flex; flex-wrap:wrap; gap:14px; margin-bottom:20px;">
+      ${cards.map(({brand, platform, series, delta}) => `
+        <div class="card" style="min-width:220px; flex:1 1 260px;">
+          <div class="label" style="display:flex; align-items:center; gap:6px;"><span class="swatch" style="background:${brand.color}"></span>${escapeHtml(brand.name)} · ${PLATFORM_DISPLAY_NAME[platform]||platform}</div>
+          <div style="display:flex; align-items:baseline; gap:8px; margin:4px 0 8px;">
+            <div class="big mono">${series[series.length-1].value.toLocaleString()}</div>
+            ${delta && delta.pct!=null ? `<span class="mono" style="font-size:12.5px; color:${delta.pct>=0?'var(--fx-green)':'var(--fx-red)'};">${delta.pct>=0?'+':''}${delta.pct.toFixed(1)}%</span>` : ''}
+          </div>
+          ${series.length>=2 ? caAudienceCurveSvg(series, CA_PLATFORM_COLOR[platform]) : `<div class="hint">Not enough history yet for a trend line.</div>`}
+        </div>
+      `).join('')}
+    </div>
+  `;
 }
 function caVideoCurveSvg(series){
   const color = CA_PLATFORM_COLOR.tiktok;
@@ -6847,6 +7012,24 @@ function bindGlobalHandlers(){
     render();
   }));
   document.querySelectorAll('[data-open-content]').forEach(el => el.addEventListener('click', () => openModal('content', el.dataset.openContent)));
+  // Generic "jump to this deliverable in Tracked Content" — same scroll-and-flash mechanism the
+  // alerts bell's data-alert-goto-video uses, just always wired instead of only while the alerts
+  // popover is open. Used by the verified "made today" chips in renderBriefQuotas() to point at
+  // real Tracked Content rows instead of the old manual Content-list chips.
+  document.querySelectorAll('[data-goto-dv]').forEach(el => el.addEventListener('click', () => {
+    TC_FILTER = { brand:'', platform:'', status:'', q:'' };
+    TC_VIEW_MODE = 'table';
+    HIGHLIGHT_DV_KEY = el.dataset.gotoDv;
+    goToView('trackedContent');
+  }));
+  // "View in Tracked Content" on a verified cadence-miss row — pre-filters to that brand rather
+  // than pointing at one specific video (there isn't one specific video; the point is a gap).
+  document.querySelectorAll('[data-goto-brand-tc]').forEach(el => el.addEventListener('click', () => {
+    const brand = brandById(el.dataset.gotoBrandTc);
+    TC_FILTER = { brand: brand ? brand.name : '', platform:'', status:'', q:'' };
+    TC_VIEW_MODE = 'table';
+    goToView('trackedContent');
+  }));
   document.querySelectorAll('[data-open-brand], [data-edit-brand]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); openModal('brand', el.dataset.openBrand || el.dataset.editBrand); }));
   document.querySelectorAll('[data-toggle-brand-status]').forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); toggleBrandStatus(el.dataset.toggleBrandStatus); }));
   document.querySelectorAll('[data-select-theme]').forEach(el => el.addEventListener('click', () => setTheme(el.dataset.selectTheme)));

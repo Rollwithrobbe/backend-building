@@ -103,15 +103,22 @@ function tickCallGuard(guard) {
 async function scoutBrandChannel(brand, callGuard, YT_KEY, SUPABASE_URL, sbHeaders) {
   const handle = brand.youtube_channel_handle;
 
-  // 1. Resolve the channel handle to its "uploads" playlist
+  // 1. Resolve the channel handle to its "uploads" playlist — statistics folded into this same
+  // call (no extra request/quota) purely to grab subscriberCount for follower_snapshots below.
   tickCallGuard(callGuard);
   const chRes = await fetch(
-    `https://www.googleapis.com/youtube/v3/channels?part=contentDetails&forHandle=${encodeURIComponent(handle)}&key=${YT_KEY}`
+    `https://www.googleapis.com/youtube/v3/channels?part=contentDetails,statistics&forHandle=${encodeURIComponent(handle)}&key=${YT_KEY}`
   );
   const chData = await chRes.json();
   const uploadsPlaylistId = chData.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
   if (!uploadsPlaylistId) {
     return { error: 'could not resolve channel uploads playlist', chData };
+  }
+  // Some channels hide their subscriber count (hiddenSubscriberCount:true) — subscriberCount is
+  // then stale/absent, so only log a snapshot when it's actually a real, current number.
+  const stats = chData.items?.[0]?.statistics;
+  if (stats && stats.hiddenSubscriberCount !== true && stats.subscriberCount != null) {
+    logFollowerSnapshot(brand.id, 'youtube', Number(stats.subscriberCount), SUPABASE_URL, sbHeaders);
   }
 
   // 2. Pull recent uploads, paginating until either the brand's own eligibility window is fully
@@ -347,6 +354,17 @@ function logViewSnapshot(trackedVideoId, brandId, platform, viewCount, SUPABASE_
     method: 'POST',
     headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
     body: JSON.stringify({ tracked_video_id: trackedVideoId, brand_id: brandId, platform, view_count: viewCount }),
+  }).catch(() => {});
+}
+// One row per brand+platform per run — account-level (not per-video), same fire-and-forget
+// pattern as logViewSnapshot above. See add-follower-snapshots.sql for the table and
+// FOLLOWER_SNAPSHOTS_DATA's declaration in index.html for what this powers (Analytics ->
+// Audience growth: latest count, % vs a prior period, and a trend line).
+function logFollowerSnapshot(brandId, platform, followerCount, SUPABASE_URL, sbHeaders) {
+  fetch(`${SUPABASE_URL}/rest/v1/follower_snapshots`, {
+    method: 'POST',
+    headers: { ...sbHeaders, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: JSON.stringify({ brand_id: brandId, platform, follower_count: followerCount }),
   }).catch(() => {});
 }
 
