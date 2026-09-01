@@ -239,6 +239,8 @@ async function processOneVideo(v, brand, SUPABASE_URL, sbHeaders) {
         eligible_until: eligibleUntil,
         status: alreadyHit ? 'hit' : 'tracking',
         earned: alreadyHit,
+        // See scout-tiktok.js for the full rationale (identical here).
+        hit_at: alreadyHit ? new Date().toISOString() : null,
         // snapshot the brand's current rate at discovery time — if the brand's deal changes
         // later (e.g. a warm-up brief ending), only newly-discovered videos pick up the new
         // rate; this one keeps what applied when it was found. Editable per-video afterward.

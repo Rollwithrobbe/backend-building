@@ -236,6 +236,11 @@ async function processOneVideo(video, brand, SUPABASE_URL, sbHeaders) {
         eligible_until: eligibleUntil,
         status: alreadyHit ? 'hit' : 'tracking',
         earned: alreadyHit,
+        // A video can arrive already over the requirement — first time we ever see it is also
+        // the first moment we can know it hit, so that's the best available hit_at here (same
+        // detection-bounded precision as the tracking->hit PATCH below, just a one-run window
+        // instead of whatever the check interval is).
+        hit_at: alreadyHit ? new Date().toISOString() : null,
         pay_amount: brand.base_pay,
         thumbnail_url: video.cover_image_url || null,
       }),
