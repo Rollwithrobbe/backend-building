@@ -859,6 +859,14 @@
     padding:14px 16px; margin:0 0 18px;
   }
   .cloud-restore-banner b{ color:var(--text); font-size:13.5px; }
+
+  /* Brand Comparison's Outstanding group — Base/CPM/Total read as one tight unit under a shared
+     "Outstanding" header, not three separate columns: a common tint, no gridline between them,
+     a real border only where the group starts/ends against its neighbors. */
+  .out-group{ background:var(--surface-2); }
+  .out-start{ border-left:1px solid var(--border-soft); }
+  .out-end{ border-right:1px solid var(--border-soft); }
+  .out-group-header{ text-align:center !important; }
 </style>
 </head>
 <body>
@@ -2681,7 +2689,11 @@ function renderBrandComparisonTable(){
 
   const col = (k, label, align, title) => {
     const active = !BRAND_ROW_ORDER && BRAND_TABLE_SORT.key===k;
-    return `<th data-sort-brand="${k}" ${title?`title="${escapeHtml(title)}"`:''} style="cursor:pointer; user-select:none; white-space:nowrap; ${align?`text-align:${align};`:''} ${active?'color:var(--text);':''}">${escapeHtml(label)}${active ? (BRAND_TABLE_SORT.dir==='asc'?' ↑':' ↓') : ''}</th>`;
+    return `<th rowspan="2" data-sort-brand="${k}" ${title?`title="${escapeHtml(title)}"`:''} style="cursor:pointer; user-select:none; white-space:nowrap; ${align?`text-align:${align};`:''} ${active?'color:var(--text);':''}">${escapeHtml(label)}${active ? (BRAND_TABLE_SORT.dir==='asc'?' ↑':' ↓') : ''}</th>`;
+  };
+  const outCol = (k, label, extraClass) => {
+    const active = !BRAND_ROW_ORDER && BRAND_TABLE_SORT.key===k;
+    return `<th class="out-group ${extraClass||''}" data-sort-brand="${k}" style="cursor:pointer; user-select:none; white-space:nowrap; text-align:right; ${active?'color:var(--text);':''}">${escapeHtml(label)}${active ? (BRAND_TABLE_SORT.dir==='asc'?' ↑':' ↓') : ''}</th>`;
   };
 
   const totalEarned = sorted.reduce((s,r)=>s+r.earned,0);
@@ -2704,18 +2716,25 @@ function renderBrandComparisonTable(){
       </div>
     </div>
     <div class="brand-cmp-body" id="brandCmpBody"><div class="brand-cmp-body-inner" style="overflow-x:auto;"><table>
-      <thead><tr>
-        <th class="brand-cmp-grip-col" title="Drag a row to reorder"></th>
-        ${col('name','Brand')}
-        ${col('count','Deliverables','right','All time')}
-        ${col('hitRate','Hit rate','right','All time')}
-        ${col('views30d','Views — 30d','right','Total raw views across every platform posted in the last 30 days (not per-video — a crosspost counts on each platform it reached). Rolls forward live: a video drops out of this the day it turns 31 days old.')}
-        ${col('viewsAllTime','Views — all time','right','Total raw views across every platform, ever. Only as complete as tracking allows — a video that aged out of its brief\'s window stops being checked, so this is its view count as of its last real check, not necessarily its true current count.')}
-        ${col('avgPayout','Avg payout','right','All time, per video that actually hit')}
-        ${col('earned','Earned (all time)','right')}
-        ${col('received','Received (all time)','right','Actually paid — logged on the Payments tab')}
-        ${col('outstanding','Outstanding','right','Earned but not yet marked received in Payments')}
-      </tr></thead>
+      <thead>
+        <tr>
+          <th class="brand-cmp-grip-col" rowspan="2" title="Drag a row to reorder"></th>
+          ${col('name','Brand')}
+          ${col('count','Deliverables','right','All time')}
+          ${col('hitRate','Hit rate','right','All time')}
+          ${col('views30d','Views — 30d','right','Total raw views across every platform posted in the last 30 days (not per-video — a crosspost counts on each platform it reached). Rolls forward live: a video drops out of this the day it turns 31 days old.')}
+          ${col('viewsAllTime','Views — all time','right','Total raw views across every platform, ever. Only as complete as tracking allows — a video that aged out of its brief\'s window stops being checked, so this is its view count as of its last real check, not necessarily its true current count.')}
+          ${col('avgPayout','Avg payout','right','All time, per video that actually hit')}
+          ${col('earned','Earned (all time)','right')}
+          ${col('received','Received (all time)','right','Actually paid — logged on the Payments tab')}
+          <th colspan="3" class="out-group out-start out-end out-group-header" title="Earned but not yet marked received in Payments">Outstanding</th>
+        </tr>
+        <tr>
+          ${outCol('outstandingBase','Base','out-start')}
+          ${outCol('outstandingCpm','CPM')}
+          ${outCol('outstanding','Total','out-end')}
+        </tr>
+      </thead>
       <tbody id="brandCmpTbody" class="dnd-tbody">
         ${sorted.map(r => `<tr class="row-click" draggable="true" data-row-key="${brandCmpRowKey(r)}" data-open-brand-breakdown data-brand-id="${r.id||''}" data-brand-name="${escapeHtml(r.name)}" data-brand-color="${r.color}">
           <td class="brand-cmp-grip">${gripSvg}</td>
@@ -2732,7 +2751,9 @@ function renderBrandComparisonTable(){
           <td class="mono" style="text-align:right;">${money(r.avgPayout)}</td>
           <td class="mono fx-green" style="text-align:right;">${money(r.earned)}${r.earnedCpm>0?`<div class="mono" style="font-size:10px; color:var(--text-dim); font-weight:400; margin-top:2px;">incl. ${money(r.earnedCpm)} CPM</div>`:''}</td>
           <td class="mono" style="text-align:right;">${money(r.received)}</td>
-          <td class="mono ${r.outstanding>0?'fx-red':''}" style="text-align:right;">${money(r.outstanding)}${r.outstandingCpm>0?`<div class="mono" style="font-size:10px; color:var(--text-dim); font-weight:400; margin-top:2px;">${money(r.outstandingBase)} base · ${money(r.outstandingCpm)} CPM</div>`:''}</td>
+          <td class="mono out-group out-start ${r.outstandingBase>0?'fx-red':''}" style="text-align:right;">${money(r.outstandingBase)}</td>
+          <td class="mono out-group ${r.outstandingCpm>0?'fx-red':''}" style="text-align:right;">${r.outstandingCpm>0 ? money(r.outstandingCpm) : '<span style="color:var(--text-faint)">—</span>'}</td>
+          <td class="mono out-group out-end ${r.outstanding>0?'fx-red':''}" style="text-align:right; font-weight:700;">${money(r.outstanding)}</td>
         </tr>`).join('')}
       </tbody>
       <tfoot>
@@ -2742,7 +2763,9 @@ function renderBrandComparisonTable(){
           <td></td><td></td><td></td><td></td><td></td>
           <td class="mono fx-green" style="text-align:right; font-weight:700;">${money(totalEarned)}${totalEarnedCpm>0?`<div class="mono" style="font-size:10px; color:var(--text-dim); font-weight:400; margin-top:2px;">incl. ${money(totalEarnedCpm)} CPM</div>`:''}</td>
           <td class="mono" style="text-align:right; font-weight:700;">${money(totalReceived)}</td>
-          <td class="mono fx-red" style="text-align:right; font-weight:700;">${money(totalOutstanding)}${totalOutstandingCpm>0?`<div class="mono" style="font-size:10px; color:var(--text-dim); font-weight:400; margin-top:2px;">${money(totalOutstanding-totalOutstandingCpm)} base · ${money(totalOutstandingCpm)} CPM</div>`:''}</td>
+          <td class="mono out-group out-start ${(totalOutstanding-totalOutstandingCpm)>0?'fx-red':''}" style="text-align:right; font-weight:700;">${money(totalOutstanding-totalOutstandingCpm)}</td>
+          <td class="mono out-group ${totalOutstandingCpm>0?'fx-red':''}" style="text-align:right; font-weight:700;">${totalOutstandingCpm>0 ? money(totalOutstandingCpm) : '<span style="color:var(--text-faint)">—</span>'}</td>
+          <td class="mono out-group out-end ${totalOutstanding>0?'fx-red':''}" style="text-align:right; font-weight:700;">${money(totalOutstanding)}</td>
         </tr>
       </tfoot>
     </table></div></div>
