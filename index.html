@@ -1714,6 +1714,9 @@ function brandTotals(brandId){
     // the ordinary base pay sitting right next to a much smaller real CPM number.
     contentEarnedCpm = hitItems.reduce((s,dv) => {
       const rep = dv.repRow || dv.rows[0];
+      // An override (see tcAmount's comment) means dv.payAmount is just the flat override number
+      // — none of it is "CPM," regardless of what a covering Brief would otherwise compute.
+      if(rep.manual_pay_override != null) return s;
       const m = resolveActiveModel(rep);
       if(!m || (m.type!=='cpm' && m.type!=='milestones')) return s;
       const activeRows = dv.rows.filter(r=>!r.excluded);
@@ -1780,6 +1783,13 @@ function resolveActiveModel(r){
   return null;
 }
 function tcAmount(r){
+  // An explicit per-video override (set from the "Edit tracked video" modal — see
+  // renderTrackedVideoModal's hint) wins over absolutely everything else, Brief included. Without
+  // this check first, a Brief covering this video's post date would silently override a
+  // deliberately-set one-off (e.g. a warm-up video paid $5 instead of the brand's normal rate) the
+  // moment that Brief went live — exactly what happened to two real Amboras warm-up videos before
+  // this field existed, with pay_amount as the only "override," which a Brief always beat.
+  if(r.manual_pay_override != null) return Number(r.manual_pay_override)||0;
   const model = resolveActiveModel(r);
   // Routed through pmModelPayout (not pmCpmPayout/pmMilestonePayout directly) so a locked model
   // gets the same optional hybrid base-pay-on-top behavior as a Brief does — one place defines
@@ -1841,7 +1851,11 @@ function getDeliverables(){
     // input to that model that differs between "one platform" (rep alone, the old behavior) and
     // "every platform" (perPlatform/combined, below). Flat pay (no model at all) doesn't depend on
     // views either way, so it still just reads straight off rep via tcAmount.
-    const activeModel = resolveActiveModel(rep);
+    // rep.manual_pay_override is checked FIRST, same as tcAmount does — this path computes a
+    // cpm/milestones model directly (for platformMode) rather than calling tcAmount(rep), so
+    // without repeating that check here an override would get silently ignored the moment a
+    // Brief/locked model also applied, exactly the bug this field exists to prevent.
+    const activeModel = rep.manual_pay_override != null ? null : resolveActiveModel(rep);
     const payAmount = activeModel ? (() => {
       const { base, performance } = pmModelPayoutSplitForRows(activeModel, consider);
       return base + performance;
@@ -2613,6 +2627,7 @@ function brandComparisonRows(){
     // brandTotals()'s comment.
     const earnedCpm = hitItems.reduce((s,dv) => {
       const rep = dv.repRow || dv.rows[0];
+      if(rep.manual_pay_override != null) return s;
       const m = resolveActiveModel(rep);
       if(!m || (m.type!=='cpm' && m.type!=='milestones')) return s;
       const activeRows = dv.rows.filter(r=>!r.excluded);
@@ -3669,7 +3684,12 @@ function renderTrackedContent(){
           // of the model's platformMode (perPlatform sums each platform's own CPM; combined sums
           // the views first) — showing just rep's own number here would silently disagree with
           // the real total whenever the deliverable spans more than one platform.
-          const lockedModel = resolveActiveModel(rep);
+          // An explicit per-video override (see tcAmount's comment) beats a Brief/locked model
+          // entirely — without this check, a Brief-covered deliverable with an override set would
+          // still show a CPM/milestones split here computed off its view count, silently
+          // disagreeing with dv.payAmount (which correctly used the override, via tcAmount).
+          const isOverridden = rep.manual_pay_override != null;
+          const lockedModel = isOverridden ? null : resolveActiveModel(rep);
           const isDynamic = lockedModel && (lockedModel.type==='cpm' || lockedModel.type==='milestones');
           const activeGroupRows = dv.rows.filter(r=>!r.excluded);
           const considerRows = activeGroupRows.length ? activeGroupRows : dv.rows;
@@ -6540,11 +6560,17 @@ function renderTrackedVideoModal(){
   const defaultPay = Number(d.brands?.base_pay || 0);
   const brandViewReq = d.brands?.view_requirement;
   const views = Number(d.view_count || 0);
+  // What this video would price at automatically right now — a covering Brief, else the
+  // discovery-time lock, else the brand's flat rate — ignoring any manual_pay_override, purely so
+  // the field below can show it for reference. Same priority order tcAmount() itself uses, minus
+  // the override check (which is the whole point of this field).
+  const autoModel = resolveActiveModel(d);
+  const autoAmount = autoModel ? pmModelPayout(autoModel, views) : Number(d.pay_amount ?? defaultPay);
   return `<div class="modal ${MODAL_ENTER?'modal-enter':''}">
     <h3>Edit tracked video</h3>
     <div class="hint" style="margin-bottom:12px;">${escapeHtml(d.title || 'Untitled')} — ${escapeHtml(d.brands?.name || 'Unassigned')} · ${(d.platform||'').toUpperCase()} · ${views.toLocaleString()} views currently</div>
     <div class="field-row">
-      <div class="field"><label>Payout ($)</label><input type="number" id="f-tvpay" value="${d.pay_amount ?? defaultPay}" step="0.01" /></div>
+      <div class="field"><label>Payout override ($)</label><input type="number" id="f-tvpay" value="${d.manual_pay_override ?? ''}" placeholder="Pricing automatically at ${money(autoAmount)}" step="0.01" /></div>
       <div class="field"><label>Status</label>
         <select id="f-tvstatus">
           <option value="tracking" ${d.status==='tracking'?'selected':''}>Tracking</option>
@@ -6553,7 +6579,7 @@ function renderTrackedVideoModal(){
         </select>
       </div>
     </div>
-    <div class="hint" style="margin:-6px 0 12px;">Defaults to the brand's current rate (${money(defaultPay)}) at the moment it was discovered — override here for a one-off (e.g. a warm-up video paid differently). Set status to "Hit" directly for a video that doesn't need view tracking at all.</div>
+    <div class="hint" style="margin:-6px 0 12px;">Currently pricing automatically at ${money(autoAmount)} (the brand's active Brief/CPM rate, or its flat rate if it has neither). Leave blank to keep following that — which is what makes it move if the brand's rate or an active Brief changes later. Set a number to lock this one video to it instead (e.g. a warm-up video deliberately paid less) — it wins over everything else from here on, including a Brief covering this video's date, until you clear it again. Set status to "Hit" directly for a video that doesn't need view tracking at all.</div>
     <div class="field"><label>View requirement for this video</label><input type="number" id="f-tvviewreq" value="${d.view_requirement_override ?? ''}" placeholder="Follows the brand's current requirement (${brandViewReq ?? '—'})" min="0" /></div>
     <div class="hint" style="margin:-6px 0 12px;">Leave blank to keep following the brand's requirement — which is what makes it move if you edit the brand's own setting later. Set a number to lock this one video to its own threshold instead (e.g. it was negotiated at a different view count, or the brand's requirement changed after this was posted and you don't want it retroactively affected). Already at or above the number you set here? Saving flips it to "Hit" right away.</div>
     <div class="field"><label><input type="checkbox" class="checkbox" id="f-tvexcluded" ${d.excluded?'checked':''}/> Exclude from tracking &amp; earnings — the scouting job stops updating it and it's dropped from every total</label></div>
@@ -7175,7 +7201,8 @@ function bindGlobalHandlers(){
   if(saveTrackedVideo) saveTrackedVideo.addEventListener('click', async () => {
     const d = MODAL_STATE.draft;
     const id = d.id;
-    const payAmount = Number(document.getElementById('f-tvpay').value) || 0;
+    const payRaw = document.getElementById('f-tvpay').value.trim();
+    const manualPayOverride = payRaw === '' ? null : Number(payRaw);
     let status = document.getElementById('f-tvstatus').value;
     const excluded = document.getElementById('f-tvexcluded').checked;
     const viewReqRaw = document.getElementById('f-tvviewreq').value.trim();
@@ -7194,11 +7221,22 @@ function bindGlobalHandlers(){
       const res = await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${encodeURIComponent(id)}`, {
         method: 'PATCH',
         headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-        body: JSON.stringify({ pay_amount: payAmount, status, excluded, earned, view_requirement_override: viewRequirementOverride })
+        body: JSON.stringify({ status, excluded, earned, view_requirement_override: viewRequirementOverride })
       });
       if(!res.ok) throw new Error(`Supabase returned ${res.status}`);
       const row = TRACKED_CONTENT_DATA && TRACKED_CONTENT_DATA.find(r=>r.id===id);
-      if(row){ row.pay_amount = payAmount; row.status = status; row.excluded = excluded; row.earned = earned; row.view_requirement_override = viewRequirementOverride; }
+      if(row){ row.status = status; row.excluded = excluded; row.earned = earned; row.view_requirement_override = viewRequirementOverride; }
+      // Separate, best-effort PATCH — manual_pay_override is a newer column; if the migration
+      // hasn't run yet this just silently no-ops instead of failing the save above too (same
+      // split-write pattern used everywhere else a maybe-missing column touches a critical save).
+      try{
+        await fetch(`${SUPABASE_URL}/rest/v1/tracked_videos?id=eq.${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+          body: JSON.stringify({ manual_pay_override: manualPayOverride }),
+        });
+        if(row) row.manual_pay_override = manualPayOverride;
+      }catch(e){ /* best-effort — see comment above */ }
       closeModal();
     }catch(e){
       alert('Could not save — ' + e.message);
