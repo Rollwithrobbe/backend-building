@@ -1729,7 +1729,20 @@ function brandTotals(brandId){
   // a CPM bonus is realized the moment it's paid — you don't know the amount until the brand tells
   // you, so unlike base pay it never sits "pending" against a video; it counts straight to Earned
   const totalEarned = contentEarned + receivedCpm;
-  return { count, contentEarned, contentEarnedCpm, totalEarned, pending, received, receivedBase, receivedCpm, outstanding: totalEarned - received };
+  const outstanding = totalEarned - received;
+  // Splitting outstanding into its base/CPM pieces — algebraically, outstanding always equals
+  // contentEarned - receivedBase (the manually-logged receivedCpm above cancels itself out: it's
+  // added into totalEarned, then subtracted right back out as part of received, so it never
+  // actually affects the total either way). That leaves a clean split with no double-counting:
+  //   outstandingBase = the automated base-pay portion earned, minus the base share of what's
+  //     actually been paid (received minus any logged CPM bonus).
+  //   outstandingCpm = the automated CPM/milestone performance portion earned. A logged CPM bonus
+  //     doesn't reduce this bucket — it's a different "CPM" (see contentEarnedCpm's comment above)
+  //     that's already fully settled the instant it's logged, never sitting outstanding regardless.
+  // The two always sum to exactly `outstanding` above.
+  const outstandingBase = (contentEarned - contentEarnedCpm) - receivedBase;
+  const outstandingCpm = contentEarnedCpm;
+  return { count, contentEarned, contentEarnedCpm, totalEarned, pending, received, receivedBase, receivedCpm, outstanding, outstandingBase, outstandingCpm };
 }
 // Looks up whichever payout_briefs row (if any) covers this video's posted_at date — see that
 // table's migration comment for the full mechanism. A brand with zero rows in PAYOUT_BRIEFS_DATA
@@ -2583,6 +2596,7 @@ function brandComparisonRows(){
       id: b.id, name: b.name, color: b.color,
       count: items.length, hitRate: hitCount/items.length*100, views30d, viewsAllTime,
       avgPayout: hitCount ? bt.contentEarned/hitCount : 0, earned: bt.totalEarned, earnedCpm: bt.contentEarnedCpm, received: bt.received, outstanding: bt.outstanding,
+      outstandingBase: bt.outstandingBase, outstandingCpm: bt.outstandingCpm,
     });
   });
   let fallbackIdx = 0;
@@ -2610,8 +2624,10 @@ function brandComparisonRows(){
       id: null, name, color: BRAND_TABLE_FALLBACK_COLORS[fallbackIdx++ % BRAND_TABLE_FALLBACK_COLORS.length],
       count: items.length, hitRate: hitCount/items.length*100, views30d, viewsAllTime,
       // no local brand link means no local payment record can exist for this name, so nothing's
-      // ever been marked "received" — outstanding is simply everything earned so far.
+      // ever been marked "received" — outstanding is simply everything earned so far, split the
+      // same way as the linked-brand path (nothing received means nothing offsets either piece).
       avgPayout: hitCount ? earned/hitCount : 0, earned, earnedCpm, received: 0, outstanding: earned,
+      outstandingBase: earned - earnedCpm, outstandingCpm: earnedCpm,
     });
   });
   return rows;
@@ -2656,6 +2672,7 @@ function renderBrandComparisonTable(){
   const totalEarnedCpm = sorted.reduce((s,r)=>s+(r.earnedCpm||0),0);
   const totalReceived = sorted.reduce((s,r)=>s+r.received,0);
   const totalOutstanding = sorted.reduce((s,r)=>s+r.outstanding,0);
+  const totalOutstandingCpm = sorted.reduce((s,r)=>s+(r.outstandingCpm||0),0);
   const collapsed = localStorage.getItem(BRAND_CMP_COLLAPSED_KEY) === '1';
   const gripSvg = dndGripSvg();
 
@@ -2699,7 +2716,7 @@ function renderBrandComparisonTable(){
           <td class="mono" style="text-align:right;">${money(r.avgPayout)}</td>
           <td class="mono fx-green" style="text-align:right;">${money(r.earned)}${r.earnedCpm>0?`<div class="mono" style="font-size:10px; color:var(--text-dim); font-weight:400; margin-top:2px;">incl. ${money(r.earnedCpm)} CPM</div>`:''}</td>
           <td class="mono" style="text-align:right;">${money(r.received)}</td>
-          <td class="mono ${r.outstanding>0?'fx-red':''}" style="text-align:right;">${money(r.outstanding)}</td>
+          <td class="mono ${r.outstanding>0?'fx-red':''}" style="text-align:right;">${money(r.outstanding)}${r.outstandingCpm>0?`<div class="mono" style="font-size:10px; color:var(--text-dim); font-weight:400; margin-top:2px;">${money(r.outstandingBase)} base · ${money(r.outstandingCpm)} CPM</div>`:''}</td>
         </tr>`).join('')}
       </tbody>
       <tfoot>
@@ -2709,7 +2726,7 @@ function renderBrandComparisonTable(){
           <td></td><td></td><td></td><td></td><td></td>
           <td class="mono fx-green" style="text-align:right; font-weight:700;">${money(totalEarned)}${totalEarnedCpm>0?`<div class="mono" style="font-size:10px; color:var(--text-dim); font-weight:400; margin-top:2px;">incl. ${money(totalEarnedCpm)} CPM</div>`:''}</td>
           <td class="mono" style="text-align:right; font-weight:700;">${money(totalReceived)}</td>
-          <td class="mono fx-red" style="text-align:right; font-weight:700;">${money(totalOutstanding)}</td>
+          <td class="mono fx-red" style="text-align:right; font-weight:700;">${money(totalOutstanding)}${totalOutstandingCpm>0?`<div class="mono" style="font-size:10px; color:var(--text-dim); font-weight:400; margin-top:2px;">${money(totalOutstanding-totalOutstandingCpm)} base · ${money(totalOutstandingCpm)} CPM</div>`:''}</td>
         </tr>
       </tfoot>
     </table></div></div>
