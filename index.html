@@ -4369,14 +4369,23 @@ function caShowChartTooltip(frac, clientX, clientY){
   if(!CA_CHART_SERIES) return;
   const tip = document.getElementById('chartTooltip');
   if(!tip) return;
-  const { platforms, byPlatform, days, pad, W } = CA_CHART_SERIES;
-  const targetX = pad + frac*(W-2*pad);
+  const { platforms, byPlatform, days } = CA_CHART_SERIES;
   // Every platform now shares one real calendar-day axis, so the date is the same across all
   // three rows — shown once as the header instead of repeated per row (which is also what let
   // the old tooltip grow wide enough to overflow the card).
   const dayIdx = Math.max(0, Math.min(days.length-1, Math.round(frac*(days.length-1))));
+  // Read straight off the real cumulative data for that day (byPlatform[p][dayIdx].value) — NOT
+  // interpolated off the drawn bezier curve at the exact cursor pixel, which is what this used to
+  // do. A bezier curve smoothed through a steep-rise-then-flatten shape (exactly what "cumulative
+  // views over time" looks like once a video takes off) routinely overshoots past its real points
+  // between them, so reading the curve's Y at an arbitrary x could show a lower number than the
+  // real value at an adjacent point — the true cumulative series is mathematically monotonic (it
+  // only ever adds as the day advances, see caCumulativeSeries), but the tooltip could still
+  // *display* an apparent dip purely from curve-fitting overshoot. The hover guide dot (see
+  // caMoveChartHoverGuide) is meant to glide along the visible curve, so it keeps using the bezier
+  // interpolation — only the number shown here needed to be the real, trustworthy value.
   const atCursor = platforms
-    .map(p => { const pt = caBezierAtX(byPlatform[p], targetX); return { p, value: caValueFromY(pt.y) }; })
+    .map(p => ({ p, value: (byPlatform[p][dayIdx] && byPlatform[p][dayIdx].value) || 0 }))
     .sort((a,b) => b.value - a.value); // highest first, not a fixed platform order
   let html = `<div class="ct-total">${escapeHtml(fmtDate(days[dayIdx]))}</div>`;
   atCursor.forEach(({p, value}) => {
