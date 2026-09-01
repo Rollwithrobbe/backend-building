@@ -294,6 +294,12 @@ async function processOneVideo(video, brand, SUPABASE_URL, sbHeaders) {
         comments: typeof video.comment_count === 'number' ? video.comment_count : null,
         shares: typeof video.share_count === 'number' ? video.share_count : null,
         last_checked_at: new Date().toISOString(), status, earned, thumbnail_url: video.cover_image_url || null,
+        // Set only on the exact PATCH where status actually flips to 'hit' — this branch only
+        // ever runs while row.status is still 'tracking' in the DB, so once this write lands the
+        // row leaves this branch for good and hit_at never gets overwritten. See
+        // add-hit-at-column.sql for why this exists (posted_at alone can't answer "how long did
+        // it take to hit").
+        ...(status === 'hit' ? { hit_at: new Date().toISOString() } : {}),
       }),
     });
     return { id: video.id, action: 'updated', views: viewCount, status };

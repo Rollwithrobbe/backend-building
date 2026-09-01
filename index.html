@@ -517,8 +517,8 @@
   .alerts-list{ display:flex; flex-direction:column; }
   .alert-item{ display:flex; gap:10px; padding:11px 14px; border-bottom:1px solid var(--border-soft); }
   .alert-item:last-child{ border-bottom:none; }
-  .alert-item[data-alert-goto-video]{ cursor:pointer; transition:background 100ms ease-out; }
-  .alert-item[data-alert-goto-video]:hover{ background:var(--surface); }
+  .alert-item[data-alert-goto-video], .alert-item[data-alert-goto-brand]{ cursor:pointer; transition:background 100ms ease-out; }
+  .alert-item[data-alert-goto-video]:hover, .alert-item[data-alert-goto-brand]:hover{ background:var(--surface); }
   .alert-icon{ font-size:15px; flex-shrink:0; line-height:1.4; }
   .alert-body{ min-width:0; }
   .alert-title{ font-size:12.5px; font-weight:600; color:var(--text); line-height:1.4; }
@@ -1846,6 +1846,11 @@ function getDeliverables(){
     excluded: !!r.excluded, status: r.status,
     payAmount: tcAmount(r), earnedAt: r.status==='hit' ? r.posted_at : null,
     postedAt: r.posted_at, title: r.title, thumbnail: r.thumbnail_url,
+    // The real timestamp status flipped to 'hit' (captured server-side, see the scout-*.js
+    // PATCH calls and add-hit-at-column.sql) — distinct from earnedAt above, which is really
+    // just posted_at reused and can't answer "how long did this take". Null for anything hit
+    // before this column existed, or still tracking/expired.
+    hitAt: r.hit_at || null,
   }));
   Object.entries(byGroup).forEach(([gid, rows]) => {
     const active = rows.filter(r=>!r.excluded);
@@ -1898,6 +1903,7 @@ function getDeliverables(){
       excluded: allExcluded, status,
       payAmount, earnedAt: hitRow ? hitRow.posted_at : null,
       postedAt, title: rep.title, thumbnail,
+      hitAt: hitRow ? (hitRow.hit_at || null) : null,
     });
   });
   return deliverables;
@@ -2055,6 +2061,29 @@ function syncAlertsLog(){
     }
   }
 
+  // Cadence misses — a brief brand that missed yesterday outright or is running under 70% of
+  // quota this week (see detectCadenceMisses). Live condition, not a fact — self-resolving the
+  // same way stale-coverage/run-missing are, keyed per brand (not per day), so posting today
+  // clears it on the next sync instead of it lingering as a stale warning.
+  const currentCadenceIds = new Set();
+  detectCadenceMisses().forEach(({brand, cadence}) => {
+    const id = 'cadence-' + brand.id;
+    currentCadenceIds.add(id);
+    if(byId.has(id)) return;
+    const detail = cadence.consecutive >= 1
+      ? `Missed ${cadence.consecutive} day${cadence.consecutive===1?'':'s'} in a row`
+      : `${cadence.madeTotal}/${cadence.quotaTotal} videos this week (${Math.round(cadence.ratio*100)}%)`;
+    const entry = {
+      id, type:'cadence-miss', ts:now, read:false, cleared:false, videoId:null, brandId: brand.id,
+      title: `${brand.name} is falling behind on cadence`,
+      detail,
+    };
+    log.push(entry); byId.set(id, entry); changed = true;
+  });
+  for(let i=log.length-1; i>=0; i--){
+    if(log[i].type==='cadence-miss' && !currentCadenceIds.has(log[i].id)){ log.splice(i,1); changed = true; }
+  }
+
   // No cap here on purpose — this runs on every render (see renderAlertsBell), and truncating
   // would drop entries out of byId, which would then look "un-logged" on the very next sync and
   // get re-added as unread, forever churning. Hit entries are a small, meaningful, permanent
@@ -2121,8 +2150,8 @@ function renderAlertsPanel(){
     ${alerts.length===0 ? `<div class="empty" style="padding:20px 10px;">All caught up — nothing needs your attention.</div>` : `
     <div class="alerts-list">
       ${alerts.map(a => `
-        <div class="alert-item alert-${a.type} ${a.read?'alert-read':''}" ${a.videoId?`data-alert-goto-video="${a.videoId}"`:''}>
-          <div class="alert-icon">${a.type==='hit' ? '🎉' : a.type==='run-error' ? '🔴' : a.type==='run-missing' ? '⏱️' : '⚠️'}</div>
+        <div class="alert-item alert-${a.type} ${a.read?'alert-read':''}" ${a.videoId?`data-alert-goto-video="${a.videoId}"`:a.brandId?`data-alert-goto-brand="${a.brandId}"`:''}>
+          <div class="alert-icon">${a.type==='hit' ? '🎉' : a.type==='run-error' ? '🔴' : a.type==='run-missing' ? '⏱️' : a.type==='cadence-miss' ? '📅' : '⚠️'}</div>
           <div class="alert-body">
             <div class="alert-title">${escapeHtml(a.title)}</div>
             <div class="alert-detail">${escapeHtml(a.detail)}</div>
@@ -2195,6 +2224,63 @@ function briefTrialInfo(brief){
   const today = new Date(todayISO()+'T00:00:00');
   const daysRemaining = Math.ceil((end - today) / (1000*60*60*24));
   return { endDate: end.toISOString().slice(0,10), daysRemaining, expired: daysRemaining < 0 };
+}
+// LOCAL date components (see todayISO's comment for why local, not UTC, matters here) for an
+// arbitrary Date, not just "now" — used below to walk backward day-by-day over brief.progress,
+// which is keyed by todayISO()-style local dates.
+function isoFromDate(d){
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+// How this brand's actual posting has tracked its brief's quota over the last N *completed*
+// days (today is deliberately excluded — it isn't over yet, so it can't be "missed" yet).
+// Walks backward from yesterday, comparing each day's real progress against that weekday's own
+// quota (briefDayQuota already spreads a fractional weekly cadence unevenly across weekdays, so
+// this compares against the right number per day, not just weekly/7). Returns null for a brand
+// with no active brief — there's no cadence to be behind on.
+// `consecutive` is the current miss streak counting back from yesterday (a zero-quota day
+// neither breaks nor extends it — it's not a day this brand owed anything). `ratio` is the
+// window-wide made/quota fraction — the "not consistent, even without a hard miss yesterday"
+// signal (e.g. hitting quota some days but falling further behind on others).
+function brandCadenceStatus(brand, lookbackDays){
+  if(!brand.brief || brand.brief.status!=='active') return null;
+  const brief = brand.brief;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const days = [];
+  let quotaTotal = 0, madeTotal = 0, missedDays = 0;
+  for(let i=1; i<=lookbackDays; i++){
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate()-i);
+    const quota = briefDayQuota(brief, d.getDay());
+    const made = (brief.progress && brief.progress[isoFromDate(d)]) || 0;
+    const missed = made < quota;
+    quotaTotal += quota; madeTotal += made;
+    if(missed) missedDays++;
+    days.push({ quota, made, missed });
+  }
+  let consecutive = 0;
+  for(const day of days){
+    if(day.quota <= 0) continue; // nothing owed that day — doesn't break or extend the streak
+    if(day.missed) consecutive++; else break;
+  }
+  return { quotaTotal, madeTotal, missedDays, consecutive, ratio: quotaTotal>0 ? madeTotal/quotaTotal : 1, deficit: Math.max(0, quotaTotal-madeTotal) };
+}
+// The urgent, "get going with it" signal for Tasks + the bell — a short 7-day window, flagged
+// either for missing yesterday outright (consecutive>=1) or for running under 70% of quota over
+// the week even without a hard miss yesterday (the "inconsistent" half of the ask). Brands with
+// no quota owed in the window at all (quotaTotal===0) are never flagged — nothing to be behind on.
+function detectCadenceMisses(){
+  return activeBriefBrands().map(brand => ({ brand, cadence: brandCadenceStatus(brand, 7) }))
+    .filter(x => x.cadence && x.cadence.quotaTotal > 0 && (x.cadence.consecutive >= 1 || x.cadence.ratio < 0.7));
+}
+// The longer-horizon, "is this brand's deal still worth it" signal for the Brands page — a
+// 30-day window, flagged at a stricter 60% threshold (a brand can have an off week without being
+// "drifting"; a month of running under 60% of quota is a real pattern).
+function detectCadenceDrift(brand){
+  const cadence = brandCadenceStatus(brand, 30);
+  if(!cadence || cadence.quotaTotal <= 0 || cadence.ratio >= 0.6) return null;
+  return cadence;
 }
 function briefVideoTitle(brandName, dateStr, count){
   // e.g. "Amboras-20-August" for the day's first, "Amboras-20-August-02" for the second, etc.
@@ -2296,6 +2382,33 @@ function renderBriefQuotas(){
         ${madeToday.length ? `<div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; padding-left:24px;">
           ${madeToday.map(c => `<button type="button" class="tag tag-neutral" data-open-content="${c.id}" style="cursor:pointer; border:none; font-family:inherit;" title="Edit this video">${escapeHtml(c.title)}</button>`).join('')}
         </div>` : ''}
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+// The most-urgent thing on Tasks — deliberately NOT a real DATA.tasks entry (no persisted
+// lifecycle, no priority-tier plumbing to extend) and not styled via PRIORITIES at all (only 3
+// tiers exist there — high/medium/low — and this needs to visually outrank all of them, so it
+// reuses --danger directly, same red as a real overdue task, just placed above everything else).
+// Live-computed every render straight off detectCadenceMisses(), same as the bell — posting today
+// makes it disappear on its own, no dismiss button needed.
+function renderCadenceBanner(){
+  const flagged = detectCadenceMisses();
+  if(flagged.length===0) return '';
+  return `<div class="table-wrap" style="margin-bottom:22px; border-color:var(--danger);">
+    <div class="tw-head" style="color:var(--danger);">⚠️ Falling behind on posting cadence</div>
+    ${flagged.map(({brand, cadence}) => {
+      const reason = cadence.consecutive >= 1
+        ? `Missed ${cadence.consecutive} day${cadence.consecutive===1?'':'s'} in a row`
+        : `${cadence.madeTotal}/${cadence.quotaTotal} this week (${Math.round(cadence.ratio*100)}%)`;
+      return `<div style="padding:12px 16px; border-bottom:1px solid var(--border-soft); display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span class="swatch" style="background:${brand.color}"></span>
+          <span style="font-size:13.5px;">${escapeHtml(brand.name)}</span>
+          <span class="tag tag-danger" style="font-size:9.5px;">${reason}</span>
+        </div>
+        <button class="btn btn-sm btn-primary" data-make-brief="${brand.id}" type="button">+1 Made</button>
       </div>`;
     }).join('')}
   </div>`;
@@ -3945,6 +4058,19 @@ function caAllDeliverables(){
     };
   });
 }
+// Average days from posted_at to hit_at across deliverables that have actually hit AND carry a
+// real hit_at (see getDeliverables()'s comment — older hits from before that column existed have
+// no hit_at and are silently excluded here rather than counted as "0 days", which would just be
+// wrong). Returns null (not 0) until at least one sample exists, so the stat card can say "no
+// data yet" instead of a misleading number.
+function caAvgDaysToHit(rows){
+  const samples = rows
+    .filter(dv => dv.status==='hit' && dv.hitAt && dv.postedAt)
+    .map(dv => (new Date(dv.hitAt) - new Date(dv.postedAt)) / 86400000)
+    .filter(d => d >= 0);
+  if(!samples.length) return null;
+  return { avg: samples.reduce((s,d)=>s+d,0)/samples.length, count: samples.length };
+}
 function caExtractTags(title){
   if(!title) return [];
   const matches = title.match(/#[a-z0-9_]+/gi) || [];
@@ -4146,6 +4272,7 @@ function renderContentAnalytics(){
   const byPlat = {};
   rows.forEach(dv => dv.rows.forEach(r => { byPlat[r.platform] = (byPlat[r.platform]||0) + (Number(r.view_count)||0); }));
   const bestPlat = Object.entries(byPlat).sort((a,b)=>b[1]-a[1])[0];
+  const velocity = caAvgDaysToHit(rows);
 
   return `
     <div class="page-head">
@@ -4168,6 +4295,7 @@ function renderContentAnalytics(){
       <div class="card"><div class="label">Total views</div><div class="big mono">${(totalV).toLocaleString()}</div><div class="foot">${rows.length} post${rows.length===1?'':'s'} in range</div></div>
       <div class="card"><div class="label">Hit rate</div><div class="big mono">${hitRate.toFixed(0)}%</div><div class="foot">${hitCount} of ${rows.length} crossed requirement</div></div>
       <div class="card"><div class="label">Best platform</div><div class="big">${bestPlat?(PLATFORM_DISPLAY_NAME[bestPlat[0]]||bestPlat[0]):'—'}</div><div class="foot">${bestPlat?bestPlat[1].toLocaleString()+' views in range':'No data in range'}</div></div>
+      <div class="card"><div class="label">Avg days to hit</div><div class="big mono">${velocity?velocity.avg.toFixed(1):'—'}</div><div class="foot">${velocity?`based on ${velocity.count} video${velocity.count===1?'':'s'} in range`:'Tracking starts once a video hits'}</div></div>
     </div>
 
     <div class="section-title" style="margin-top:0; display:flex; align-items:center; gap:8px;">${iconFlame(14)}Breaking out right now</div>
@@ -4791,9 +4919,15 @@ function renderBrands(){
           const trialBadge = trial
             ? ` <span class="tag ${trial.expired ? 'tag-danger' : 'tag-warn'}" style="font-size:9px;">${trial.expired ? 'Trial ended' : `Trial · ${trial.daysRemaining}d`}</span>`
             : '';
+          // 30-day cadence drift — a longer, stricter read than the Tasks banner's 7-day one,
+          // meant to answer "is this brand's deal still worth it" rather than "post today".
+          const drift = b.brief ? detectCadenceDrift(b) : null;
+          const driftBadge = drift
+            ? ` <span class="tag tag-warn" style="font-size:9px;" title="${drift.madeTotal}/${drift.quotaTotal} videos over the last 30 days">Cadence drifting · ${Math.round(drift.ratio*100)}%</span>`
+            : '';
           return `<tr class="row-click" draggable="true" data-row-key="${b.id}" data-open-brand="${b.id}">
             <td class="brand-cmp-grip">${dndGripSvg()}</td>
-            <td><span class="swatch" style="background:${b.color}"></span>${escapeHtml(b.name)}${trialBadge}</td>
+            <td><span class="swatch" style="background:${b.color}"></span>${escapeHtml(b.name)}${trialBadge}${driftBadge}</td>
             <td>${b.status==='active' ? '<span class="tag tag-good">Active</span>' : '<span class="tag tag-neutral">Inactive</span>'}</td>
             <td class="mono">${t.count}</td>
             <td class="mono">${money(t.totalEarned)}</td>
@@ -5225,6 +5359,7 @@ function renderTasks(){
       <div><h2>Tasks</h2><div class="sub">Set your own priority — daily tasks reset each day, timer tasks auto-complete when time's up.</div></div>
       <div class="head-actions"><button class="btn btn-primary" data-open-modal="task">+ Add task</button></div>
     </div>
+    ${renderCadenceBanner()}
     ${renderBriefQuotas()}
     ${tasks.length===0 ? emptyState('No tasks yet','Add daily warm-up scrolling, or anything else worth tracking.') : `
     <div class="table-wrap"><table>
@@ -6911,6 +7046,13 @@ function bindGlobalHandlers(){
       TC_VIEW_MODE = 'table';
       HIGHLIGHT_DV_KEY = key;
       goToView('trackedContent');
+    }));
+    // Cadence-miss alerts point at a brand, not a video — take you to Brands with that brand's
+    // edit modal already open (the Brief section is right there) rather than just the list.
+    document.querySelectorAll('[data-alert-goto-brand]').forEach(el => el.addEventListener('click', () => {
+      ALERTS_OPEN = false; ALERTS_SNAPSHOT = null; ALERTS_ANCHOR_RECT = null;
+      VIEW = 'brands';
+      openModal('brand', el.dataset.alertGotoBrand);
     }));
     // Wipes the whole notification log (both dimmed/read and, if any snuck in since the panel
     // opened, unread) — the only way an entry ever leaves the list short of this.

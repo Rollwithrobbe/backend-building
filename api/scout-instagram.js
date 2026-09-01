@@ -336,6 +336,9 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
         view_count: viewCount, likes, comments, shares,
         last_checked_at: new Date().toISOString(), status, earned,
         thumbnail_url: media.thumbnail_url || media.media_url || null, facebook_views_component: facebookComponent,
+        // Set only on the exact PATCH where status actually flips to 'hit' — see scout-tiktok.js
+        // for the full rationale (identical here).
+        ...(status === 'hit' ? { hit_at: new Date().toISOString() } : {}),
       }),
     });
     return { id: media.id, action: 'updated', views: viewCount, status };

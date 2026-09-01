@@ -297,6 +297,9 @@ async function processOneVideo(v, brand, SUPABASE_URL, sbHeaders) {
       body: JSON.stringify({
         view_count: viewCount, likes: likeCount, comments: commentCount,
         last_checked_at: new Date().toISOString(), status, earned, thumbnail_url: v.snippet?.thumbnails?.medium?.url || v.snippet?.thumbnails?.default?.url || null,
+        // Set only on the exact PATCH where status actually flips to 'hit' — see scout-tiktok.js
+        // for the full rationale (identical here).
+        ...(status === 'hit' ? { hit_at: new Date().toISOString() } : {}),
       }),
     });
     return { id: v.id, action: 'updated', views: viewCount, status };
