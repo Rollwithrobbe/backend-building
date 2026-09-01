@@ -330,7 +330,13 @@
   .data-actions button{ flex:1 1 calc(50% - 3px); font-size:10.5px; padding:6px 4px; }
   .data-actions button.full{ flex:1 1 100%; }
 
-  .main{ flex:1; min-width:0; padding:26px 32px 60px; max-width:1180px; }
+  /* Was capped at 1180px regardless of the actual window — fine on a 14" laptop, but left a big
+     dead strip down the right side of a wide external monitor with nothing using it. Raised the
+     cap rather than removing it: a data-table-heavy layout like this one benefits from real extra
+     width (more columns visible, less scrolling), but an uncapped page on something like a 34"
+     ultrawide would stretch cards and tables absurdly wide with huge gaps between short columns —
+     1600px comfortably fills a 27" display's browser window without going that far. */
+  .main{ flex:1; min-width:0; padding:26px 32px 60px; max-width:1600px; }
   .page-head{ display:flex; align-items:flex-end; justify-content:space-between; margin-bottom:22px; gap:16px; flex-wrap:wrap; }
   .page-head h2{ font-size:22px; }
   .page-head .sub{ color:var(--text-dim); font-size:13px; margin-top:4px; }
@@ -875,6 +881,14 @@
   #brandCmpCard th, #brandCmpCard td{ padding-left:9px; padding-right:9px; }
   #brandCmpCard th:first-child, #brandCmpCard td:first-child{ padding-left:14px; }
   #brandCmpCard th:last-child, #brandCmpCard td:last-child{ padding-right:14px; }
+  /* table-layout:auto (the default) sizes every column off its own content, then dumps whatever's
+     left of the 100% width as one lump wherever the browser's algorithm happens to put it — on a
+     wide monitor that showed up as a visible gap between Received and the Outstanding group
+     instead of every column stretching evenly. table-layout:fixed + the colgroup's percentages
+     make each column's share of the full width explicit and proportional, so the whole table
+     actually fills whatever room it's given — a 14" laptop and a 27" monitor each get all twelve
+     columns spread across their own full width, not a fixed pixel layout with a gap or a scrollbar. */
+  .brand-cmp-table{ table-layout:fixed; min-width:920px; }
 </style>
 </head>
 <body>
@@ -2723,7 +2737,12 @@ function renderBrandComparisonTable(){
         <span class="brand-cmp-chevron"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg></span>
       </div>
     </div>
-    <div class="brand-cmp-body" id="brandCmpBody"><div class="brand-cmp-body-inner" style="overflow-x:auto;"><table>
+    <div class="brand-cmp-body" id="brandCmpBody"><div class="brand-cmp-body-inner" style="overflow-x:auto;"><table class="brand-cmp-table">
+      <colgroup>
+        <col style="width:3%"><col style="width:15%"><col style="width:6%"><col style="width:9%">
+        <col style="width:9%"><col style="width:9%"><col style="width:8%"><col style="width:11%">
+        <col style="width:9%"><col style="width:7%"><col style="width:6%"><col style="width:8%">
+      </colgroup>
       <thead>
         <tr>
           <th class="brand-cmp-grip-col" rowspan="2" title="Drag a row to reorder"></th>
