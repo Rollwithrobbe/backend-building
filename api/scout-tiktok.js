@@ -115,12 +115,14 @@ async function scoutBrandAccount(brand, callGuard, CLIENT_KEY, CLIENT_SECRET, SU
     token = refreshed.access_token;
   }
 
-  // Account-level follower count — best-effort, and genuinely may not work: follower_count sits
-  // behind TikTok's user.info.stats field group, which this app's current OAuth scope
-  // (user.info.profile + video.list, see api/auth/tiktok/start.js) was never granted. Wrapped so
-  // a scope rejection here just silently skips the snapshot rather than failing the whole run —
-  // surfaced back to the caller as followerCountError so it's visible in the run's own response
-  // without needing a log dive.
+  // Account-level follower count — best-effort. follower_count sits behind TikTok's
+  // user.info.stats scope (added 2026-09-01, see api/auth/tiktok/start.js) — a brand connected
+  // BEFORE that change still only carries the old user.info.profile+video.list grant, since
+  // OAuth scopes are fixed at authorization time, not retroactive. That brand needs to reconnect
+  // (re-run the /api/auth/tiktok/start flow) before this actually starts working. Wrapped either
+  // way so a scope rejection here just silently skips the snapshot rather than failing the whole
+  // run — surfaced back to the caller as followerCountError so it's visible in the run's own
+  // response without needing a log dive.
   let followerCountError = null;
   try {
     const profileRes = await fetch(
@@ -132,7 +134,7 @@ async function scoutBrandAccount(brand, callGuard, CLIENT_KEY, CLIENT_SECRET, SU
     if (typeof followerCount === 'number') {
       logFollowerSnapshot(brand.id, 'tiktok', followerCount, SUPABASE_URL, sbHeaders);
     } else {
-      followerCountError = profileData?.error?.message || 'follower_count not returned — likely needs a broader OAuth scope (user.info.stats)';
+      followerCountError = profileData?.error?.message || 'follower_count not returned — this brand likely needs to reconnect TikTok to pick up the user.info.stats scope';
     }
   } catch (e) { followerCountError = String(e); }
 

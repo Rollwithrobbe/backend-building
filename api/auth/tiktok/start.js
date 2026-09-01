@@ -22,7 +22,13 @@ export default function handler(req, res) {
   }
 
   const redirectUri = 'https://backend-building.vercel.app/api/auth/tiktok/callback';
-  const scope = ['user.info.profile', 'video.list'].join(',');
+  // user.info.stats added (2026-09-01) — follower_count/following_count/likes_count/video_count
+  // all moved behind this scope specifically in TikTok's Feb 2024 field/scope migration; the
+  // user.info.basic and user.info.profile scopes no longer carry them. See scout-tiktok.js's
+  // follower-count fetch, which was silently failing without this. A brand already connected
+  // under the old scope needs to reconnect (re-run this /start flow) before its stored token
+  // actually carries the new permission — scopes are fixed at authorization time, not retroactive.
+  const scope = ['user.info.profile', 'user.info.stats', 'video.list'].join(',');
 
   const authUrl =
     `https://www.tiktok.com/v2/auth/authorize/` +
