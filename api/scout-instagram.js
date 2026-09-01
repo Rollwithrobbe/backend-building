@@ -253,7 +253,7 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
     return { id: media.id, action: 'skipped', reason: 'could not read view count', debug: debug[0] };
   }
   const { total: viewCount, facebookComponent } = views;
-  const { likes, comments, shares, saves } = engagement;
+  const { likes, comments, shares, saves, savedDebug } = engagement;
 
   const existingRes = await fetch(
     `${SUPABASE_URL}/rest/v1/tracked_videos?platform=eq.instagram&external_video_id=eq.${media.id}&select=*`,
@@ -359,7 +359,7 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
         ...(status === 'hit' ? { hit_at: new Date().toISOString() } : {}),
       }),
     });
-    return { id: media.id, action: 'updated', views: viewCount, status };
+    return { id: media.id, action: 'updated', views: viewCount, status, ...(savedDebug ? { savedDebug } : {}) };
   }
 
   // status is 'hit' or 'expired' — the payout outcome is already locked in either way, so
@@ -376,7 +376,7 @@ async function processOneMedia(media, brand, guard, token, SUPABASE_URL, sbHeade
       thumbnail_url: media.thumbnail_url || media.media_url || null, facebook_views_component: facebookComponent,
     }),
   });
-  return { id: media.id, action: 'updated (views only)', views: viewCount, status: row.status };
+  return { id: media.id, action: 'updated (views only)', views: viewCount, status: row.status, ...(savedDebug ? { savedDebug } : {}) };
 }
 
 // Runs fn(item) across items with at most `limit` in flight at once, preserving result order.
@@ -474,7 +474,18 @@ async function fetchEngagement(mediaId, token, guard) {
     const v = entry?.values?.[0]?.value;
     return typeof v === 'number' ? v : null;
   };
-  return { likes: valueFor('likes'), comments: valueFor('comments'), shares: valueFor('shares'), saves: valueFor('saved') };
+  // TEMP DIAGNOSTIC (2026-09-01) — 'saved' is consistently coming back null in production while
+  // likes/comments/shares populate fine from this exact same call, which rules out an auth/scope
+  // problem (those would fail the whole request, not just this one metric). Surfacing what Meta
+  // actually sent back for 'saved' specifically — either its own value.error, or the full list of
+  // metric names actually present in the response — so the next run's JSON reveals why, instead
+  // of guessing again. Remove this savedDebug field once the real cause is found.
+  let savedDebug = null;
+  if (valueFor('saved') === null) {
+    const savedEntry = data?.data?.find((d) => d.name === 'saved');
+    savedDebug = data?.error ? { requestError: data.error } : savedEntry ? { savedEntryButNoValue: savedEntry } : { metricNamesReturned: (data?.data || []).map(d => d.name) };
+  }
+  return { likes: valueFor('likes'), comments: valueFor('comments'), shares: valueFor('shares'), saves: valueFor('saved'), savedDebug };
 }
 // Returns { total, facebookComponent } — total is native + facebook_views combined (what
 // actually gets compared against the brand's requirement and stored as view_count, matching
