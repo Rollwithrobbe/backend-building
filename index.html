@@ -2290,7 +2290,19 @@ function brandCadenceStatus(brand, lookbackDays){
 // no quota owed in the window at all (quotaTotal===0) are never flagged — nothing to be behind on.
 function detectCadenceMisses(){
   return activeBriefBrands().map(brand => ({ brand, cadence: brandCadenceStatus(brand, 7) }))
-    .filter(x => x.cadence && x.cadence.quotaTotal > 0 && (x.cadence.consecutive >= 1 || x.cadence.ratio < 0.7));
+    .filter(x => x.cadence && x.cadence.quotaTotal > 0 && (x.cadence.consecutive >= 1 || x.cadence.ratio < 0.7))
+    .map(x => {
+      // The 7-day window above decides WHETHER to flag a brand at all — kept short on purpose so
+      // "under 70% this week" catches real slippage without being diluted by months of good
+      // history. But consecutive, read straight off that same window, can never report more than
+      // 7 by construction — a brand that hasn't posted in 11 real days would silently show
+      // "missed 7 days" forever instead of the true number. Re-derive an accurate, unbounded
+      // streak from a much longer window whenever there's a real miss streak to report (skipped
+      // for the "hit some days, still under 70%" case, where there's no single streak to name).
+      if(x.cadence.consecutive < 1) return x;
+      const longWindow = brandCadenceStatus(x.brand, 90);
+      return { brand: x.brand, cadence: longWindow || x.cadence };
+    });
 }
 // The longer-horizon, "is this brand's deal still worth it" signal for the Brands page — a
 // 30-day window, flagged at a stricter 60% threshold (a brand can have an off week without being
