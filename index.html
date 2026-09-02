@@ -4000,8 +4000,6 @@ function renderDashboard(){
       </div>
     </div>
 
-    ${renderCadenceBanner()}
-
     <div class="range-pills">
       ${RANGES.map(r=>`<button class="range-pill ${DASH_RANGE===r.id?'active':''}" data-range="${r.id}">${r.label}</button>`).join('')}
     </div>
@@ -4040,6 +4038,8 @@ function renderDashboard(){
     </div>
 
     ${renderBrandComparisonTable()}
+
+    ${renderCadenceBanner()}
 
     ${renderBriefQuotas()}
 
