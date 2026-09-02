@@ -2447,7 +2447,7 @@ function renderCadenceBanner(){
   const flagged = detectCadenceMisses();
   if(flagged.length===0) return '';
   return `<div class="table-wrap" style="margin-bottom:22px; border-color:var(--danger);">
-    <div class="tw-head" style="color:var(--danger);">⚠️ Falling behind on posting cadence</div>
+    <div class="tw-head" style="color:var(--danger);">⚠️ Missed posts</div>
     ${flagged.map(({brand, cadence}) => {
       // Same verified check as renderBriefQuotas() (reused, not re-derived, so the two widgets
       // can never disagree) — a brand linked to automated tracking has no manual counter to bump,
