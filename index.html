@@ -2204,7 +2204,15 @@ function briefDayQuota(brief, dow){
   return cum(dow) - cum(dow-1);
 }
 function activeBriefBrands(){
-  return DATA.brands.filter(b => b.brief && b.brief.status==='active');
+  // The brief's own status ('active'/'paused'/'ended') and the brand's own tracking status
+  // ('active'/'paused', toggled from the Brands page — see toggleBrandStatus()) are two separate
+  // fields that used to only get checked independently: a brand set inactive from Brands kept its
+  // brief marked 'active' underneath, so quota/cadence-miss/drift kept firing for it forever even
+  // though tracking itself had genuinely stopped. Pausing a brand now overrides its brief
+  // regardless of the brief's own status — nothing that needs attention should keep firing for a
+  // brand you've told the dashboard to stop watching. b.status defaults to active when unset,
+  // same convention the scout jobs themselves use (status.neq.paused).
+  return DATA.brands.filter(b => b.brief && b.brief.status==='active' && b.status!=='paused');
 }
 function briefTodayInfo(brand){
   const brief = brand.brief;
@@ -2320,6 +2328,10 @@ function cadenceReasonText(cadence){
   return `${cadence.madeTotal}/${cadence.quotaTotal} this week (${Math.round(cadence.ratio*100)}%)`;
 }
 function detectCadenceDrift(brand){
+  // Called directly per-brand from the Brands page (not routed through activeBriefBrands()), so
+  // it needs its own copy of the same paused-brand override — see activeBriefBrands()'s comment
+  // for the full rationale.
+  if(brand.status==='paused') return null;
   const cadence = brandCadenceStatus(brand, 30);
   if(!cadence || cadence.quotaTotal <= 0 || cadence.ratio >= 0.6) return null;
   return cadence;
