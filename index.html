@@ -1355,6 +1355,7 @@ function contentToSupabaseRow(c){
     created_at: c.createdAt || new Date().toISOString(), view_requirement: c.viewRequirement || null,
     view_requirement_met: !!c.viewRequirementMet, view_requirement_window_days: c.viewRequirementWindowDays || null,
     scheduled_date: c.scheduledDate || null, platforms: c.platforms || [],
+    counts_toward_earned: !!c.countsTowardEarned,
   };
 }
 function taskToSupabaseRow(t){
@@ -1437,6 +1438,7 @@ async function loadFromSupabase(){
     id: c.id, brandId: c.brand_id, title: c.title, basePay: Number(c.base_pay)||0, cpmBonus: Number(c.cpm_bonus)||0,
     createdAt: c.created_at, viewRequirement: c.view_requirement, viewRequirementMet: !!c.view_requirement_met,
     viewRequirementWindowDays: c.view_requirement_window_days, scheduledDate: c.scheduled_date, platforms: c.platforms || [],
+    countsTowardEarned: !!c.counts_toward_earned,
   }));
   DATA.tasks = (tasksRows||[]).map(t => ({
     id: t.id, title: t.title, brandId: t.brand_id, priority: t.priority, daily: !!t.daily, requiresTimer: !!t.requires_timer,
@@ -1754,6 +1756,13 @@ function brandTotals(brandId){
     pending = items.filter(dv=>dv.status==='tracking').reduce((s,dv)=>s+dv.payAmount,0);
     count = items.length;
   }
+  // A manually-flagged Content item (see manualEarnedForBrand's comment) — the one-off "this
+  // brand's deal never got real account tracking, but it did happen" path. Folded in as its own
+  // base/CPM pieces so it flows through the exact same split everything else already uses, and
+  // bumps the video count too since it's a real deliverable now, not just a production draft.
+  const manual = manualEarnedForBrand(brandId);
+  contentEarned += manual.base;
+  count += manual.count;
   const brandPayments = DATA.payments.filter(p => p.brandId === brandId);
   const received = brandPayments.reduce((s,p)=>s+(Number(p.amount)||0),0);
   const receivedCpm = brandPayments.reduce((s,p)=>s+(Number(p.cpmBonus)||0),0);
@@ -1766,11 +1775,13 @@ function brandTotals(brandId){
   // contentEarned - receivedBase (the manually-logged receivedCpm above cancels itself out: it's
   // added into totalEarned, then subtracted right back out as part of received, so it never
   // actually affects the total either way). That leaves a clean split with no double-counting:
-  //   outstandingBase = the automated base-pay portion earned, minus the base share of what's
-  //     actually been paid (received minus any logged CPM bonus).
-  //   outstandingCpm = the automated CPM/milestone performance portion earned. A logged CPM bonus
-  //     doesn't reduce this bucket — it's a different "CPM" (see contentEarnedCpm's comment above)
-  //     that's already fully settled the instant it's logged, never sitting outstanding regardless.
+  //   outstandingBase = the automated base-pay portion earned (now including any manually-flagged
+  //     content's base), minus the base share of what's actually been paid (received minus any
+  //     logged CPM bonus).
+  //   outstandingCpm = the automated CPM/milestone performance portion earned (now including any
+  //     manually-flagged content's CPM). A logged CPM bonus doesn't reduce this bucket — it's a
+  //     different "CPM" (see contentEarnedCpm's comment above) that's already fully settled the
+  //     instant it's logged, never sitting outstanding regardless.
   // The two always sum to exactly `outstanding` above.
   const outstandingBase = (contentEarned - contentEarnedCpm) - receivedBase;
   const outstandingCpm = contentEarnedCpm;
@@ -2175,14 +2186,34 @@ function allTotals(){
   // per-brand here — brandTotals(id).totalEarned is that one brand's own slice of this same
   // total, so adding both would double-count every linked brand. Received is unaffected (it's
   // Payments, which were never part of the automated total) and does need summing per brand.
-  let received = 0;
-  DATA.brands.forEach(b => { received += brandTotals(b.id).received; });
+  let received = 0, manualEarned = 0;
+  DATA.brands.forEach(b => {
+    received += brandTotals(b.id).received;
+    const manual = manualEarnedForBrand(b.id);
+    manualEarned += manual.base;
+  });
   const tc = trackedContentTotals();
-  const totalEarned = tc.earned;
+  const totalEarned = tc.earned + manualEarned;
   const pending = tc.pending;
   return { totalEarned, received, pending, outstanding: totalEarned - received, contentCount: DATA.content.length, brandCount: DATA.brands.length };
 }
 function brandById(id){ return DATA.brands.find(b=>b.id===id); }
+// A manually-flagged Content item's own explicit "count this toward Earned" opt-in — see its
+// countsTowardEarned field. Exists for a one-off deliverable you don't want to wire up real
+// account tracking for (e.g. a brand whose whole campaign was a single video): the toggle itself
+// is the signal that this really happened and should count, no other gating (published status,
+// view requirement, etc.) — those stay pure production tracking, unaffected either way.
+// Base pay only, deliberately — CPM already has a working manual path (a payment's own "CPM
+// bonus" field, see brandTotals' receivedCpm), which counts to Earned the instant it's logged
+// with zero content/video record needed. Giving this its own separate CPM field too would just
+// be a second place to enter the same money — genuinely double-counted if someone (reasonably)
+// fills in both for the same dollar, confirmed with a synthetic test before shipping this. Matches
+// how this brand's owner has already said they think about it: one aggregate number, not a
+// per-video CPM breakdown.
+function manualEarnedForBrand(brandId){
+  const items = DATA.content.filter(c => c.brandId===brandId && c.countsTowardEarned);
+  return { base: items.reduce((s,c)=>s+(Number(c.basePay)||0),0), count: items.length };
+}
 
 /* ---------------- recurring briefs ----------------
    A brief lives on a brand: a cadence (per day/week/month), a rate,
@@ -2569,11 +2600,24 @@ function trackedContentEarnedBetween(start, end, brandName){
     return dt>=start && dt<=end;
   }).reduce((s,d)=> s + d.payAmount, 0);
 }
+// A manually-flagged Content item's date for range bucketing — its real post date if it has one
+// (the normal case: you're logging a video that actually happened), else falls back to whenever
+// you logged it, so a range-scoped figure never silently drops one just because no platform was
+// marked Published on it.
+function manualEarnedDate(c){
+  return earnedDate(c) || (c.createdAt ? c.createdAt.slice(0,10) : todayISO());
+}
 function sumEarnedBetween(start, end){
-  // Earned is the automated tracker (plus CPM bonuses, which are logged on Payments — a money
-  // fact, not a Content one) — Content/Published no longer contribute anything here.
+  // Earned is the automated tracker, CPM bonuses (logged on Payments — a money fact, not a
+  // Content one), and any Content item explicitly flagged "count toward Earned" (see
+  // manualEarnedForBrand's comment) — everything else in Content/Published stays pure production
+  // tracking with zero effect here.
   let sum = cpmBonusInRange(start, end);
   sum += trackedContentEarnedBetween(start, end);
+  DATA.content.filter(c => c.countsTowardEarned).forEach(c => {
+    const d = new Date(manualEarnedDate(c)+'T12:00:00');
+    if(d>=start && d<=end) sum += Number(c.basePay)||0;
+  });
   return sum;
 }
 function sumReceivedBetween(start, end){
@@ -2608,6 +2652,16 @@ function buildSeries(range){
         byBrand[dv.brandName] = (byBrand[dv.brandName]||0) + dv.payAmount;
       });
     }
+    // Manually-flagged Content items — see manualEarnedForBrand's comment.
+    DATA.content.filter(c => c.countsTowardEarned).forEach(c => {
+      const d = new Date(manualEarnedDate(c)+'T12:00:00');
+      if(d<b.start || d>b.end) return;
+      const amt = Number(c.basePay)||0;
+      if(!amt) return;
+      const brandName = brandById(c.brandId)?.name || 'Unassigned';
+      total += amt;
+      byBrand[brandName] = (byBrand[brandName]||0) + amt;
+    });
     const breakdown = Object.entries(byBrand).sort((a,b)=>b[1]-a[1]).map(([name,sum])=>({name,sum}));
     return { label: b.label, value: total, breakdown };
   });
@@ -2755,6 +2809,16 @@ function renderBrandBreakdown(bounds){
       else{ rows.push({ brand: { name, color: FALLBACK_COLORS[fallbackIdx++ % FALLBACK_COLORS.length] }, sum: amt }); }
     });
   }
+  // Manually-flagged Content items — see manualEarnedForBrand's comment. Matched by brandId
+  // (not name) since these are always DATA.brands entries already sitting in `rows` from the
+  // initial map above, unlike the Supabase-only fallback rows tracked content can create.
+  DATA.content.filter(c => c.countsTowardEarned).forEach(c => {
+    const d = new Date(manualEarnedDate(c)+'T12:00:00');
+    if(d<bounds.start || d>bounds.end) return;
+    const amt = Number(c.basePay)||0;
+    const existing = rows.find(row => row.brand.id === c.brandId);
+    if(existing) existing.sum += amt;
+  });
   rows = rows.filter(r=>r.sum>0).sort((a,b)=>b.sum-a.sum);
   if(rows.length===0) return `<div class="table-wrap"><div class="empty" style="padding:24px 10px;">Nothing earned in this period yet.</div></div>`;
   const max = Math.max(...rows.map(r=>r.sum), 1);
@@ -6236,7 +6300,7 @@ function openModal(type, id=null){
     MODAL_STATE.draft = existing ? { ...JSON.parse(JSON.stringify(existing)), platforms: normalizePlatforms(existing.platforms) } : {
       id:uid('ct_'), brandId: DATA.brands[0]?.id || '', title:'', basePay:0, cpmBonus:0, createdAt: new Date().toISOString(),
       viewRequirement:null, viewRequirementMet:false, viewRequirementWindowDays:null, scheduledDate:null,
-      platforms: normalizePlatforms([])
+      countsTowardEarned:false, platforms: normalizePlatforms([])
     };
     if(!existing) applyBriefDefaultsToDraft(MODAL_STATE.draft, MODAL_STATE.draft.brandId);
   } else if(type==='payment'){
@@ -6885,7 +6949,17 @@ function renderContentModal(){
     <div class="field">
       <button type="button" class="btn btn-sm ${d.viewRequirementMet?'btn-primary':'btn-ghost'}" id="f-viewreqmet" style="width:100%;">${d.viewRequirementMet ? 'Requirement hit ✓ (click to undo)' : 'Mark requirement as hit'}</button>
     </div>
-    <div class="hint">This is pure production tracking and never affects Earned/Outstanding — that comes entirely from Tracked Content, fed automatically once your connected accounts pick this up. View requirement here is just for your own reference. Setting a platform to Published removes this from the In progress list. Payments are logged separately on the Payments tab.</div>
+    <div class="hint">This is pure production tracking and never affects Earned/Outstanding on its own — that comes from Tracked Content, fed automatically once your connected accounts pick this up. View requirement here is just for your own reference. Setting a platform to Published removes this from the In progress list. Payments are logged separately on the Payments tab.</div>
+
+    <div class="field" style="margin-top:14px; padding:12px; border:1px solid var(--border-soft); border-radius:8px; background:var(--surface-2);">
+      <label style="display:flex; align-items:center; gap:8px; margin-bottom:${d.countsTowardEarned?'10px':'0'};">
+        <input type="checkbox" class="checkbox" id="f-countsEarned" ${d.countsTowardEarned?'checked':''}/>
+        Count toward Earned
+      </label>
+      ${d.countsTowardEarned ? `
+      <div class="hint" style="margin:0 0 10px;">For a one-off deal you don't want to connect real account tracking for — e.g. a brand that ended their campaign after a single video. Enter its base pay below; this adds straight to Earned/Outstanding, independent of the production fields above. For any CPM bonus on top, log it on the payment instead (Payments → "Of that, CPM bonus") — that already counts to Earned on its own with no video record needed, so keep CPM there rather than entering the same money in two places.</div>
+      <div class="field"><label>Base pay ($)</label><input type="number" id="f-manualBasePay" value="${d.basePay||''}" step="0.01" placeholder="e.g. 30" /></div>` : ''}
+    </div>
 
     <div class="modal-actions">
       <div>${MODAL_STATE.id ? `<button class="btn btn-danger btn-sm" id="deleteContent" type="button">Delete</button>` : ''}</div>
@@ -7544,6 +7618,12 @@ function bindGlobalHandlers(){
     d.viewRequirement = Number(document.getElementById('f-viewreq').value) || null;
     d.viewRequirementWindowDays = Number(document.getElementById('f-viewreqwindow').value) || null;
     if(!d.viewRequirement) d.viewRequirementMet = false;
+    // d.countsTowardEarned itself is already kept live on the draft by the checkbox's own change
+    // handler (it has to be — toggling it re-renders the modal to show/hide these two fields, so
+    // by the time Save is clicked the fields only exist in the DOM at all when the box is checked).
+    if(MODAL_STATE.draft.countsTowardEarned){
+      d.basePay = Number(document.getElementById('f-manualBasePay').value) || 0;
+    }
     d.platforms.forEach(pd => {
       pd.active = document.querySelector(`[data-p-active="${pd.id}"]`).checked;
       pd.status = document.querySelector(`[data-p-status="${pd.id}"]`).value;
@@ -7564,6 +7644,8 @@ function bindGlobalHandlers(){
   });
   const viewReqBtn = document.getElementById('f-viewreqmet');
   if(viewReqBtn) viewReqBtn.addEventListener('click', () => { MODAL_STATE.draft.viewRequirementMet = !MODAL_STATE.draft.viewRequirementMet; render(); document.getElementById('overlay').classList.add('open'); });
+  const countsEarnedBox = document.getElementById('f-countsEarned');
+  if(countsEarnedBox) countsEarnedBox.addEventListener('change', (e) => { MODAL_STATE.draft.countsTowardEarned = e.target.checked; render(); document.getElementById('overlay').classList.add('open'); });
   const deleteContent = document.getElementById('deleteContent');
   if(deleteContent) deleteContent.addEventListener('click', () => {
     askConfirm('Delete this content entry? This cannot be undone.', () => {
