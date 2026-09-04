@@ -2556,10 +2556,22 @@ function buildBuckets(range){
   else if(range==='12m'){ bucketType='month'; count=12; }
   else {
     bucketType='month';
-    const earned = DATA.content.map(earnedDate).filter(Boolean).sort();
+    // "All time" has to span every real source of history, not just manual Content — that used to
+    // be the only thing checked here, which quietly broke once real activity lived almost entirely
+    // in automated Tracked Content: a brand-new manual entry with a recent date could make "all
+    // time" compute a SHORTER window than 12 months, silently clipping sumEarnedBetween/
+    // sumReceivedBetween below to that too-narrow range (a real bug report — "All time" showing
+    // less than "12 months" — traced back to exactly this). Earliest of every tracked video ever
+    // seen (any status, not just hit — this just needs the true start of activity, not of money),
+    // every manual Content item's own earned date, and every logged payment.
+    const dates = [];
+    DATA.content.forEach(c => { const d = earnedDate(c); if(d) dates.push(d); });
+    DATA.payments.forEach(p => { if(p.date) dates.push(p.date); });
+    if(TRACKED_CONTENT_DATA) TRACKED_CONTENT_DATA.forEach(r => { if(r.posted_at) dates.push(r.posted_at.slice(0,10)); });
+    dates.sort();
     count = 12;
-    if(earned.length){
-      const first = new Date(earned[0]+'T00:00:00');
+    if(dates.length){
+      const first = new Date(dates[0]+'T00:00:00');
       count = Math.max(1, Math.min(36, (now.getFullYear()-first.getFullYear())*12 + (now.getMonth()-first.getMonth()) + 1));
     }
   }
