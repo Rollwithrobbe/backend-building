@@ -1165,6 +1165,12 @@ let BRAND_TABLE_SORT = { key:'earned', dir:'desc' };
 // row is dragged; clicking a column header clears it and returns to sorting by that column.
 let BRAND_ROW_ORDER = JSON.parse(localStorage.getItem('rwr-brand-order') || 'null');
 const BRAND_CMP_COLLAPSED_KEY = 'rwr-brand-cmp-collapsed';
+// Whether Brand Comparison hides paused brands — a lifetime record naturally only grows as brand
+// relationships end, so this is a way to shorten it back down without losing the history (toggle
+// back off any time). Fallback rows (a brand name seen only in tracked content, never linked
+// locally — see brandComparisonRows' second pass) have no status concept at all and always show,
+// same as they always have.
+const BRAND_CMP_HIDE_INACTIVE_KEY = 'rwr-brand-cmp-hide-inactive';
 // Same drag-to-reorder idea as Brand Comparison's BRAND_ROW_ORDER above, kept as its own separate
 // state — this is a different table (the Brands page's own list, keyed by local brand id, no
 // column-sort fallback to clear back to) so it gets its own order and its own storage key.
@@ -2882,7 +2888,7 @@ function brandComparisonRows(){
     const views30d = sumViews30d(r => r.brand_id === b.supabaseBrandId);
     const viewsAllTime = sumViewsAllTime(r => r.brand_id === b.supabaseBrandId);
     rows.push({
-      id: b.id, name: b.name, color: b.color,
+      id: b.id, name: b.name, color: b.color, status: b.status || 'active',
       count: items.length, hitRate: hitCount/items.length*100, views30d, viewsAllTime,
       avgPayout: hitCount ? bt.contentEarned/hitCount : 0, earned: bt.totalEarned, earnedCpm: bt.contentEarnedCpm, received: bt.received, outstanding: bt.outstanding,
       outstandingBase: bt.outstandingBase, outstandingCpm: bt.outstandingCpm,
@@ -2936,8 +2942,15 @@ function setBrandComparisonCollapsed(collapsed){
 }
 
 function renderBrandComparisonTable(){
-  const rows = brandComparisonRows();
-  if(rows.length===0) return emptyState('Nothing to compare yet', 'Once a brand has automated deliverables, it shows up here.');
+  const hideInactive = localStorage.getItem(BRAND_CMP_HIDE_INACTIVE_KEY) === '1';
+  const allRows = brandComparisonRows();
+  if(allRows.length===0) return emptyState('Nothing to compare yet', 'Once a brand has automated deliverables, it shows up here.');
+  const anyPaused = allRows.some(r => r.status==='paused');
+  const rows = hideInactive ? allRows.filter(r => r.status!=='paused') : allRows;
+  const hiddenCount = allRows.length - rows.length;
+  // Deliberately doesn't early-return on rows.length===0 (e.g. every brand happens to be paused
+  // right now) — the toggle itself lives in this same card's header, so bailing out here would
+  // hide the only way back to turning it off. Renders as a normal, empty table instead.
 
   let sorted;
   if(BRAND_ROW_ORDER){
@@ -2976,6 +2989,7 @@ function renderBrandComparisonTable(){
         <span class="brand-cmp-summary mono">${sorted.length} brand${sorted.length===1?'':'s'} · <span class="fx-green">${money(totalEarned)} earned</span> · <span class="${totalOutstanding>0?'fx-red':''}">${money(totalOutstanding)} outstanding</span></span>
       </div>
       <div style="display:flex; align-items:center; gap:10px; flex-shrink:0;">
+        ${anyPaused || hideInactive ? `<button type="button" class="btn btn-sm ${hideInactive?'btn-primary':'btn-ghost'}" id="btnHideInactiveBrands" title="${hideInactive ? `${hiddenCount} paused brand${hiddenCount===1?'':'s'} hidden — click to show them again` : 'Hide paused brands to shorten this table'}" style="text-transform:none; letter-spacing:0; font-weight:600;">${hideInactive ? `Show ${hiddenCount} inactive` : 'Hide inactive'}</button>` : ''}
         ${BRAND_ROW_ORDER ? `<button type="button" class="btn btn-ghost btn-sm" id="btnResetBrandOrder" title="Drop the custom order and go back to sorting by column" style="text-transform:none; letter-spacing:0; font-weight:600;">Reset order</button>` : ''}
         <span class="brand-cmp-chevron"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg></span>
       </div>
@@ -7193,13 +7207,20 @@ function bindGlobalHandlers(){
   }));
   const brandCmpHead = document.getElementById('brandCmpHead');
   if(brandCmpHead) brandCmpHead.addEventListener('click', (e) => {
-    if(e.target.closest('#btnResetBrandOrder')) return; // handled by its own listener below
+    if(e.target.closest('#btnResetBrandOrder') || e.target.closest('#btnHideInactiveBrands')) return; // each handled by its own listener below
     setBrandComparisonCollapsed(!document.getElementById('brandCmpCard').classList.contains('collapsed'));
   });
   const btnResetBrandOrder = document.getElementById('btnResetBrandOrder');
   if(btnResetBrandOrder) btnResetBrandOrder.addEventListener('click', (e) => {
     e.stopPropagation();
     BRAND_ROW_ORDER = null; localStorage.removeItem('rwr-brand-order');
+    render();
+  });
+  const btnHideInactiveBrands = document.getElementById('btnHideInactiveBrands');
+  if(btnHideInactiveBrands) btnHideInactiveBrands.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const now = localStorage.getItem(BRAND_CMP_HIDE_INACTIVE_KEY) === '1';
+    localStorage.setItem(BRAND_CMP_HIDE_INACTIVE_KEY, now ? '0' : '1');
     render();
   });
   bindBrandComparisonDnD();
