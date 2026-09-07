@@ -913,16 +913,27 @@
   .pred-row input[type="range"]:disabled{ opacity:.4; }
   .pred-hr-readout{ font-family:'IBM Plex Mono',monospace; font-size:12.5px; font-weight:600; }
   .pred-hr-auto-tag{ font-size:9.5px; color:var(--text-faint); }
-  .pred-model-btn{ display:flex; flex-direction:column; gap:2px; background:var(--surface-2); border:1px solid var(--border); border-radius:7px; padding:6px 10px; cursor:pointer; text-align:left; width:100%; }
+  /* color:var(--text) explicitly — a bare <button> doesn't inherit page text color the way a div
+     or span does (the UA stylesheet gives it its own `color: buttontext`), so without this it was
+     rendering the browser's native near-black button text on this dark surface, unreadable. */
+  .pred-model-btn{ display:flex; flex-direction:column; gap:2px; background:var(--surface-2); border:1px solid var(--border); border-radius:7px; padding:6px 28px 6px 10px; cursor:pointer; text-align:left; width:100%; color:var(--text); position:relative; }
   .pred-model-btn:hover{ border-color:var(--accent-dim); }
   .pred-model-btn .pmb-type{ font-size:12px; font-weight:600; }
   .pred-model-btn .pmb-detail{ font-size:10.5px; color:var(--text-faint); font-family:'IBM Plex Mono',monospace; }
+  .pred-model-btn .pmb-chevron{ position:absolute; right:8px; top:50%; transform:translateY(-50%) rotate(0deg); transition:transform .2s ease; color:var(--text-faint); }
+  .pred-model-btn.open .pmb-chevron{ transform:translateY(-50%) rotate(180deg); }
   .pred-tail{ display:flex; flex-direction:column; align-items:flex-end; gap:6px; }
   .pred-monthly{ font-family:'IBM Plex Mono',monospace; font-size:14.5px; font-weight:700; color:var(--fx-green); text-align:right; }
   .pred-monthly.zero{ color:var(--text-faint); }
   .pred-include-toggle{ display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-faint); cursor:pointer; white-space:nowrap; }
-  .pred-panel{ display:none; border-top:1px solid var(--border-soft); background:var(--surface-2); padding:16px; }
-  .pred-panel.open{ display:block; }
+  /* Same grid-rows trick as .brand-cmp-body's own collapse — an actual "0 height" that can
+     transition smoothly, unlike display:none/block which can only ever snap. Needs the toggle to
+     be a direct class mutation on an element that's continuously in the DOM (see
+     wirePredictionRows' toggle-panel handler) — a full innerHTML re-render, like every other
+     structural change on this page uses, would give the browser no "before" frame to animate from. */
+  .pred-panel{ display:grid; grid-template-rows:0fr; transition:grid-template-rows .35s cubic-bezier(.22,1,.36,1); }
+  .pred-panel.open{ grid-template-rows:1fr; }
+  .pred-panel-inner{ overflow:hidden; border-top:1px solid var(--border-soft); background:var(--surface-2); padding:16px; }
   .pred-shared{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--border-soft); }
   @media (max-width:980px){
     .pred-row-main{ grid-template-columns:1fr 1fr; }
@@ -5362,11 +5373,49 @@ function predModelDetail(m){
   if(m.type==='cpm') return `${money(m.rate)}/${pmFmtCompact(m.per)}${m.capEnabled?', cap '+pmFmtCompact(m.cap):''}${m.basePayEnabled?' +'+money(m.basePay)+' base':''}`;
   return `${m.tiers.length} tier${m.tiers.length===1?'':'s'}${m.basePayEnabled?' +'+money(m.basePay)+' base':''}`;
 }
+// Flat pays the same amount the instant a video clears the minimum requirement — views past that
+// don't change anything, so showing the payout "at Expected views" (a much higher number you set
+// for CPM/Milestones' sake) reads as if Flat cared about views too, which it doesn't. Its own
+// Minimum view requirement is the actually-relevant number: real report — a $20 flat/300-minimum
+// brand showed "at 3,000 views, pays $20," and got read as a bug because 3,000 wasn't 300.
+function predResultReferenceViews(p){
+  return p.model.type==='flat' ? (Number(p.viewRequirement)||0) : (Number(p.expectedViews)||0);
+}
+// A genuinely-correct $0 (below the first real payout step) still looks exactly like a broken
+// calculation with no explanation attached — spells out why instead of leaving it to look stuck.
+function predResultHint(p, payout){
+  if(payout > 0) return '';
+  const views = predResultReferenceViews(p);
+  if(p.model.type==='cpm'){
+    if(views < (Number(p.model.minViews)||0)) return ` — below this rate's ${Number(p.model.minViews).toLocaleString()}-view minimum`;
+    if(views < Number(p.model.per)) return ` — Expected views hasn't reached the first ${pmFmtCompact(p.model.per)}-view step yet`;
+  }
+  if(p.model.type==='milestones' && p.model.tiers.length){
+    const lowest = [...p.model.tiers].sort((a,b)=>a.views-b.views)[0];
+    if(views < lowest.views) return ` — Expected views hasn't reached the first tier (${lowest.views.toLocaleString()})`;
+  }
+  return '';
+}
+function predResultLineHtml(p){
+  const refViews = predResultReferenceViews(p);
+  const payout = predictionPayoutPerHit(p);
+  const refNote = p.model.type==='flat' ? ' (its minimum view requirement)' : '';
+  return `At <span data-pred-views>${refViews.toLocaleString()}</span> views${refNote}, one hit video pays <b class="mono" style="color:var(--accent);" data-pred-result>${money(payout)}</b><span data-pred-hint>${predResultHint(p, payout)}</span>`;
+}
 
+// A paused real brand's row stays in storage (its cadence/rate/model config is worth keeping for
+// whenever it's reactivated) but never shows here — this is a scenario planner for brands you're
+// actually running, not a place inactive ones linger. Only gated on the real brand's own active/
+// paused status, not on this row's own "Include" toggle — that's a separate, independent decision
+// for a brand that IS active but you want left out of this particular scenario.
+function predVisibleRows(){
+  return DATA.predictionBrands.filter(p => p.hypothetical || brandById(p.brandId)?.status!=='paused');
+}
 function renderPredictions(){
   ensurePredictionSeed();
   const totals = predictionTotals();
-  const includedN = DATA.predictionBrands.filter(p=>p.included).length;
+  const visible = predVisibleRows();
+  const includedN = visible.filter(p=>p.included).length;
   return `
     <div class="page-head">
       <div><h2>Predictions</h2><div class="sub">What you'd earn if you kept this exact pace, per brand — same payout-model math as everywhere else, applied to a hypothetical or planned cadence instead of what's actually been tracked.</div></div>
@@ -5381,10 +5430,10 @@ function renderPredictions(){
 
     <div class="section-title" style="margin-top:0; display:flex; align-items:center; justify-content:space-between;">
       <span>Brands in this scenario</span>
-      <span class="hint" id="predIncludedCount">${includedN} of ${DATA.predictionBrands.length} included</span>
+      <span class="hint" id="predIncludedCount">${includedN} of ${visible.length} included</span>
     </div>
 
-    <div id="predRows">${DATA.predictionBrands.map(predRowTemplate).join('')}</div>
+    <div id="predRows">${visible.map(predRowTemplate).join('')}</div>
 
     <button class="btn btn-ghost" id="predAddHypothetical" type="button" style="width:100%; margin-top:4px;">+ Add a hypothetical brand</button>
 
@@ -5431,9 +5480,10 @@ function predRowTemplate(p){
 
       <div>
         <span class="pred-fl">Payout model</span>
-        <button type="button" class="pred-model-btn" data-action="toggle-panel">
+        <button type="button" class="pred-model-btn ${isOpen?'open':''}" data-action="toggle-panel">
           <span class="pmb-type" data-readout="modelType">${predModelLabel(p.model)}</span>
           <span class="pmb-detail" data-readout="modelDetail">${predModelDetail(p.model)}</span>
+          <span class="pmb-chevron"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg></span>
         </button>
       </div>
 
@@ -5443,10 +5493,25 @@ function predRowTemplate(p){
         ${p.hypothetical ? `<button class="btn btn-ghost btn-sm" data-action="remove" type="button" style="padding:2px 0; text-decoration:underline;">Remove</button>` : ''}
       </div>
     </div>
-    <div class="pred-panel ${isOpen?'open':''}" id="predPanel_${p.id}"></div>
+    <div class="pred-panel ${isOpen?'open':''}" id="predPanelOuter_${p.id}"><div class="pred-panel-inner" id="predPanel_${p.id}"></div></div>
   </div>`;
 }
 
+// Patches the hit-rate pills/slider/readout in place after switching Auto/Manual — direct DOM,
+// not renderPredRows(), for the same reason the toggle-panel handler is: this brand's row might
+// have its payout-model panel open, and a full re-render would tear that down.
+function updateHitRateDisplay(id){
+  const p = DATA.predictionBrands.find(x=>x.id===id);
+  const rowEl = document.querySelector(`.pred-row[data-pred-id="${id}"]`);
+  if(!p || !rowEl) return;
+  const eff = predictionEffectiveHitRate(p);
+  rowEl.querySelector('[data-action="hr-auto"]')?.classList.toggle('active', p.hitRateMode==='auto');
+  rowEl.querySelector('[data-action="hr-manual"]')?.classList.toggle('active', p.hitRateMode==='manual');
+  const slider = rowEl.querySelector('[data-field="manualHitRate"]');
+  slider.disabled = p.hitRateMode==='auto';
+  slider.value = eff;
+  rowEl.querySelector('[data-readout="hitRate"]').innerHTML = `${eff}%${p.hitRateMode==='auto' ? ' <span class="pred-hr-auto-tag">· real, last 30d</span>' : ''}`;
+}
 function updatePredSummary(id){
   const p = DATA.predictionBrands.find(x=>x.id===id);
   const rowEl = document.querySelector(`.pred-row[data-pred-id="${id}"]`);
@@ -5458,8 +5523,10 @@ function updatePredSummary(id){
   const monthly = predictionBrandDaily(p)*30;
   monthlyEl.firstChild.textContent = money(monthly);
   monthlyEl.classList.toggle('zero', monthly===0);
-  const resultEl = rowEl.querySelector('[data-pred-result]');
-  if(resultEl) resultEl.textContent = money(predictionPayoutPerHit(p));
+  // Whole line, not just the dollar figure — the reference views number and the "why is this
+  // zero" hint both depend on the model type too, so all three need to stay in lockstep.
+  const resultLineEl = rowEl.querySelector('[data-pred-result-line]');
+  if(resultLineEl) resultLineEl.innerHTML = predResultLineHtml(p);
   renderPredTotals();
   saveData();
 }
@@ -5472,9 +5539,10 @@ function renderPredTotals(){
   cells[1].textContent = money(totals.weekly);
   cells[2].textContent = money(totals.monthly);
   cells[3].textContent = money(totals.yearly);
-  const includedN = DATA.predictionBrands.filter(p=>p.included).length;
+  const visible = predVisibleRows();
+  const includedN = visible.filter(p=>p.included).length;
   const countEl = document.getElementById('predIncludedCount');
-  if(countEl) countEl.textContent = `${includedN} of ${DATA.predictionBrands.length} included`;
+  if(countEl) countEl.textContent = `${includedN} of ${visible.length} included`;
 }
 
 function mountPredPanel(id){
@@ -5490,12 +5558,11 @@ function mountPredPanel(id){
       <div class="field"><label>Expected views (typical video)</label><input type="number" min="0" step="1000" data-shared="expectedViews" value="${p.expectedViews}"/></div>
     </div>
     <div id="predModelMount_${id}"></div>
-    <div class="hint" style="margin-top:12px;">At <span data-pred-views>${Number(p.expectedViews).toLocaleString()}</span> views, one hit video pays <b class="mono" style="color:var(--accent);" data-pred-result>${money(predictionPayoutPerHit(p))}</b></div>
+    <div class="hint" style="margin-top:12px;" data-pred-result-line>${predResultLineHtml(p)}</div>
   `;
   panel.querySelectorAll('[data-shared]').forEach(el => el.addEventListener('input', () => {
     const key = el.dataset.shared;
     p[key] = key==='eligibilityWindowDays' ? Number(el.value) : (Number(el.value)||0);
-    if(key==='expectedViews') panel.querySelector('[data-pred-views]').textContent = Number(p.expectedViews).toLocaleString();
     updatePredSummary(id);
   }));
   const mount = document.getElementById('predModelMount_'+id);
@@ -5509,8 +5576,14 @@ function mountPredPanel(id){
 function renderPredRows(){
   const container = document.getElementById('predRows');
   if(!container) return;
-  container.innerHTML = DATA.predictionBrands.map(predRowTemplate).join('');
-  DATA.predictionBrands.forEach(p => { if(PRED_OPEN_PANELS.has(p.id)) mountPredPanel(p.id); });
+  const visible = predVisibleRows();
+  container.innerHTML = visible.map(predRowTemplate).join('');
+  visible.forEach(p => {
+    if(!PRED_OPEN_PANELS.has(p.id)) return;
+    mountPredPanel(p.id);
+    const outer = document.getElementById('predPanelOuter_'+p.id);
+    if(outer) outer.dataset.mounted = '1';
+  });
   wirePredictionRows();
 }
 
@@ -5536,14 +5609,27 @@ function wirePredictionRows(){
     });
     const hrAuto = rowEl.querySelector('[data-action="hr-auto"]');
     const hrManual = rowEl.querySelector('[data-action="hr-manual"]');
-    if(hrAuto) hrAuto.addEventListener('click', () => { p.hitRateMode='auto'; renderPredRows(); updatePredSummary(id); });
-    if(hrManual) hrManual.addEventListener('click', () => { p.hitRateMode='manual'; renderPredRows(); updatePredSummary(id); });
+    // Direct DOM patch, not renderPredRows() — a full re-render would tear down and rebuild this
+    // row's payout-model panel every time, losing whatever the real editor was mid-showing (e.g.
+    // a half-built Milestones tier list) if it happened to be open. Same reasoning as the panel's
+    // own toggle below.
+    if(hrAuto) hrAuto.addEventListener('click', () => { p.hitRateMode='auto'; updateHitRateDisplay(id); updatePredSummary(id); });
+    if(hrManual) hrManual.addEventListener('click', () => { p.hitRateMode='manual'; updateHitRateDisplay(id); updatePredSummary(id); });
     rowEl.querySelector('[data-field="included"]').addEventListener('change', e => { p.included = e.target.checked; updatePredSummary(id); });
     const nameInput = rowEl.querySelector('[data-field="name"]');
     if(nameInput) nameInput.addEventListener('input', e => { p.name = e.target.value; saveData(); });
-    rowEl.querySelector('[data-action="toggle-panel"]').addEventListener('click', () => {
-      if(PRED_OPEN_PANELS.has(id)) PRED_OPEN_PANELS.delete(id); else PRED_OPEN_PANELS.add(id);
-      renderPredRows();
+    // Direct class toggle on an element that's continuously in the DOM, not a re-render — see the
+    // CSS comment on .pred-panel for why this is what actually makes the animation play, and lazy-
+    // mounts the real payout-model editor into it the first time it's opened, once, so reopening
+    // it later doesn't reset whatever was being edited inside.
+    const modelBtn = rowEl.querySelector('[data-action="toggle-panel"]');
+    const panelOuter = document.getElementById('predPanelOuter_'+id);
+    modelBtn.addEventListener('click', () => {
+      const nowOpen = !PRED_OPEN_PANELS.has(id);
+      if(nowOpen) PRED_OPEN_PANELS.add(id); else PRED_OPEN_PANELS.delete(id);
+      panelOuter.classList.toggle('open', nowOpen);
+      modelBtn.classList.toggle('open', nowOpen);
+      if(nowOpen && !panelOuter.dataset.mounted){ mountPredPanel(id); panelOuter.dataset.mounted = '1'; }
     });
     const removeBtn = rowEl.querySelector('[data-action="remove"]');
     if(removeBtn) removeBtn.addEventListener('click', () => {
@@ -5558,7 +5644,12 @@ function wirePredictionRows(){
 function wirePredictions(){
   if(!document.getElementById('predRows')) return;
   wirePredictionRows();
-  DATA.predictionBrands.forEach(p => { if(PRED_OPEN_PANELS.has(p.id)) mountPredPanel(p.id); });
+  DATA.predictionBrands.forEach(p => {
+    if(!PRED_OPEN_PANELS.has(p.id)) return;
+    mountPredPanel(p.id);
+    const outer = document.getElementById('predPanelOuter_'+p.id);
+    if(outer) outer.dataset.mounted = '1';
+  });
   const addBtn = document.getElementById('predAddHypothetical');
   if(addBtn) addBtn.addEventListener('click', () => {
     const id = uid('pb_');
@@ -6813,6 +6904,12 @@ function predictionPayoutPerHit(p){
 }
 function predictionBrandDaily(p){
   if(!p.included) return 0;
+  // A paused real brand never counts, even if this row's own Include flag is still stored true
+  // from before it was paused — see predVisibleRows' comment for why the row itself stays around.
+  if(!p.hypothetical){
+    const brand = brandById(p.brandId);
+    if(!brand || brand.status==='paused') return 0;
+  }
   const hits = (Number(p.videosPerDay)||0) * (predictionEffectiveHitRate(p)/100);
   return hits * predictionPayoutPerHit(p);
 }
