@@ -2549,11 +2549,17 @@ function earnedDate(c){
 function buildBuckets(range){
   const now = new Date();
   let bucketType, count;
+  // All of these are rolling windows ending today, not calendar-anchored — "Month" used to reset
+  // to just the current calendar month-to-date, which meant it could show almost nothing right
+  // after the 1st (a real complaint: everything looking like it suddenly dropped to zero on the
+  // new month, not because anything changed, just because the window did). "3/6/12 months" had
+  // the milder version of the same issue (calendar months, so a chunk of the current one was
+  // always partial). All five ranges now mean exactly what their label says: the last N days.
   if(range==='week'){ bucketType='day'; count=7; }
-  else if(range==='month'){ bucketType='day'; count = now.getDate(); } // calendar month to date, like Week is calendar-week to date
-  else if(range==='3m'){ bucketType='month'; count=3; }
-  else if(range==='6m'){ bucketType='month'; count=6; }
-  else if(range==='12m'){ bucketType='month'; count=12; }
+  else if(range==='month'){ bucketType='day'; count=30; }
+  else if(range==='3m'){ bucketType='day'; count=90; }
+  else if(range==='6m'){ bucketType='day'; count=180; }
+  else if(range==='12m'){ bucketType='day'; count=365; }
   else {
     bucketType='month';
     // "All time" has to span every real source of history, not just manual Content — that used to
