@@ -889,6 +889,46 @@
      actually fills whatever room it's given — a 14" laptop and a 27" monitor each get all twelve
      columns spread across their own full width, not a fixed pixel layout with a gap or a scrollbar. */
   .brand-cmp-table{ table-layout:fixed; min-width:920px; }
+
+  /* ---------------- predictions (scenario planner) ---------------- */
+  .pred-totals{ display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:var(--border-soft); border:1px solid var(--border-soft); border-radius:var(--radius); overflow:hidden; margin-bottom:22px; }
+  .pred-total-cell{ background:var(--surface); padding:16px 18px; }
+  .pred-total-cell .ptl{ font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:var(--text-faint); margin-bottom:6px; }
+  .pred-total-cell .ptv{ font-size:22px; font-weight:700; color:var(--fx-green); font-family:'IBM Plex Mono',monospace; }
+  .pred-row{ background:var(--surface); border:1px solid var(--border-soft); border-radius:10px; margin-bottom:10px; overflow:hidden; }
+  .pred-row.excluded{ opacity:.42; }
+  .pred-row.hypothetical{ border-style:dashed; }
+  .pred-row-main{ padding:14px 16px; display:grid; grid-template-columns:1.3fr .8fr .9fr 1.4fr 1fr auto; gap:14px; align-items:center; }
+  .pred-name-col{ display:flex; align-items:center; gap:9px; min-width:0; }
+  .pred-name-col .pn-text{ font-size:13.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pred-fl{ font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--text-faint); display:block; margin-bottom:5px; }
+  .pred-stepper{ display:flex; align-items:center; gap:8px; }
+  .pred-stepper button{ width:24px; height:24px; border-radius:6px; border:1px solid var(--border); background:var(--surface-2); color:var(--text-dim); cursor:pointer; }
+  .pred-stepper .pst-val{ font-family:'IBM Plex Mono',monospace; font-size:13.5px; font-weight:600; min-width:26px; text-align:center; }
+  .pred-hr-pills{ display:flex; gap:3px; }
+  .pred-hr-pill{ font-size:9px; font-weight:700; text-transform:uppercase; padding:2px 6px; border-radius:100px; border:1px solid var(--border); background:var(--surface-2); color:var(--text-faint); cursor:pointer; }
+  .pred-hr-pill.active{ background:var(--accent-bg); border-color:var(--accent-dim); color:var(--accent); }
+  .pred-row input[type="range"]{ -webkit-appearance:none; width:100%; height:4px; border-radius:2px; background:var(--border); outline:none; margin:7px 0 3px; }
+  .pred-row input[type="range"]::-webkit-slider-thumb{ -webkit-appearance:none; width:13px; height:13px; border-radius:50%; background:var(--accent); cursor:pointer; border:2px solid var(--surface); }
+  .pred-row input[type="range"]:disabled{ opacity:.4; }
+  .pred-hr-readout{ font-family:'IBM Plex Mono',monospace; font-size:12.5px; font-weight:600; }
+  .pred-hr-auto-tag{ font-size:9.5px; color:var(--text-faint); }
+  .pred-model-btn{ display:flex; flex-direction:column; gap:2px; background:var(--surface-2); border:1px solid var(--border); border-radius:7px; padding:6px 10px; cursor:pointer; text-align:left; width:100%; }
+  .pred-model-btn:hover{ border-color:var(--accent-dim); }
+  .pred-model-btn .pmb-type{ font-size:12px; font-weight:600; }
+  .pred-model-btn .pmb-detail{ font-size:10.5px; color:var(--text-faint); font-family:'IBM Plex Mono',monospace; }
+  .pred-tail{ display:flex; flex-direction:column; align-items:flex-end; gap:6px; }
+  .pred-monthly{ font-family:'IBM Plex Mono',monospace; font-size:14.5px; font-weight:700; color:var(--fx-green); text-align:right; }
+  .pred-monthly.zero{ color:var(--text-faint); }
+  .pred-include-toggle{ display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-faint); cursor:pointer; white-space:nowrap; }
+  .pred-panel{ display:none; border-top:1px solid var(--border-soft); background:var(--surface-2); padding:16px; }
+  .pred-panel.open{ display:block; }
+  .pred-shared{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--border-soft); }
+  @media (max-width:980px){
+    .pred-row-main{ grid-template-columns:1fr 1fr; }
+    .pred-totals{ grid-template-columns:repeat(2,1fr); }
+    .pred-shared{ grid-template-columns:1fr; }
+  }
 </style>
 </head>
 <body>
@@ -1204,6 +1244,7 @@ async function loadData(){
   if(!DATA.content) DATA.content = [];
   if(!DATA.payments) DATA.payments = [];
   if(!DATA.tasks) DATA.tasks = [];
+  if(!DATA.predictionBrands) DATA.predictionBrands = [];
   if(CLOUD_MODE){
     // Push this device's local copy up FIRST, then pull the merged cloud state back down — never
     // pull-without-push-first. Once migrated, Supabase is treated as the source of truth on load
@@ -1401,11 +1442,17 @@ async function pruneDeletedRows(table, currentIds){
 // Push-only, never-prune upsert of local DATA to Supabase — the safe half of "push-then-pull,
 // never push-with-prune" (see migrateToCloud()'s comment for the full reasoning). Used both by
 // migrateToCloud() itself and by loadData() on every load, before it trusts the cloud copy.
+// The whole prediction row (see PREDICTION_BRANDS' declaration for the shape) round-trips as one
+// JSONB blob — same reasoning as brands.brief: the shape genuinely varies (Flat vs CPM vs
+// Milestones, hypothetical rows carrying their own name/color vs. real ones just referencing
+// brandId) enough that a fixed set of typed columns would need a migration every time this grows.
+function predictionToSupabaseRow(p){ return { id: p.id, data: p }; }
 async function pushLocalToCloud(){
   await upsertRows('brands', DATA.brands.map(brandToSupabaseRow), 'id');
   await upsertRows('manual_content', DATA.content.map(contentToSupabaseRow), 'id');
   await upsertRows('manual_tasks', DATA.tasks.map(taskToSupabaseRow), 'id');
   await upsertRows('manual_payments', DATA.payments.map(paymentToSupabaseRow), 'id');
+  await upsertRows('manual_predictions', DATA.predictionBrands.map(predictionToSupabaseRow), 'id');
 }
 let SYNC_IN_FLIGHT = false;
 async function syncToSupabase(){
@@ -1416,6 +1463,7 @@ async function syncToSupabase(){
     await pruneDeletedRows('manual_content', new Set(DATA.content.map(c=>c.id)));
     await pruneDeletedRows('manual_tasks', new Set(DATA.tasks.map(t=>t.id)));
     await pruneDeletedRows('manual_payments', new Set(DATA.payments.map(p=>p.id)));
+    await pruneDeletedRows('manual_predictions', new Set(DATA.predictionBrands.map(p=>p.id)));
     // brands are deliberately never pruned here — a brand removed from the manual list may still
     // have real automated-tracking history (tracked_videos) tied to it in Supabase; deleting the
     // row would orphan or destroy that. Removing a brand locally just leaves its backend row behind, harmlessly.
@@ -1430,13 +1478,14 @@ async function syncToSupabase(){
   }
 }
 async function loadFromSupabase(){
-  const [brandsRes, contentRes, tasksRes, paymentsRes] = await Promise.all([
+  const [brandsRes, contentRes, tasksRes, paymentsRes, predictionsRes] = await Promise.all([
     fetch(`${SUPABASE_URL}/rest/v1/brands?select=id,name,status,color,notes,brief`, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }),
     fetch(`${SUPABASE_URL}/rest/v1/manual_content?select=*`, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }),
     fetch(`${SUPABASE_URL}/rest/v1/manual_tasks?select=*`, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }),
     fetch(`${SUPABASE_URL}/rest/v1/manual_payments?select=*`, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }),
+    fetch(`${SUPABASE_URL}/rest/v1/manual_predictions?select=*`, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }),
   ]);
-  const [brandsRows, contentRows, tasksRows, paymentsRows] = await Promise.all([brandsRes.json(), contentRes.json(), tasksRes.json(), paymentsRes.json()]);
+  const [brandsRows, contentRows, tasksRows, paymentsRows, predictionsRows] = await Promise.all([brandsRes.json(), contentRes.json(), tasksRes.json(), paymentsRes.json(), predictionsRes.json()]);
   // a brand's own id IS its Supabase id once in cloud mode — supabaseBrandId is set equal to it
   // so the "Connected accounts" section (renderBrandConnections) treats it as already linked
   DATA.brands = (brandsRows||[]).map(b => ({ id: b.id, name: b.name, status: b.status || 'active', color: b.color || SWATCHES[0], notes: b.notes || '', brief: b.brief || null, supabaseBrandId: b.id }));
@@ -1453,6 +1502,11 @@ async function loadFromSupabase(){
   DATA.payments = (paymentsRows||[]).map(p => ({
     id: p.id, brandId: p.brand_id, amount: Number(p.amount)||0, cpmBonus: Number(p.cpm_bonus)||0, date: p.date, note: p.note || '', createdAt: p.created_at,
   }));
+  // Array.isArray guard (not just ||[]) — unlike the other tables here, manual_predictions is new
+  // enough that a device pulling before the migration's been run gets back a PostgREST error
+  // object, not an empty array; ||[] alone wouldn't catch that and .map() on it would throw,
+  // taking every other table in this same Promise.all down with it.
+  DATA.predictionBrands = Array.isArray(predictionsRows) ? predictionsRows.map(p => p.data) : [];
 }
 // One-time switch-over: uploads whatever's in this browser's local storage to Supabase and
 // flips CLOUD_MODE on. Any brand id that predates this feature (the short uid() format, not a
@@ -1486,6 +1540,7 @@ async function migrateToCloud(){
       DATA.content.forEach(c => { if(c.brandId && idMap[c.brandId]) c.brandId = idMap[c.brandId]; });
       DATA.tasks.forEach(t => { if(t.brandId && idMap[t.brandId]) t.brandId = idMap[t.brandId]; });
       DATA.payments.forEach(p => { if(p.brandId && idMap[p.brandId]) p.brandId = idMap[p.brandId]; });
+      DATA.predictionBrands.forEach(p => { if(p.brandId && idMap[p.brandId]) p.brandId = idMap[p.brandId]; });
     }
     DATA.brands.forEach(b => { b.supabaseBrandId = b.id; });
     await pushLocalToCloud();
@@ -3477,7 +3532,7 @@ function setMobileNavOpen(open){
 // below can reuse the exact same view-switch logic instead of duplicating it.
 function goToView(id){
   VIEW = id; ACTIVE_BRAND_FILTER = null;
-  if((VIEW==='trackedContent' || VIEW==='contentAnalytics' || VIEW==='briefs') && TRACKED_CONTENT_DATA===null && !TRACKED_CONTENT_LOADING){ loadTrackedContent(); return; }
+  if((VIEW==='trackedContent' || VIEW==='contentAnalytics' || VIEW==='briefs' || VIEW==='predictions') && TRACKED_CONTENT_DATA===null && !TRACKED_CONTENT_LOADING){ loadTrackedContent(); return; }
   if(VIEW==='dashboard'){ renderWithChartEnter(); return; }
   render();
 }
@@ -3495,6 +3550,7 @@ const NAV_ITEMS = [
   {id:'tasks', label:'Tasks'},
   {id:'brands', label:'Brands'},
   {id:'briefs', label:'Briefs'},
+  {id:'predictions', label:'Predictions'},
   {id:'payments', label:'Payments'},
   {id:'settings', label:'Settings'},
 ];
@@ -3556,6 +3612,7 @@ function renderView(){
   if(VIEW==='tasks') return renderTasks();
   if(VIEW==='brands') return renderBrands();
   if(VIEW==='briefs') return renderBriefs();
+  if(VIEW==='predictions') return renderPredictions();
   if(VIEW==='payments') return renderPayments();
   if(VIEW==='settings') return renderSettings();
   return '';
@@ -4082,6 +4139,24 @@ function renderTrackedContent(){
 }
 
 /* ---------------- dashboard ---------------- */
+// A read-only summary of the Predictions tab's own totals — dashed border and a "Projected" pin
+// so it never reads as real, already-earned money next to Earned/Received/Outstanding. All actual
+// configuration (which brands count, their cadence/rate/hit-rate assumptions) happens on the
+// Predictions tab itself; this card is a glance-and-click-through, not a second picker UI.
+function renderPredictedCard(){
+  ensurePredictionSeed(); // so the card has real numbers even before the Predictions tab's ever been opened
+  const totals = predictionTotals();
+  const includedN = DATA.predictionBrands.filter(p=>p.included).length;
+  return `
+    <div class="card" style="border-style:dashed; border-color:var(--accent-dim); position:relative; cursor:pointer;" data-goto-predictions title="Open Predictions to adjust this">
+      <span style="position:absolute; top:-9px; right:14px; font-family:'IBM Plex Mono',monospace; font-size:9.5px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; color:var(--accent); background:var(--surface); padding:0 6px;">Projected</span>
+      <div class="label">Predicted — Next month</div>
+      <div class="big mono fx-green">${money(totals.monthly)}</div>
+      <div class="foot">at current pace, ${includedN} brand${includedN===1?'':'s'} · Configure →</div>
+    </div>
+  `;
+}
+
 function renderDashboard(){
   const t = allTotals();
   const bounds = rangeBounds(DASH_RANGE);
@@ -4133,6 +4208,7 @@ function renderDashboard(){
         <div class="big mono" style="color:var(--text-dim)">${money(t.pending)}</div>
         <div class="foot">Not published yet, or requirement not confirmed</div>
       </div>
+      ${renderPredictedCard()}
     </div>
 
     <div class="section-title" style="margin-top:0;">Expiring soon</div>
@@ -5275,6 +5351,229 @@ function subOneDayUTC(iso){
   const dt = new Date(Date.UTC(y, m-1, d));
   dt.setUTCDate(dt.getUTCDate() - 1);
   return dt.toISOString().slice(0,10);
+}
+
+/* ---------------- predictions page ---------------- */
+let PRED_OPEN_PANELS = new Set();
+
+function predModelLabel(m){ return m.type==='flat' ? 'Flat' : m.type==='cpm' ? 'Continuous CPM' : 'Milestone tiers'; }
+function predModelDetail(m){
+  if(m.type==='flat') return money(m.basePay)+' / video';
+  if(m.type==='cpm') return `${money(m.rate)}/${pmFmtCompact(m.per)}${m.capEnabled?', cap '+pmFmtCompact(m.cap):''}${m.basePayEnabled?' +'+money(m.basePay)+' base':''}`;
+  return `${m.tiers.length} tier${m.tiers.length===1?'':'s'}${m.basePayEnabled?' +'+money(m.basePay)+' base':''}`;
+}
+
+function renderPredictions(){
+  ensurePredictionSeed();
+  const totals = predictionTotals();
+  const includedN = DATA.predictionBrands.filter(p=>p.included).length;
+  return `
+    <div class="page-head">
+      <div><h2>Predictions</h2><div class="sub">What you'd earn if you kept this exact pace, per brand — same payout-model math as everywhere else, applied to a hypothetical or planned cadence instead of what's actually been tracked.</div></div>
+    </div>
+
+    <div class="pred-totals">
+      <div class="pred-total-cell"><div class="ptl">Daily</div><div class="ptv mono">${money(totals.daily)}</div></div>
+      <div class="pred-total-cell"><div class="ptl">Weekly</div><div class="ptv mono">${money(totals.weekly)}</div></div>
+      <div class="pred-total-cell"><div class="ptl">Monthly</div><div class="ptv mono">${money(totals.monthly)}</div></div>
+      <div class="pred-total-cell"><div class="ptl">Yearly</div><div class="ptv mono">${money(totals.yearly)}</div></div>
+    </div>
+
+    <div class="section-title" style="margin-top:0; display:flex; align-items:center; justify-content:space-between;">
+      <span>Brands in this scenario</span>
+      <span class="hint" id="predIncludedCount">${includedN} of ${DATA.predictionBrands.length} included</span>
+    </div>
+
+    <div id="predRows">${DATA.predictionBrands.map(predRowTemplate).join('')}</div>
+
+    <button class="btn btn-ghost" id="predAddHypothetical" type="button" style="width:100%; margin-top:4px;">+ Add a hypothetical brand</button>
+
+    <div class="hint" style="margin-top:14px; line-height:1.6;">Unticking Include dims a brand without losing its numbers — a real brand stays here to switch back on any time. A hypothetical brand (dashed border) has no real account behind it, so Remove is its only way to go away for good. Hit rate is "Auto" by default for any brand with real tracking history — the last 30 real days, same fact Brand Comparison's Hit rate column reads — switch to Manual to test a different rate instead.</div>
+  `;
+}
+
+function predRowTemplate(p){
+  const monthly = predictionBrandDaily(p)*30;
+  const name = predictionDisplayName(p);
+  const color = predictionDisplayColor(p);
+  const isOpen = PRED_OPEN_PANELS.has(p.id);
+  const eff = predictionEffectiveHitRate(p);
+  return `<div class="pred-row ${p.included?'':'excluded'} ${p.hypothetical?'hypothetical':''}" data-pred-id="${p.id}">
+    <div class="pred-row-main">
+      <div class="pred-name-col">
+        <span class="swatch" style="background:${color}"></span>
+        ${p.hypothetical
+          ? `<input class="pn-text" data-field="name" value="${escapeHtml(p.name)}" style="background:none; border:none; color:var(--text); font-family:inherit; font-weight:600; font-size:13.5px; padding:0; min-width:0;"/>`
+          : `<span class="pn-text" title="${escapeHtml(name)}">${escapeHtml(name)}</span>`}
+        ${p.hypothetical ? `<span class="tag tag-neutral" style="font-size:9px; flex-shrink:0;">Hypothetical</span>` : ''}
+      </div>
+
+      <div>
+        <span class="pred-fl">Videos / day</span>
+        <div class="pred-stepper">
+          <button type="button" data-action="dec-videos">−</button>
+          <span class="pst-val mono" data-readout="videos">${p.videosPerDay}</span>
+          <button type="button" data-action="inc-videos">+</button>
+        </div>
+      </div>
+
+      <div>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
+          <span class="pred-fl">Hit rate</span>
+          ${p.hypothetical ? '' : `<div class="pred-hr-pills">
+            <button type="button" class="pred-hr-pill ${p.hitRateMode==='auto'?'active':''}" data-action="hr-auto">Auto</button>
+            <button type="button" class="pred-hr-pill ${p.hitRateMode==='manual'?'active':''}" data-action="hr-manual">Manual</button>
+          </div>`}
+        </div>
+        <input type="range" min="0" max="100" step="5" data-field="manualHitRate" value="${eff}" ${!p.hypothetical && p.hitRateMode==='auto' ? 'disabled' : ''}/>
+        <span class="pred-hr-readout mono" data-readout="hitRate">${eff}%${!p.hypothetical && p.hitRateMode==='auto' ? ' <span class="pred-hr-auto-tag">· real, last 30d</span>' : ''}</span>
+      </div>
+
+      <div>
+        <span class="pred-fl">Payout model</span>
+        <button type="button" class="pred-model-btn" data-action="toggle-panel">
+          <span class="pmb-type" data-readout="modelType">${predModelLabel(p.model)}</span>
+          <span class="pmb-detail" data-readout="modelDetail">${predModelDetail(p.model)}</span>
+        </button>
+      </div>
+
+      <div class="pred-tail">
+        <div class="pred-monthly ${monthly===0?'zero':''}" data-readout="monthly">${money(monthly)}<span style="font-size:9.5px; color:var(--text-faint); font-weight:400; display:block;">/mo</span></div>
+        <label class="pred-include-toggle"><input type="checkbox" class="checkbox" data-field="included" ${p.included?'checked':''} style="margin:0;"/> Include</label>
+        ${p.hypothetical ? `<button class="btn btn-ghost btn-sm" data-action="remove" type="button" style="padding:2px 0; text-decoration:underline;">Remove</button>` : ''}
+      </div>
+    </div>
+    <div class="pred-panel ${isOpen?'open':''}" id="predPanel_${p.id}"></div>
+  </div>`;
+}
+
+function updatePredSummary(id){
+  const p = DATA.predictionBrands.find(x=>x.id===id);
+  const rowEl = document.querySelector(`.pred-row[data-pred-id="${id}"]`);
+  if(!p || !rowEl) return;
+  rowEl.classList.toggle('excluded', !p.included);
+  rowEl.querySelector('[data-readout="modelType"]').textContent = predModelLabel(p.model);
+  rowEl.querySelector('[data-readout="modelDetail"]').textContent = predModelDetail(p.model);
+  const monthlyEl = rowEl.querySelector('[data-readout="monthly"]');
+  const monthly = predictionBrandDaily(p)*30;
+  monthlyEl.firstChild.textContent = money(monthly);
+  monthlyEl.classList.toggle('zero', monthly===0);
+  const resultEl = rowEl.querySelector('[data-pred-result]');
+  if(resultEl) resultEl.textContent = money(predictionPayoutPerHit(p));
+  renderPredTotals();
+  saveData();
+}
+function renderPredTotals(){
+  const strip = document.querySelector('.pred-totals');
+  if(!strip) return;
+  const totals = predictionTotals();
+  const cells = strip.querySelectorAll('.pred-total-cell .ptv');
+  cells[0].textContent = money(totals.daily);
+  cells[1].textContent = money(totals.weekly);
+  cells[2].textContent = money(totals.monthly);
+  cells[3].textContent = money(totals.yearly);
+  const includedN = DATA.predictionBrands.filter(p=>p.included).length;
+  const countEl = document.getElementById('predIncludedCount');
+  if(countEl) countEl.textContent = `${includedN} of ${DATA.predictionBrands.length} included`;
+}
+
+function mountPredPanel(id){
+  const p = DATA.predictionBrands.find(x=>x.id===id);
+  const panel = document.getElementById('predPanel_'+id);
+  if(!p || !panel) return;
+  panel.innerHTML = `
+    <div class="pred-shared">
+      <div class="field"><label>Minimum view requirement</label><input type="number" min="0" step="100" data-shared="viewRequirement" value="${p.viewRequirement}"/></div>
+      <div class="field"><label>Eligibility window (days)</label><select data-shared="eligibilityWindowDays">
+        ${[7,30,60,90,180].map(d=>`<option value="${d}" ${p.eligibilityWindowDays===d?'selected':''}>${d} days</option>`).join('')}
+      </select></div>
+      <div class="field"><label>Expected views (typical video)</label><input type="number" min="0" step="1000" data-shared="expectedViews" value="${p.expectedViews}"/></div>
+    </div>
+    <div id="predModelMount_${id}"></div>
+    <div class="hint" style="margin-top:12px;">At <span data-pred-views>${Number(p.expectedViews).toLocaleString()}</span> views, one hit video pays <b class="mono" style="color:var(--accent);" data-pred-result>${money(predictionPayoutPerHit(p))}</b></div>
+  `;
+  panel.querySelectorAll('[data-shared]').forEach(el => el.addEventListener('input', () => {
+    const key = el.dataset.shared;
+    p[key] = key==='eligibilityWindowDays' ? Number(el.value) : (Number(el.value)||0);
+    if(key==='expectedViews') panel.querySelector('[data-pred-views]').textContent = Number(p.expectedViews).toLocaleString();
+    updatePredSummary(id);
+  }));
+  const mount = document.getElementById('predModelMount_'+id);
+  const conn = { base_pay: p.model.type==='flat' ? p.model.basePay : 0, view_requirement: p.viewRequirement, payout_model: p.model.type!=='flat' ? p.model : null };
+  mount.appendChild(buildPayoutModelEditor(conn, (m) => { p.model = m; updatePredSummary(id); }, {
+    cpmNote: 'This is your own scenario assumption — separate from whatever this brand\'s real payout model actually is.',
+    milestoneNote: 'This is your own scenario assumption — separate from whatever this brand\'s real payout model actually is.',
+  }));
+}
+
+function renderPredRows(){
+  const container = document.getElementById('predRows');
+  if(!container) return;
+  container.innerHTML = DATA.predictionBrands.map(predRowTemplate).join('');
+  DATA.predictionBrands.forEach(p => { if(PRED_OPEN_PANELS.has(p.id)) mountPredPanel(p.id); });
+  wirePredictionRows();
+}
+
+function wirePredictionRows(){
+  document.querySelectorAll('.pred-row').forEach(rowEl => {
+    const id = rowEl.dataset.predId;
+    const p = DATA.predictionBrands.find(x=>x.id===id);
+    if(!p) return;
+    rowEl.querySelector('[data-action="dec-videos"]').addEventListener('click', () => {
+      p.videosPerDay = Math.max(0, p.videosPerDay-1);
+      rowEl.querySelector('[data-readout="videos"]').textContent = p.videosPerDay;
+      updatePredSummary(id);
+    });
+    rowEl.querySelector('[data-action="inc-videos"]').addEventListener('click', () => {
+      p.videosPerDay = Math.min(10, p.videosPerDay+1);
+      rowEl.querySelector('[data-readout="videos"]').textContent = p.videosPerDay;
+      updatePredSummary(id);
+    });
+    rowEl.querySelector('[data-field="manualHitRate"]').addEventListener('input', e => {
+      p.manualHitRate = Number(e.target.value)||0;
+      rowEl.querySelector('[data-readout="hitRate"]').innerHTML = p.manualHitRate+'%';
+      updatePredSummary(id);
+    });
+    const hrAuto = rowEl.querySelector('[data-action="hr-auto"]');
+    const hrManual = rowEl.querySelector('[data-action="hr-manual"]');
+    if(hrAuto) hrAuto.addEventListener('click', () => { p.hitRateMode='auto'; renderPredRows(); updatePredSummary(id); });
+    if(hrManual) hrManual.addEventListener('click', () => { p.hitRateMode='manual'; renderPredRows(); updatePredSummary(id); });
+    rowEl.querySelector('[data-field="included"]').addEventListener('change', e => { p.included = e.target.checked; updatePredSummary(id); });
+    const nameInput = rowEl.querySelector('[data-field="name"]');
+    if(nameInput) nameInput.addEventListener('input', e => { p.name = e.target.value; saveData(); });
+    rowEl.querySelector('[data-action="toggle-panel"]').addEventListener('click', () => {
+      if(PRED_OPEN_PANELS.has(id)) PRED_OPEN_PANELS.delete(id); else PRED_OPEN_PANELS.add(id);
+      renderPredRows();
+    });
+    const removeBtn = rowEl.querySelector('[data-action="remove"]');
+    if(removeBtn) removeBtn.addEventListener('click', () => {
+      DATA.predictionBrands = DATA.predictionBrands.filter(x=>x.id!==id);
+      PRED_OPEN_PANELS.delete(id);
+      renderPredRows();
+      saveData();
+    });
+  });
+}
+
+function wirePredictions(){
+  if(!document.getElementById('predRows')) return;
+  wirePredictionRows();
+  DATA.predictionBrands.forEach(p => { if(PRED_OPEN_PANELS.has(p.id)) mountPredPanel(p.id); });
+  const addBtn = document.getElementById('predAddHypothetical');
+  if(addBtn) addBtn.addEventListener('click', () => {
+    const id = uid('pb_');
+    DATA.predictionBrands.push({
+      id, brandId:null, hypothetical:true, name:'New brand', color: SWATCHES[DATA.predictionBrands.length % SWATCHES.length],
+      included:true, videosPerDay:1, hitRateMode:'manual', manualHitRate:85,
+      viewRequirement:1000, eligibilityWindowDays:30, expectedViews:5000,
+      model:{ type:'flat', basePay:15 },
+    });
+    PRED_OPEN_PANELS.add(id);
+    renderPredRows();
+    saveData();
+    const el = document.querySelector(`.pred-row[data-pred-id="${id}"] [data-field="name"]`);
+    if(el){ el.focus(); el.select(); }
+  });
 }
 
 function renderBriefs(){
@@ -6475,6 +6774,84 @@ function pmModelPayoutSplitForRows(model, rows){
   }
   return { base, performance };
 }
+/* ---------------- predictions (scenario planner) ----------------
+   DATA.predictionBrands: one row per scenario brand, real or hypothetical — see
+   predictionToSupabaseRow's comment for why the whole row is one JSONB blob. A real row carries
+   brandId (a DATA.brands id) and always reads that brand's live name/color; a hypothetical row
+   has no brandId and carries its own name/color instead, since there's no real brand behind it.
+   Shape: { id, brandId, hypothetical, included, name, color, videosPerDay, hitRateMode:
+   'auto'|'manual', manualHitRate, viewRequirement, eligibilityWindowDays, expectedViews, model }.
+   model is exactly the same {type, basePay, ...} shape buildPayoutModelEditor already produces
+   everywhere else — reused as-is, not reinvented for this feature. */
+function predictionDisplayName(p){ return p.hypothetical ? p.name : (brandById(p.brandId)?.name || p.name || 'Unknown brand'); }
+function predictionDisplayColor(p){ return p.hypothetical ? p.color : (brandById(p.brandId)?.color || p.color || '#7c8fa8'); }
+// A real brand's actual hit rate over its last N days, straight from Tracked Content — the same
+// "did it clear the requirement" fact Brand Comparison's Hit rate column already uses, just
+// windowed. null (not 0%) when there's no real tracking to read yet (brand never connected) or no
+// deliverables posted in the window, so callers can fall back to the manual figure instead of
+// reporting a false 0%.
+function realHitRateForBrand(brand, lookbackDays){
+  lookbackDays = lookbackDays || 30;
+  if(!brand || !brand.supabaseBrandId || !TRACKED_CONTENT_DATA) return null;
+  const cutoff = Date.now() - lookbackDays*86400000;
+  const items = getDeliverables().filter(dv => !dv.excluded && dv.rows[0].brand_id===brand.supabaseBrandId && dv.postedAt && new Date(dv.postedAt).getTime()>=cutoff);
+  if(items.length===0) return null;
+  const hitCount = items.filter(dv=>dv.status==='hit').length;
+  return Math.round(hitCount/items.length*100);
+}
+// The rate actually used in the prediction math — manual for a hypothetical row (nothing real to
+// pull), manual when the row is explicitly set to manual, otherwise the real recent rate, falling
+// back to the manual figure if there isn't enough real history yet (never a bare 0%/undefined).
+function predictionEffectiveHitRate(p){
+  if(p.hypothetical || p.hitRateMode==='manual') return p.manualHitRate;
+  const real = realHitRateForBrand(brandById(p.brandId));
+  return real!=null ? real : p.manualHitRate;
+}
+function predictionPayoutPerHit(p){
+  const { base, performance } = pmModelPayoutSplit(p.model, Number(p.expectedViews)||0);
+  return base + performance;
+}
+function predictionBrandDaily(p){
+  if(!p.included) return 0;
+  const hits = (Number(p.videosPerDay)||0) * (predictionEffectiveHitRate(p)/100);
+  return hits * predictionPayoutPerHit(p);
+}
+function predictionTotals(){
+  const daily = DATA.predictionBrands.reduce((s,p)=>s+predictionBrandDaily(p),0);
+  return { daily, weekly: daily*7, monthly: daily*30, yearly: daily*365 };
+}
+// A brand-level default so a real brand shows up in Predictions with a reasonable starting point
+// instead of a blank $0 row — its own brief's cadence/rate if it has one, a real recent hit rate
+// if there's tracking history, expected views as a conservative 3× its view requirement (edit
+// freely; this is just a starting guess, never assumed accurate).
+function seedPredictionRowForBrand(brand){
+  const brief = brand.brief;
+  const videosPerDay = brief && brief.status==='active' ? Math.max(1, Math.round(briefWeeklyEquivalent(brief)/7)) : 1;
+  const viewRequirement = (brief && Number(brief.viewRequirement)) || 1000;
+  const eligibilityWindowDays = (brief && Number(brief.viewRequirementWindowDays)) || 30;
+  const real = realHitRateForBrand(brand);
+  return {
+    id: uid('pb_'), brandId: brand.id, hypothetical:false,
+    included: brand.status!=='paused',
+    videosPerDay, hitRateMode: real!=null ? 'auto' : 'manual', manualHitRate: real!=null ? real : 90,
+    viewRequirement, eligibilityWindowDays, expectedViews: viewRequirement*3,
+    model: { type:'flat', basePay: (brief && Number(brief.basePay)) || 0 },
+  };
+}
+// Called once per Predictions page visit — adds a seeded row for any real brand that doesn't have
+// one yet (a brand created after the last visit, or the very first time this page is opened).
+// Never touches a brand that already has a row, so edits always stick.
+function ensurePredictionSeed(){
+  let changed = false;
+  DATA.brands.forEach(b => {
+    if(!DATA.predictionBrands.some(p=>p.brandId===b.id)){
+      DATA.predictionBrands.push(seedPredictionRowForBrand(b));
+      changed = true;
+    }
+  });
+  if(changed) saveData();
+}
+
 // Samples a payout function densely across a views domain and draws it as a polyline — a CPM
 // function samples into a straight (now floored-to-steps) line, a milestone function samples
 // into a staircase, as long as the exact boundary x-values are passed in extraX so the jumps
@@ -7873,6 +8250,10 @@ function bindGlobalHandlers(){
   document.querySelectorAll('[data-ai-suggest]').forEach(el => el.addEventListener('click', () => sendAI(el.dataset.aiSuggest)));
 
   scrollAiLog();
+
+  wirePredictions();
+  const predCard = document.querySelector('[data-goto-predictions]');
+  if(predCard) predCard.addEventListener('click', () => goToView('predictions'));
 }
 
 /* ---------------- Escape closes whatever's on top ---------------- */
