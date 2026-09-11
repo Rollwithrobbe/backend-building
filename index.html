@@ -4265,7 +4265,7 @@ function emptyState(title, sub){
    dots) and show as "—", not a fabricated number. Trending/breakout and the per-video growth
    curve depend on the EXPERIMENTAL view_snapshots table having 2+ days of history for a video —
    gracefully absent (not broken) until then, same as the brand-breakdown sparkline already is. */
-let CA_STATE = { range:'30', nearMiss:false, trending:false, brand:'all', dateGroup:'overall', sort:'top', tableExpanded:false };
+let CA_STATE = { range:'30', nearMiss:false, trending:false, brand:'all', dateGroup:'overall', sort:'top', tableExpanded:false, audienceFocus:null };
 const CA_RANGES = [ {id:'7',label:'7d'}, {id:'30',label:'30d'}, {id:'60',label:'60d'}, {id:'90',label:'90d'}, {id:'9999',label:'All time'} ];
 
 // Flat solid-fill glyphs (no stroke/outline, no gradient shading) replacing 🔥/🎯 — those render
@@ -5060,21 +5060,53 @@ function caAudienceCurveSvg(series, color){
 // comparison, so switching either updates this section along with everything else. Returns ''
 // (renders nothing) rather than an empty-state block when there's no data at all yet — this is a
 // bonus section, not a core stat the page should apologize for not having.
+//
+// When the page filter is scoped to one brand there's nothing to disambiguate, so every card for
+// that brand's platforms shows as before. But with the page on "All brands" a flat grid mixing
+// every brand's platforms together reads as noise (see 2026-09-11 report), so this section gets
+// its own lightweight focus, scoped to just this section (CA_STATE.audienceFocus — separate from
+// CA_STATE.brand, which still pools everything else on the page). It defaults to whichever brand
+// currently has the biggest total audience (summed across its own platforms) — that's a stable
+// "who's your biggest audience" read that won't jump around as the range pill changes the way a
+// %-growth-based ranking would — with quick pills to switch to another brand, or back to "All".
 function renderAudienceGrowth(){
   if(!FOLLOWER_SNAPSHOTS_DATA || FOLLOWER_SNAPSHOTS_DATA.length===0) return '';
   const rangeDays = CA_STATE.range==='9999' ? 36500 : Number(CA_STATE.range);
   const linkedBrands = DATA.brands.filter(b => b.supabaseBrandId && (CA_STATE.brand==='all' || CA_STATE.brand===b.id));
-  const cards = [];
+  const allCards = [];
   linkedBrands.forEach(b => {
     ['tiktok','instagram','youtube'].forEach(platform => {
       const series = caFollowerSeries(b.supabaseBrandId, platform);
       if(series.length===0) return;
-      cards.push({ brand:b, platform, series, delta: caFollowerDelta(series, rangeDays) });
+      allCards.push({ brand:b, platform, series, delta: caFollowerDelta(series, rangeDays) });
     });
   });
-  if(cards.length===0) return '';
+  if(allCards.length===0) return '';
+
+  let cards = allCards;
+  let switcherHtml = '';
+  if(CA_STATE.brand==='all'){
+    const totalsByBrand = new Map();
+    allCards.forEach(c => totalsByBrand.set(c.brand.id, (totalsByBrand.get(c.brand.id)||0) + c.series[c.series.length-1].value));
+    const rankedBrandIds = [...totalsByBrand.keys()].sort((a,b) => totalsByBrand.get(b) - totalsByBrand.get(a));
+    let focus = CA_STATE.audienceFocus;
+    // Fall back to the top brand when nothing's been chosen yet, or the chosen one no longer has
+    // data (e.g. it was paused and dropped out of linkedBrands) — never silently show a blank set.
+    if(focus !== 'all' && (!focus || !rankedBrandIds.includes(focus))) focus = rankedBrandIds[0];
+    if(focus !== 'all') cards = allCards.filter(c => c.brand.id === focus);
+    switcherHtml = `
+      <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px;">
+        ${rankedBrandIds.map(id => {
+          const b = linkedBrands.find(x=>x.id===id);
+          return `<button class="ca-chip ${focus===id?'active':''}" data-audience-focus="${id}"><span class="swatch" style="background:${b.color}"></span>${escapeHtml(b.name)}</button>`;
+        }).join('')}
+        <button class="ca-chip ${focus==='all'?'active':''}" data-audience-focus="all">All brands</button>
+      </div>`;
+  }
+
   return `
     <div class="section-title" style="display:flex; align-items:center; gap:8px;">Audience growth</div>
+    ${switcherHtml}
     <div style="display:flex; flex-wrap:wrap; gap:14px; margin-bottom:20px;">
       ${cards.map(({brand, platform, series, delta}) => `
         <div class="card" style="min-width:220px; flex:1 1 260px;">
@@ -7731,7 +7763,7 @@ function bindGlobalHandlers(){
   const caChipTrending = document.getElementById('caChipTrending');
   if(caChipTrending) caChipTrending.addEventListener('click', () => { CA_STATE.trending = !CA_STATE.trending; render(); });
   const caClearFilters = document.getElementById('caClearFilters');
-  if(caClearFilters) caClearFilters.addEventListener('click', () => { CA_STATE.nearMiss=false; CA_STATE.trending=false; CA_STATE.brand='all'; render(); });
+  if(caClearFilters) caClearFilters.addEventListener('click', () => { CA_STATE.nearMiss=false; CA_STATE.trending=false; CA_STATE.brand='all'; CA_STATE.audienceFocus=null; render(); });
   const caBrandFilterTop = document.getElementById('caBrandFilterTop');
   if(caBrandFilterTop) caBrandFilterTop.addEventListener('change', () => { CA_STATE.brand = caBrandFilterTop.value; render(); });
   document.querySelectorAll('[data-ca-date-group]').forEach(el => el.addEventListener('click', () => { CA_STATE.dateGroup = el.dataset.caDateGroup; render(); }));
@@ -7744,6 +7776,7 @@ function bindGlobalHandlers(){
   if(caTableExpand) caTableExpand.addEventListener('click', () => { CA_STATE.tableExpanded = true; render(); });
   const caTableCollapse = document.getElementById('caTableCollapse');
   if(caTableCollapse) caTableCollapse.addEventListener('click', () => { CA_STATE.tableExpanded = false; render(); });
+  document.querySelectorAll('[data-audience-focus]').forEach(el => el.addEventListener('click', () => { CA_STATE.audienceFocus = el.dataset.audienceFocus; render(); }));
   caRenderChart(); // draws the multi-platform SVG + binds its own hover listener — no-op if #caChartSvg isn't on screen
 
   // tasks
