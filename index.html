@@ -1928,7 +1928,21 @@ function tcAmount(r){
 // once per platform. This is the single place that turns raw tracked_videos rows into "deliverable"
 // units — every dollar total in the app reads from here instead of the raw rows directly, so the
 // pay-once-whichever-platform-hits-first rule can't get out of sync between different totals.
+// Memoized for the lifetime of one render pass — same pattern as PAID_ALLOCATION_CACHE (reset in
+// render() itself). getDeliverables() re-groups and re-prices every tracked video from scratch
+// (crosspost grouping, sorting each group by views, resolving each one's payout model) with no
+// caching of its own, and gets called a couple dozen times across a single render — once per brand
+// via brandTotals, again in Brand Comparison, several of Analytics' own stat cards, the cadence
+// checks, Predictions' real-hit-rate lookup for every row. With real production volume (hundreds
+// of tracked_videos rows once a brand posts daily for a few months) that redundant recomputation
+// is exactly what was making Analytics/Predictions feel sluggish — and Predictions' live-patch
+// interactions (dragging the hit-rate slider, nudging videos/day) call it repeatedly between
+// renders too, which is safe to reuse here since nothing outside a render pass mutates
+// TRACKED_CONTENT_DATA without a render() immediately following (loadTrackedContent's own
+// reassignment included) to clear this cache first.
+let DELIVERABLES_CACHE = null;
 function getDeliverables(){
+  if(DELIVERABLES_CACHE) return DELIVERABLES_CACHE;
   if(!TRACKED_CONTENT_DATA) return [];
   const byGroup = {};
   const standalone = [];
@@ -2002,6 +2016,7 @@ function getDeliverables(){
       hitAt: hitRow ? (hitRow.hit_at || null) : null,
     });
   });
+  DELIVERABLES_CACHE = deliverables;
   return deliverables;
 }
 // ---- Alerts (bell icon) ----
@@ -3507,6 +3522,7 @@ function renderPriorityTasksWidget(topTasks){
 function render(){
   hideChartTooltip();
   PAID_ALLOCATION_CACHE = {};
+  DELIVERABLES_CACHE = null; // see getDeliverables()'s comment — invalidated every render pass
   const root = document.getElementById('root');
   try{
     root.innerHTML = `
