@@ -1398,14 +1398,14 @@ function updateStoragePill(){
 /* ---------------- cloud sync (Supabase) ----------------
    Mirrors DATA.brands/content/tasks/payments to the same Supabase project the automated
    scouting jobs use, once CLOUD_MODE is on (see migrateToCloud()). Brands are upserted with
-   only the manual-pipeline-owned columns (name/status/color/notes/brief) so the automated-
+   only the manual-pipeline-owned columns (name/status/color/notes/brief/written_off) so the automated-
    tracking columns on that same row (base_pay, youtube_channel_handle, etc.) are never
    touched by this. Content/tasks/payments are fully owned by the manual pipeline, so they're
    synced with upsert-then-prune (anything deleted locally gets deleted in Supabase too).
 ------------------------------------------------------------------------------------------- */
 function isUuid(s){ return typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s); }
 function brandToSupabaseRow(b){
-  return { id: b.id, name: b.name, status: b.status || 'active', color: b.color || null, notes: b.notes || '', brief: b.brief || null };
+  return { id: b.id, name: b.name, status: b.status || 'active', color: b.color || null, notes: b.notes || '', brief: b.brief || null, written_off: Number(b.writtenOff)||0 };
 }
 function contentToSupabaseRow(c){
   return {
@@ -1499,7 +1499,7 @@ async function loadFromSupabase(){
   const [brandsRows, contentRows, tasksRows, paymentsRows, predictionsRows] = await Promise.all([brandsRes.json(), contentRes.json(), tasksRes.json(), paymentsRes.json(), predictionsRes.json()]);
   // a brand's own id IS its Supabase id once in cloud mode — supabaseBrandId is set equal to it
   // so the "Connected accounts" section (renderBrandConnections) treats it as already linked
-  DATA.brands = (brandsRows||[]).map(b => ({ id: b.id, name: b.name, status: b.status || 'active', color: b.color || SWATCHES[0], notes: b.notes || '', brief: b.brief || null, supabaseBrandId: b.id }));
+  DATA.brands = (brandsRows||[]).map(b => ({ id: b.id, name: b.name, status: b.status || 'active', color: b.color || SWATCHES[0], notes: b.notes || '', brief: b.brief || null, writtenOff: Number(b.written_off)||0, supabaseBrandId: b.id }));
   DATA.content = (contentRows||[]).map(c => ({
     id: c.id, brandId: c.brand_id, title: c.title, basePay: Number(c.base_pay)||0, cpmBonus: Number(c.cpm_bonus)||0,
     createdAt: c.created_at, viewRequirement: c.view_requirement, viewRequirementMet: !!c.view_requirement_met,
@@ -1842,9 +1842,9 @@ function brandTotals(brandId){
   // a CPM bonus is realized the moment it's paid — you don't know the amount until the brand tells
   // you, so unlike base pay it never sits "pending" against a video; it counts straight to Earned
   const totalEarned = contentEarned + receivedCpm;
-  const outstanding = totalEarned - received;
-  // Splitting outstanding into its base/CPM pieces — algebraically, outstanding always equals
-  // contentEarned - receivedBase (the manually-logged receivedCpm above cancels itself out: it's
+  // Splitting outstanding into its base/CPM pieces — algebraically, outstanding (before any
+  // write-off below) always equals contentEarned - receivedBase (the manually-logged receivedCpm
+  // above cancels itself out: it's
   // added into totalEarned, then subtracted right back out as part of received, so it never
   // actually affects the total either way). That leaves a clean split with no double-counting:
   //   outstandingBase = the automated base-pay portion earned (now including any manually-flagged
@@ -1855,9 +1855,22 @@ function brandTotals(brandId){
   //     different "CPM" (see contentEarnedCpm's comment above) that's already fully settled the
   //     instant it's logged, never sitting outstanding regardless.
   // The two always sum to exactly `outstanding` above.
-  const outstandingBase = (contentEarned - contentEarnedCpm) - receivedBase;
-  const outstandingCpm = contentEarnedCpm;
-  return { count, contentEarned, contentEarnedCpm, totalEarned, pending, received, receivedBase, receivedCpm, outstanding, outstandingBase, outstandingCpm };
+  const outstandingBaseRaw = (contentEarned - contentEarnedCpm) - receivedBase;
+  const outstandingCpmRaw = contentEarnedCpm;
+  // A brand's own writtenOff (see toggleBrandStatus/openSettleBrandModal) is money you've formally
+  // given up on collecting — a brand that miscalculated your pay, or one you're not bothering to
+  // chase further videos/disputes from. Deliberately doesn't touch contentEarned/totalEarned
+  // above (that stays the true, tracked value of the work) or received (that stays real cash) —
+  // it only closes out Outstanding. Eats into the base-pay bucket first since that's almost always
+  // what's actually unpaid (a CPM/milestone bonus settles the instant it's paid, per receivedCpm's
+  // comment above, so there's rarely anything sitting in that bucket to forgive), spilling into
+  // the CPM bucket only if it's larger than the whole base bucket.
+  const writtenOff = Number(brand?.writtenOff)||0;
+  const outstandingBase = Math.max(0, outstandingBaseRaw - writtenOff);
+  const writeOffRemainder = Math.max(0, writtenOff - outstandingBaseRaw);
+  const outstandingCpm = Math.max(0, outstandingCpmRaw - writeOffRemainder);
+  const outstanding = outstandingBase + outstandingCpm;
+  return { count, contentEarned, contentEarnedCpm, totalEarned, pending, received, receivedBase, receivedCpm, outstanding, outstandingBase, outstandingCpm, writtenOff };
 }
 // Looks up whichever payout_briefs row (if any) covers this video's posted_at date — see that
 // table's migration comment for the full mechanism. A brand with zero rows in PAYOUT_BRIEFS_DATA
@@ -2258,16 +2271,17 @@ function allTotals(){
   // per-brand here — brandTotals(id).totalEarned is that one brand's own slice of this same
   // total, so adding both would double-count every linked brand. Received is unaffected (it's
   // Payments, which were never part of the automated total) and does need summing per brand.
-  let received = 0, manualEarned = 0;
+  let received = 0, manualEarned = 0, writtenOff = 0;
   DATA.brands.forEach(b => {
     received += brandTotals(b.id).received;
     const manual = manualEarnedForBrand(b.id);
     manualEarned += manual.base;
+    writtenOff += Number(b.writtenOff)||0;
   });
   const tc = trackedContentTotals();
   const totalEarned = tc.earned + manualEarned;
   const pending = tc.pending;
-  return { totalEarned, received, pending, outstanding: totalEarned - received, contentCount: DATA.content.length, brandCount: DATA.brands.length };
+  return { totalEarned, received, pending, writtenOff, outstanding: Math.max(0, totalEarned - received - writtenOff), contentCount: DATA.content.length, brandCount: DATA.brands.length };
 }
 function brandById(id){ return DATA.brands.find(b=>b.id===id); }
 // A manually-flagged Content item's own explicit "count this toward Earned" opt-in — see its
@@ -2975,7 +2989,7 @@ function brandComparisonRows(){
       id: b.id, name: b.name, color: b.color, status: b.status || 'active',
       count: items.length, hitRate: hitCount/items.length*100, views30d, viewsAllTime,
       avgPayout: hitCount ? bt.contentEarned/hitCount : 0, earned: bt.totalEarned, earnedCpm: bt.contentEarnedCpm, received: bt.received, outstanding: bt.outstanding,
-      outstandingBase: bt.outstandingBase, outstandingCpm: bt.outstandingCpm,
+      outstandingBase: bt.outstandingBase, outstandingCpm: bt.outstandingCpm, writtenOff: bt.writtenOff,
     });
   });
   let fallbackIdx = 0;
@@ -3063,6 +3077,7 @@ function renderBrandComparisonTable(){
   const totalReceived = sorted.reduce((s,r)=>s+r.received,0);
   const totalOutstanding = sorted.reduce((s,r)=>s+r.outstanding,0);
   const totalOutstandingCpm = sorted.reduce((s,r)=>s+(r.outstandingCpm||0),0);
+  const totalWrittenOff = sorted.reduce((s,r)=>s+(r.writtenOff||0),0);
   const collapsed = localStorage.getItem(BRAND_CMP_COLLAPSED_KEY) === '1';
   const gripSvg = dndGripSvg();
 
@@ -3121,7 +3136,7 @@ function renderBrandComparisonTable(){
           <td class="mono" style="text-align:right;">${money(r.received)}</td>
           <td class="mono out-group out-start ${r.outstandingBase>0?'fx-red':''}" style="text-align:right;">${money(r.outstandingBase)}</td>
           <td class="mono out-group ${r.outstandingCpm>0?'fx-red':''}" style="text-align:right;">${r.outstandingCpm>0 ? money(r.outstandingCpm) : '<span style="color:var(--text-faint)">—</span>'}</td>
-          <td class="mono out-group out-end ${r.outstanding>0?'fx-red':''}" style="text-align:right; font-weight:700;">${money(r.outstanding)}</td>
+          <td class="mono out-group out-end ${r.outstanding>0?'fx-red':''}" style="text-align:right; font-weight:700;">${money(r.outstanding)}${r.writtenOff>0?`<div class="mono" style="font-size:10px; color:var(--text-dim); font-weight:400; margin-top:2px;">${money(r.writtenOff)} written off</div>`:''}</td>
         </tr>`).join('')}
       </tbody>
       <tfoot>
@@ -3133,7 +3148,7 @@ function renderBrandComparisonTable(){
           <td class="mono" style="text-align:right; font-weight:700;">${money(totalReceived)}</td>
           <td class="mono out-group out-start ${(totalOutstanding-totalOutstandingCpm)>0?'fx-red':''}" style="text-align:right; font-weight:700;">${money(totalOutstanding-totalOutstandingCpm)}</td>
           <td class="mono out-group ${totalOutstandingCpm>0?'fx-red':''}" style="text-align:right; font-weight:700;">${totalOutstandingCpm>0 ? money(totalOutstandingCpm) : '<span style="color:var(--text-faint)">—</span>'}</td>
-          <td class="mono out-group out-end ${totalOutstanding>0?'fx-red':''}" style="text-align:right; font-weight:700;">${money(totalOutstanding)}</td>
+          <td class="mono out-group out-end ${totalOutstanding>0?'fx-red':''}" style="text-align:right; font-weight:700;">${money(totalOutstanding)}${totalWrittenOff>0?`<div class="mono" style="font-size:10px; color:var(--text-dim); font-weight:400; margin-top:2px;">${money(totalWrittenOff)} written off</div>`:''}</td>
         </tr>
       </tfoot>
     </table></div></div>
@@ -4212,7 +4227,7 @@ function renderDashboard(){
       <div class="card">
         <div class="label">Outstanding</div>
         <div class="big mono ${t.outstanding>0?'fx-red':''}">${money(t.outstanding)}</div>
-        <div class="foot">Earned, not yet received</div>
+        <div class="foot">${t.writtenOff>0 ? `Earned, not yet received · ${money(t.writtenOff)} written off` : 'Earned, not yet received'}</div>
       </div>
       <div class="card">
         <div class="label">Pending</div>
@@ -5289,9 +5304,27 @@ function presetDateRange(preset, customStart, customEnd){
 // just surfaced faster. The three scout-*.js jobs filter this brand out of their next run the
 // moment it's 'paused' — no separate "stop tracking" flag or table needed. Flipping back to
 // active picks tracking back up on the next scheduled run, same as if it had never stopped.
+// Pausing a brand that still shows real Outstanding money detours through the settle-balance
+// prompt first (see openSettleBrandModal) — e.g. a brand that miscalculated a payout and you've
+// decided not to chase the rest, or dispute it, or make the extra videos they're asking for.
 function toggleBrandStatus(brandId){
   const b = DATA.brands.find(x=>x.id===brandId);
   if(!b) return;
+  if(b.status==='active'){
+    const outstanding = brandTotals(brandId).outstanding;
+    if(outstanding > 0.005){
+      openSettleBrandModal(brandId, ({writeOff}) => {
+        if(writeOff>0) b.writtenOff = (Number(b.writtenOff)||0) + writeOff;
+        b.status = 'paused';
+        saveData();
+        showToast(writeOff>0
+          ? `${b.name} marked inactive — ${money(writeOff)} written off, tracking stops on the next scouting run`
+          : `${b.name} marked inactive — tracking stops on the next scouting run`);
+        render();
+      });
+      return;
+    }
+  }
   b.status = b.status==='active' ? 'paused' : 'active';
   saveData();
   showToast(b.status==='active'
@@ -5335,7 +5368,7 @@ function renderBrands(){
             <td>${b.status==='active' ? '<span class="tag tag-good">Active</span>' : '<span class="tag tag-neutral">Inactive</span>'}</td>
             <td class="mono">${t.count}</td>
             <td class="mono">${money(t.totalEarned)}</td>
-            <td class="mono" style="color:${t.outstanding>0?'var(--warn)':'var(--text-dim)'}">${money(t.outstanding)}</td>
+            <td class="mono" style="color:${t.outstanding>0?'var(--warn)':'var(--text-dim)'}">${money(t.outstanding)}${t.writtenOff>0?`<div class="mono" style="font-size:10px; color:var(--text-faint); font-weight:400; margin-top:2px;">${money(t.writtenOff)} written off</div>`:''}</td>
             <td style="white-space:nowrap;">
               <button class="btn btn-ghost btn-sm" data-toggle-brand-status="${b.id}" title="${b.status==='active' ? 'Stops automated view tracking for this brand — use when a contract ends' : 'Resumes automated view tracking for this brand'}">${b.status==='active' ? 'Set inactive' : 'Set active'}</button>
               <button class="btn btn-ghost btn-sm" data-edit-brand="${b.id}">Edit</button>
@@ -6737,6 +6770,24 @@ let MODAL_ENTER = false; // true only for the single render() call that opens a 
 // animation plays whenever a node is first created, and root.innerHTML is rebuilt on every render(),
 // so without this flag the modal would replay its pop-in every time e.g. the date picker opens inside it.
 
+// Callback to run once the "settle" modal below (pausing a brand that still shows Outstanding) is
+// resolved — receives { writeOff } (0 if the user chose "Leave outstanding"). The quick Brands-page
+// toggle (toggleBrandStatus) and the Edit-brand modal's own Save button (which may also be turning
+// a brand from active to paused) both open this same sub-modal but need to finish differently
+// afterward, so each hands in its own completion logic here rather than this modal knowing either.
+let SETTLE_BRAND_ON_RESOLVE = null;
+// Opens the settle-balance prompt for a brand that still has Outstanding money when being paused.
+// Callers should only call this when brandTotals(brandId).outstanding > 0 — see its two call sites.
+function openSettleBrandModal(brandId, onResolve){
+  const outstanding = brandTotals(brandId).outstanding;
+  MODAL_STATE = { type:'settleBrand', id:null, draft:{ brandId, outstanding, amount: outstanding } };
+  SETTLE_BRAND_ON_RESOLVE = onResolve;
+  MODAL_ENTER = true;
+  render();
+  MODAL_ENTER = false;
+  document.getElementById('overlay').classList.add('open');
+}
+
 function openModal(type, id=null){
   MODAL_STATE.type = type;
   MODAL_STATE.id = id;
@@ -6779,6 +6830,7 @@ function openModal(type, id=null){
 function closeModal(){
   document.getElementById('overlay').classList.remove('open');
   MODAL_STATE = { type:null, id:null, draft:null };
+  SETTLE_BRAND_ON_RESOLVE = null;
   render();
 }
 
@@ -6788,6 +6840,7 @@ function renderModals(){
 
 function renderModalBody(){
   if(MODAL_STATE.type==='brand') return renderBrandModal();
+  if(MODAL_STATE.type==='settleBrand') return renderSettleBrandModal();
   if(MODAL_STATE.type==='content') return renderContentModal();
   if(MODAL_STATE.type==='payment') return renderPaymentModal();
   if(MODAL_STATE.type==='task') return renderTaskModal();
@@ -7368,6 +7421,7 @@ function renderBrandModal(){
       </div>
     </div>
     <div class="field"><label>Notes</label><textarea id="f-notes" placeholder="Deal terms, contact, anything worth remembering">${escapeHtml(d.notes)}</textarea></div>
+    ${MODAL_STATE.id ? `<div class="field"><label>Written off</label><input type="number" id="f-writtenOff" value="${Number(d.writtenOff)||0}" step="0.01" min="0" /><div class="hint">Outstanding money you've formally given up on collecting from this brand — set automatically when you pause it with a balance still owed, but editable here any time (e.g. they end up paying part of it after all).</div></div>` : ''}
 
     <div class="section-title" style="margin-top:18px;">Brief</div>
     <div class="field"><label><input type="checkbox" class="checkbox" id="f-briefEnabled" ${brief?'checked':''}/> This brand has a content brief</label></div>
@@ -7434,6 +7488,27 @@ function renderBrandModal(){
     <div class="modal-actions">
       <div>${MODAL_STATE.id ? `<button class="btn btn-danger btn-sm" id="deleteBrand" type="button">Delete brand</button>` : ''}</div>
       <div class="right"><button class="btn btn-ghost" id="cancelModal" type="button">Cancel</button><button class="btn btn-primary" id="saveBrand" type="button">Save</button></div>
+    </div>
+  </div>`;
+}
+
+// Shown when pausing a brand that still has real Outstanding money — e.g. a brand that
+// miscalculated a payout, or one you're simply done chasing further videos/disputes with. Lets
+// you close the gap for good (Write off) without touching Earned or Received — see brandTotals'
+// comment on writtenOff — or leave the balance sitting there if you're still disputing it. See
+// SETTLE_BRAND_ON_RESOLVE's declaration for how the two entry points (quick Brands-page toggle,
+// Edit-brand modal Save) each finish once this resolves.
+function renderSettleBrandModal(){
+  const d = MODAL_STATE.draft;
+  const brand = brandById(d.brandId);
+  return `<div class="modal ${MODAL_ENTER?'modal-enter':''}" style="max-width:440px;">
+    <h3>Settle ${escapeHtml(brand ? brand.name : 'brand')}'s balance?</h3>
+    <div class="hint" style="margin-top:-4px;">Still shows <b class="mono" style="color:var(--warn);">${money(d.outstanding)}</b> outstanding. Write off what you're not going to collect, or leave it outstanding if you're still disputing it — either way the brand pauses.</div>
+    <div class="field" style="margin-top:14px;"><label>Amount to write off</label><input type="number" id="f-writeoffAmount" value="${d.amount}" step="0.01" min="0" /></div>
+    <div class="hint">Total earned and Received stay exactly as tracked — this only closes out what you've decided not to chase. Shows up as "written off" next to this brand, and you can adjust it later from its Edit screen.</div>
+    <div class="modal-actions">
+      <div><button class="btn btn-ghost" id="cancelModal" type="button">Cancel</button></div>
+      <div class="right" style="flex-wrap:wrap; justify-content:flex-end; row-gap:8px;"><button class="btn btn-ghost" id="settleLeaveOutstanding" type="button">Leave outstanding &amp; pause</button><button class="btn btn-primary" id="settleWriteOff" type="button">Write off &amp; pause</button></div>
     </div>
   </div>`;
 }
@@ -7940,6 +8015,8 @@ function bindGlobalHandlers(){
     d.status = document.getElementById('f-status').value;
     d.color = document.getElementById('f-color').value;
     d.notes = document.getElementById('f-notes').value;
+    const writtenOffField = document.getElementById('f-writtenOff');
+    if(writtenOffField) d.writtenOff = Math.max(0, Number(writtenOffField.value)||0);
     const briefOn = document.getElementById('f-briefEnabled').checked;
     if(briefOn){
       const platforms = Array.from(document.querySelectorAll('.f-brief-platform:checked')).map(el=>el.value);
@@ -7975,8 +8052,6 @@ function bindGlobalHandlers(){
     } else {
       d.brief = null;
     }
-    const idx = DATA.brands.findIndex(b=>b.id===d.id);
-    if(idx>=0) DATA.brands[idx]=d; else DATA.brands.push(d);
     // Used to also PATCH base_pay/view_requirement/eligibility_window_days to the linked backend
     // brand here, straight from this local brief — removed. That was a leftover from before the
     // Payout Model editor (saveTrackingRate, below on the Connected accounts section) existed to
@@ -7984,7 +8059,24 @@ function bindGlobalHandlers(){
     // is exactly how an old brief value (e.g. a stale $20 saved here while testing) could stomp a
     // rate you'd since set correctly through Briefs/the Payout Model editor. That's the single
     // source of truth for a connected brand's live rate now — this brief is cadence/quota only.
-    saveData(); closeModal();
+    const finishSaveBrand = () => {
+      const idx = DATA.brands.findIndex(b=>b.id===d.id);
+      if(idx>=0) DATA.brands[idx]=d; else DATA.brands.push(d);
+      saveData(); closeModal();
+    };
+    // Same settle-balance detour as the quick Brands-page toggle (see toggleBrandStatus) — only
+    // fires on a real active-to-paused edit with real Outstanding money still sitting on the
+    // brand as it existed before this save (a brand mid-creation has no prior state to compare).
+    const existingBrand = DATA.brands.find(b=>b.id===d.id);
+    const pausingNow = existingBrand && existingBrand.status==='active' && d.status==='paused';
+    if(pausingNow && brandTotals(d.id).outstanding > 0.005){
+      openSettleBrandModal(d.id, ({writeOff}) => {
+        if(writeOff>0) d.writtenOff = (Number(d.writtenOff)||0) + writeOff;
+        finishSaveBrand();
+      });
+      return;
+    }
+    finishSaveBrand();
   });
   const deleteBrand = document.getElementById('deleteBrand');
   if(deleteBrand) deleteBrand.addEventListener('click', () => {
@@ -8007,6 +8099,22 @@ function bindGlobalHandlers(){
         }catch(e){ console.warn('Could not remove backend brand record:', e); }
       }
     });
+  });
+
+  const settleLeaveOutstanding = document.getElementById('settleLeaveOutstanding');
+  if(settleLeaveOutstanding) settleLeaveOutstanding.addEventListener('click', () => {
+    const resolve = SETTLE_BRAND_ON_RESOLVE; SETTLE_BRAND_ON_RESOLVE = null;
+    MODAL_STATE = { type:null, id:null, draft:null };
+    if(resolve) resolve({ writeOff: 0 });
+    render();
+  });
+  const settleWriteOff = document.getElementById('settleWriteOff');
+  if(settleWriteOff) settleWriteOff.addEventListener('click', () => {
+    const amount = Math.max(0, Number(document.getElementById('f-writeoffAmount').value)||0);
+    const resolve = SETTLE_BRAND_ON_RESOLVE; SETTLE_BRAND_ON_RESOLVE = null;
+    MODAL_STATE = { type:null, id:null, draft:null };
+    if(resolve) resolve({ writeOff: amount });
+    render();
   });
 
   const provisionBackendBrand = document.getElementById('provisionBackendBrand');
